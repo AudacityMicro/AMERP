@@ -770,7 +770,11 @@ textarea:focus {
   color: #111820;
   padding: 0.45in;
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.22);
+}
+
+.packet-cover-page {
   page-break-after: always;
+  break-after: page;
 }
 
 .packet-header {
@@ -879,6 +883,11 @@ textarea:focus {
   border-bottom: 2px solid #1e4e49;
   margin-bottom: 16px;
   padding-bottom: 10px;
+}
+
+.operation-print-page {
+  break-inside: avoid-page;
+  page-break-inside: avoid;
 }
 
 .operation-print-header span {
@@ -1023,6 +1032,17 @@ textarea:focus {
     min-height: auto;
     margin: 0;
     box-shadow: none;
+    page-break-after: auto;
+    break-after: auto;
+  }
+
+  .packet-cover-page {
     page-break-after: always;
+    break-after: page;
+  }
+
+  .operation-print-page {
+    break-inside: avoid-page;
+    page-break-inside: avoid;
   }
 }

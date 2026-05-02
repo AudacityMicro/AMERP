@@ -1393,7 +1393,7 @@ function PrintPacket({ jobId }) {
         </button>
       </div>
 
-      <section className="print-page">
+      <section className="print-page packet-cover-page">
         <header className="packet-header">
           <div>
             <h1>{job.jobNumber || job.jobName || 'Untitled Job'}</h1>
