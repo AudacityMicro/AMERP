@@ -59,7 +59,15 @@ async function writeJson(filePath, data) {
   await ensureDir(path.dirname(filePath));
   const tempPath = `${filePath}.${crypto.randomUUID()}.tmp`;
   await fs.writeFile(tempPath, `${JSON.stringify(data, null, 2)}\n`, "utf8");
-  await fs.rename(tempPath, filePath);
+  try {
+    await fs.rename(tempPath, filePath);
+  } catch (error) {
+    if (!["EPERM", "EEXIST", "EBUSY"].includes(error.code)) {
+      throw error;
+    }
+    await fs.copyFile(tempPath, filePath);
+    await fs.rm(tempPath, { force: true });
+  }
 }
 
 async function readText(filePath, fallback = "") {
@@ -77,7 +85,15 @@ async function writeText(filePath, value) {
   await ensureDir(path.dirname(filePath));
   const tempPath = `${filePath}.${crypto.randomUUID()}.tmp`;
   await fs.writeFile(tempPath, value, "utf8");
-  await fs.rename(tempPath, filePath);
+  try {
+    await fs.rename(tempPath, filePath);
+  } catch (error) {
+    if (!["EPERM", "EEXIST", "EBUSY"].includes(error.code)) {
+      throw error;
+    }
+    await fs.copyFile(tempPath, filePath);
+    await fs.rm(tempPath, { force: true });
+  }
 }
 
 async function appendJsonLine(filePath, value) {

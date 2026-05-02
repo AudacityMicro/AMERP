@@ -149,6 +149,24 @@ button:hover {
   margin-bottom: 0.4rem;
 }
 
+.sidebar-heading-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  align-items: center;
+}
+
+.sidebar-heading-row .sidebar-heading {
+  margin-bottom: 0;
+}
+
+.sidebar-mini-action {
+  padding: 0.45rem 0.6rem;
+  border-radius: 10px;
+  font-size: 0.82rem;
+  min-height: 0;
+}
+
 .sidebar-section {
   display: grid;
   gap: 0.45rem;
@@ -174,6 +192,89 @@ button:hover {
   align-items: flex-start;
 }
 
+.search-grid,
+.table-wrap {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.checkbox-row {
+  display: flex;
+  gap: 0.55rem;
+  align-items: center;
+}
+
+.inline-chip-list {
+  display: flex;
+  gap: 0.55rem;
+  flex-wrap: wrap;
+}
+
+.inline-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.45rem 0.65rem;
+  border-radius: 999px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  font-size: 0.85rem;
+}
+
+.job-tools-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 0.9rem;
+}
+
+.tool-card {
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: var(--panel-2);
+  padding: 0.85rem;
+  display: grid;
+  gap: 0.8rem;
+}
+
+.tool-card-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(17, 24, 39, 0.44);
+  display: grid;
+  place-items: center;
+  padding: 1.25rem;
+  z-index: 50;
+}
+
+.dialog-panel {
+  width: min(1120px, 100%);
+  max-height: calc(100vh - 2.5rem);
+  overflow: auto;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 24px;
+  box-shadow: var(--shadow);
+  padding: 1rem;
+}
+
+.dialog-results {
+  max-height: 420px;
+  overflow: auto;
+}
+
+.dialog-pagination,
+.dialog-actions {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  align-items: center;
+  margin-top: 1rem;
+}
+
 .workspace {
   padding: 1.25rem;
   display: grid;
@@ -191,6 +292,11 @@ button:hover {
   display: flex;
   gap: 0.6rem;
   flex-wrap: wrap;
+  align-items: flex-start;
+}
+
+.top-gap {
+  margin-top: 1rem;
 }
 
 .status-banner {
@@ -253,7 +359,7 @@ button:hover {
   display: flex;
   justify-content: space-between;
   gap: 1rem;
-  align-items: center;
+  align-items: flex-start;
   margin-bottom: 1rem;
 }
 
@@ -283,6 +389,10 @@ button:hover {
 
 .form-grid {
   grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.form-grid.compact {
+  gap: 0.75rem;
 }
 
 .field {
@@ -331,7 +441,7 @@ button:hover {
 }
 
 .link-grid {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 .checklist {
@@ -421,11 +531,17 @@ button:hover {
 
 .print-page {
   width: 8.5in;
-  min-height: 11in;
+  min-height: auto;
   margin: 0 auto 1rem;
   background: white;
-  padding: 0.45in;
+  padding: 0.3in 0.35in;
   box-shadow: 0 0 18px rgba(0,0,0,0.12);
+}
+
+.print-part-block {
+  margin-top: 1rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid #d6cbb8;
 }
 
 .packet-header,
@@ -442,17 +558,21 @@ button:hover {
 }
 
 .print-field {
-  padding: 0.6rem 0.75rem;
+  padding: 0.45rem 0.55rem;
   border: 1px solid #d6cbb8;
   border-radius: 12px;
   display: grid;
   gap: 0.25rem;
 }
 
+.compact-grid {
+  gap: 0.65rem;
+}
+
 .print-table {
   width: 100%;
   border-collapse: collapse;
-  margin-top: 1rem;
+  margin-top: 0.55rem;
 }
 
 .print-table th,
@@ -462,15 +582,34 @@ button:hover {
   text-align: left;
 }
 
+.print-table.compact th,
+.print-table.compact td {
+  padding: 0.3rem 0.45rem;
+}
+
 .print-note {
-  margin-top: 1rem;
+  margin-top: 0.55rem;
+}
+
+.print-note.compact p {
+  margin: 0.2rem 0 0;
+  line-height: 1.35;
+}
+
+.print-operation-block {
+  margin-top: 0.8rem;
+  break-inside: avoid;
+}
+
+.print-operation-block h3 {
+  margin-bottom: 0.45rem;
 }
 
 .print-images {
   display: flex;
   gap: 0.5rem;
   flex-wrap: wrap;
-  margin-top: 1rem;
+  margin-top: 0.55rem;
 }
 
 .print-images img {
@@ -479,12 +618,232 @@ button:hover {
   border: 1px solid #d6cbb8;
 }
 
+.print-images.compact img {
+  max-width: 1.6in;
+  max-height: 1.1in;
+}
+
 .print-actions {
   width: 8.5in;
   margin: 0 auto 1rem;
   display: flex;
   justify-content: flex-end;
   gap: 0.5rem;
+}
+
+.materials-screen {
+  display: grid;
+  gap: 1rem;
+}
+
+.materials-hero {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  align-items: flex-start;
+  background:
+    linear-gradient(135deg, rgba(29, 107, 87, 0.96), rgba(24, 73, 61, 0.98)),
+    var(--panel);
+  color: white;
+}
+
+.materials-hero span {
+  color: rgba(255, 255, 255, 0.82);
+}
+
+.materials-hero-stats,
+.summary-metrics {
+  display: flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.materials-stat {
+  min-width: 140px;
+  padding: 0.8rem 0.9rem;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.12);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  display: grid;
+  gap: 0.2rem;
+}
+
+.materials-stat strong {
+  font-size: 1.8rem;
+}
+
+.materials-toolbar {
+  display: flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.materials-search-grid {
+  grid-template-columns: minmax(260px, 1.6fr) repeat(2, minmax(170px, 0.95fr)) minmax(180px, 1fr) repeat(3, minmax(150px, 0.85fr));
+}
+
+.materials-checkbox {
+  align-self: end;
+  min-height: 49px;
+  padding: 0.85rem 0;
+}
+
+.materials-main-grid {
+  grid-template-columns: minmax(0, 2.1fr) minmax(320px, 1fr);
+}
+
+.materials-workspace-grid {
+  grid-template-columns: minmax(0, 1.35fr) minmax(360px, 1fr);
+  align-items: start;
+}
+
+.materials-editor-stack {
+  display: grid;
+  gap: 1rem;
+}
+
+.materials-table th,
+.materials-table td,
+.detail-table th,
+.detail-table td {
+  padding: 0.75rem 0.65rem;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+}
+
+.materials-table tbody tr {
+  cursor: pointer;
+}
+
+.materials-table tbody tr:hover {
+  background: rgba(29, 107, 87, 0.06);
+}
+
+.materials-table tbody tr.selected {
+  background: rgba(29, 107, 87, 0.14);
+}
+
+.action-cell {
+  width: 1%;
+  white-space: nowrap;
+}
+
+.shape-summary-note {
+  margin-top: 0.9rem;
+  color: var(--muted);
+  font-size: 0.92rem;
+}
+
+.summary-card h4 {
+  margin: 0 0 0.75rem;
+}
+
+.summary-lines {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.summary-line {
+  margin: 0;
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.summary-line strong {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.serial-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.55rem 0.8rem;
+  border-radius: 999px;
+  background: #eef5f1;
+  border: 1px solid #b8d2c8;
+  color: #18493d;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+}
+
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.24rem 0.58rem;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-weight: 700;
+  text-transform: capitalize;
+  background: #eaf4ef;
+  color: #1b5f4d;
+}
+
+.status-pill.archived {
+  background: #f4eae6;
+  color: #8c4a39;
+}
+
+.materials-detail-grid {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.settings-grid {
+  grid-template-columns: minmax(320px, 0.95fr) minmax(0, 1.35fr);
+}
+
+.catalog-layout {
+  display: grid;
+  grid-template-columns: minmax(260px, 320px) minmax(0, 1fr);
+  gap: 1rem;
+  align-items: start;
+}
+
+.catalog-list {
+  display: grid;
+  gap: 0.65rem;
+}
+
+.catalog-alloy-row {
+  grid-template-columns: 1fr auto;
+}
+
+.library-chip-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.library-chip {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.75rem 0.9rem;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--panel-2);
+  min-width: 180px;
+}
+
+.library-chip.active {
+  border-color: #1d6b57;
+  background: #eef5f1;
+}
+
+.template-editor-block {
+  margin-top: 1rem;
+}
+
+.template-step-row {
+  grid-template-columns: 1fr auto;
+}
+
+.table-wrap.compact {
+  padding: 0;
 }
 
 @media (max-width: 1200px) {
@@ -506,6 +865,15 @@ button:hover {
   .print-two-column {
     grid-template-columns: 1fr;
   }
+
+  .materials-hero,
+  .materials-main-grid,
+  .materials-detail-grid,
+  .materials-search-grid,
+  .catalog-layout,
+  .settings-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 @media print {
@@ -521,6 +889,7 @@ button:hover {
   .print-page {
     box-shadow: none;
     margin: 0;
-    page-break-after: always;
+    width: auto;
+    padding: 0.2in 0.22in;
   }
 }

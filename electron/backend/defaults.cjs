@@ -105,7 +105,17 @@ const DEFAULT_TEMPLATES = [
 const MATERIAL_CONSTANTS = {
   traceabilityLevels: ["Standard material certs", "COC", "Full traceability"],
   attachmentCategories: ["Mill cert", "COC", "Photo", "Other"],
-  forms: ["Round bar", "Round Tube", "Sheet", "Rectangle bar", "Rectangle Tube", "Angle", "Other"]
+  forms: ["Round bar", "Round Tube", "Sheet", "Rectangle bar", "Rectangle Tube", "Angle", "Other"],
+  materialFamilies: [
+    { id: "aluminum", name: "Aluminum", alloys: ["1100", "2024-T3", "5052-H32", "6061-T6", "7075-T6"] },
+    { id: "steel", name: "Steel", alloys: ["1018", "1045", "1144", "4130", "4140", "A2", "O1"] },
+    { id: "stainless", name: "Stainless Steel", alloys: ["303", "304", "316", "17-4 PH"] },
+    { id: "brass", name: "Brass", alloys: ["260", "360"] },
+    { id: "copper", name: "Copper", alloys: ["110", "145", "Tellurium Copper"] },
+    { id: "bronze", name: "Bronze", alloys: ["932", "954"] },
+    { id: "titanium", name: "Titanium", alloys: ["Grade 2", "6Al-4V"] },
+    { id: "plastic", name: "Plastic", alloys: ["Delrin", "UHMW", "PEEK", "Nylon", "PTFE", "PVC", "Polycarbonate"] }
+  ]
 };
 
 module.exports = {

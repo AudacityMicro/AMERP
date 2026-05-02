@@ -41,6 +41,13 @@ function createWindow() {
   } else {
     mainWindow.loadFile(path.join(__dirname, "..", "dist", "index.html"));
   }
+
+  mainWindow.webContents.on("did-fail-load", (_event, errorCode, errorDescription, validatedUrl) => {
+    console.error(`[browser] did-fail-load ${errorCode} ${errorDescription} ${validatedUrl || ""}`);
+  });
+  mainWindow.webContents.on("render-process-gone", (_event, details) => {
+    console.error("[browser] render-process-gone", details);
+  });
 }
 
 app.whenReady().then(async () => {
@@ -61,6 +68,7 @@ app.whenReady().then(async () => {
   ipcMain.handle("select-data-folder", () => backend.selectDataFolder(mainWindow));
   ipcMain.handle("get-data-folder", () => backend.getDataFolder());
   ipcMain.handle("load-workspace", () => backend.loadWorkspace());
+  ipcMain.handle("save-preferences", (_event, preferences) => backend.savePreferences(preferences));
 
   ipcMain.handle("list-jobs", () => backend.listJobSummaries());
   ipcMain.handle("load-job", (_event, id, options) => backend.loadJob(id, options || {}));
@@ -76,6 +84,7 @@ app.whenReady().then(async () => {
   ipcMain.handle("archive-material", (_event, id) => backend.archiveMaterial(id));
   ipcMain.handle("generate-material-serial", () => backend.generateMaterialSerial());
   ipcMain.handle("choose-material-attachments", (_event, materialId) => backend.chooseMaterialAttachments(materialId, mainWindow));
+  ipcMain.handle("open-material-attachment", (_event, materialId, attachmentId) => backend.openMaterialAttachment(materialId, attachmentId));
 
   ipcMain.handle("list-instruments", () => backend.listInstruments());
   ipcMain.handle("load-instrument", (_event, id, options) => backend.loadInstrument(id, options || {}));

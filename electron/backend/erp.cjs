@@ -1,6 +1,6 @@
 "use strict";
 
-const { BrowserWindow, dialog } = require("electron");
+const { BrowserWindow, dialog, shell } = require("electron");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const crypto = require("node:crypto");
@@ -109,13 +109,11 @@ class ERPBackend {
       await writeJson(standardsPath, []);
     }
 
-    const preferencesPath = path.join(root, "config", "preferences.json");
-    if (!(await pathExists(preferencesPath))) {
-      await writeJson(preferencesPath, {
-        dueSoonDays: 14,
-        resultsColumns: ["serialCode", "materialType", "supplier", "traceabilityLevel", "status"],
-        lastInitializedAt: nowIso()
-      });
+    const preferencesPath = this.getPreferencesPath(root);
+    const existingPreferences = await readJson(preferencesPath, null);
+    const normalizedPreferences = this.normalizePreferences(existingPreferences || {});
+    if (!existingPreferences || JSON.stringify(existingPreferences) !== JSON.stringify(normalizedPreferences)) {
+      await writeJson(preferencesPath, normalizedPreferences);
     }
 
     const indexPath = this.getIndexPath(root);
@@ -169,6 +167,51 @@ class ERPBackend {
     return path.join(dataRoot, "cache", "search-index.json");
   }
 
+  getPreferencesPath(dataRoot) {
+    return path.join(dataRoot, "config", "preferences.json");
+  }
+
+  normalizeMaterialFamilies(materialFamilies) {
+    return (Array.isArray(materialFamilies) ? materialFamilies : [])
+      .map((family, index) => ({
+        id: safeFileName(family?.id || family?.name || `material-family-${index + 1}`),
+        name: String(family?.name || "").trim(),
+        alloys: Array.from(new Set((Array.isArray(family?.alloys) ? family.alloys : [])
+          .map((alloy) => String(alloy || "").trim())
+          .filter(Boolean)))
+      }))
+      .filter((family) => family.name);
+  }
+
+  normalizePreferences(preferences) {
+    const sourceFamilies = Array.isArray(preferences?.materialFamilies)
+      ? preferences.materialFamilies
+      : MATERIAL_CONSTANTS.materialFamilies;
+    const resultsColumns = Array.isArray(preferences?.resultsColumns) && preferences.resultsColumns.length
+      ? preferences.resultsColumns.map((column) => String(column || "").trim()).filter(Boolean)
+      : ["serialCode", "materialType", "supplier", "traceabilityLevel", "status"];
+    return {
+      dueSoonDays: Number.isFinite(Number(preferences?.dueSoonDays)) ? Number(preferences.dueSoonDays) : 14,
+      resultsColumns: Array.from(new Set(resultsColumns)),
+      materialFamilies: this.normalizeMaterialFamilies(sourceFamilies),
+      lastInitializedAt: String(preferences?.lastInitializedAt || nowIso()).trim() || nowIso()
+    };
+  }
+
+  async loadPreferences(dataRoot = null) {
+    const root = dataRoot || await this.requireDataFolder();
+    return this.normalizePreferences(await readJson(this.getPreferencesPath(root), {}));
+  }
+
+  async savePreferences(preferences) {
+    const dataRoot = await this.requireDataFolder();
+    const current = await this.loadPreferences(dataRoot);
+    const next = this.normalizePreferences({ ...current, ...(preferences || {}) });
+    await writeJson(this.getPreferencesPath(dataRoot), next);
+    await this.appendAudit("preferences_saved", "preferences", "Saved application settings.");
+    return next;
+  }
+
   getLockPath(dataRoot, kind, id) {
     return path.join(dataRoot, "locks", `${safeFileName(kind)}-${safeFileName(id)}.json`);
   }
@@ -180,8 +223,7 @@ class ERPBackend {
     const existing = await readJson(lockPath, null);
     if (existing) {
       const sameOwner = existing.owner?.hostname === owner.hostname
-        && existing.owner?.username === owner.username
-        && existing.owner?.pid === owner.pid;
+        && existing.owner?.username === owner.username;
       const fresh = existing.acquiredAt && (Date.now() - new Date(existing.acquiredAt).getTime()) < LOCK_TTL_MS;
       if (!sameOwner && fresh) {
         throw new Error(`${kind} ${id} is currently locked by ${existing.owner?.username || "another user"} on ${existing.owner?.hostname || "another machine"}.`);
@@ -219,8 +261,7 @@ class ERPBackend {
         continue;
       }
       const sameOwner = lock.owner?.hostname === owner.hostname
-        && lock.owner?.username === owner.username
-        && lock.owner?.pid === owner.pid;
+        && lock.owner?.username === owner.username;
       if (sameOwner) {
         await fs.rm(path.join(locksDir, entry.name), { force: true });
       }
@@ -372,6 +413,7 @@ class ERPBackend {
     const partsRoot = path.join(jobRoot, "parts");
     const partEntries = (await pathExists(partsRoot)) ? await fs.readdir(partsRoot, { withFileTypes: true }) : [];
     const parts = [];
+    const legacyJobTools = Array.isArray(header.tools) ? header.tools : [];
     for (const entry of partEntries) {
       if (!entry.isDirectory()) {
         continue;
@@ -397,10 +439,12 @@ class ERPBackend {
         operation.setupInstructions = operation.setupInstructions || "";
         operation.parameters = Array.isArray(operation.parameters) ? operation.parameters : [];
         operation.stepImages = Array.isArray(operation.stepImages) ? operation.stepImages : [];
+        operation.tools = Array.isArray(operation.tools) ? operation.tools.map((tool) => this.normalizeTool(tool)) : [];
         operation.requiredMaterialLots = toDisplayList(operation.requiredMaterialLots);
         operation.requiredInstruments = toDisplayList(operation.requiredInstruments);
         operation.setupTemplateRefs = toDisplayList(operation.setupTemplateRefs);
         operation.jobToolRefs = toDisplayList(operation.jobToolRefs);
+        operation.customMaterialText = String(operation.customMaterialText || "").trim();
         operations.push(operation);
       }
       operations.sort((a, b) => Number(a.sequence || 0) - Number(b.sequence || 0));
@@ -410,8 +454,24 @@ class ERPBackend {
       });
     }
     parts.sort((a, b) => String(a.partNumber || a.partName || "").localeCompare(String(b.partNumber || b.partName || "")));
+    const totalOperations = parts.reduce((sum, part) => sum + part.operations.length, 0);
+    for (const part of parts) {
+      for (const operation of part.operations) {
+        if (!operation.tools.length && legacyJobTools.length) {
+          if (operation.jobToolRefs.length) {
+            operation.tools = operation.jobToolRefs
+              .map((toolId) => legacyJobTools.find((tool) => tool.id === toolId))
+              .filter(Boolean)
+              .map((tool) => this.normalizeTool(tool));
+          } else if (totalOperations === 1) {
+            operation.tools = legacyJobTools.map((tool) => this.normalizeTool(tool));
+          }
+        }
+      }
+    }
     return {
       ...header,
+      tools: undefined,
       parts
     };
   }
@@ -432,6 +492,19 @@ class ERPBackend {
     };
   }
 
+  normalizeTool(tool) {
+    return {
+      id: tool?.id || randomId("tool"),
+      name: String(tool?.name || "").trim(),
+      diameter: String(tool?.diameter || "").trim(),
+      length: String(tool?.length || "").trim(),
+      holder: String(tool?.holder || "").trim(),
+      details: String(tool?.details || "").trim(),
+      fusionToolNumber: String(tool?.fusionToolNumber || "").trim(),
+      source: String(tool?.source || "").trim()
+    };
+  }
+
   normalizeOperation(operation, index = 0) {
     const sequence = Number(operation?.sequence || index + 1) || index + 1;
     return {
@@ -448,10 +521,12 @@ class ERPBackend {
       notes: String(operation?.notes || "").trim(),
       parameters: (Array.isArray(operation?.parameters) ? operation.parameters : []).map((item) => this.normalizeParameter(item)),
       stepImages: (Array.isArray(operation?.stepImages) ? operation.stepImages : []).map((item) => this.normalizeStepImage(item)),
+      tools: (Array.isArray(operation?.tools) ? operation.tools : []).map((item) => this.normalizeTool(item)),
       setupTemplateRefs: toDisplayList(operation?.setupTemplateRefs),
       jobToolRefs: toDisplayList(operation?.jobToolRefs),
       requiredMaterialLots: toDisplayList(operation?.requiredMaterialLots),
       requiredInstruments: toDisplayList(operation?.requiredInstruments),
+      customMaterialText: String(operation?.customMaterialText || "").trim(),
       inspectionPlan: {
         feature: String(operation?.inspectionPlan?.feature || "").trim(),
         method: String(operation?.inspectionPlan?.method || "").trim(),
@@ -510,16 +585,12 @@ class ERPBackend {
         notes: String(job?.revision?.notes || "").trim()
       },
       active: job?.active !== false,
-      tools: Array.isArray(job?.tools) ? job.tools : [],
       parts,
       createdAt: job?.createdAt || timestamp,
       updatedAt: timestamp
     };
     if (!normalized.jobNumber && !normalized.customer) {
       throw new Error("A job number or customer is required.");
-    }
-    if (!normalized.parts.length) {
-      throw new Error("Add at least one part before saving.");
     }
 
     const summary = this.summarizeJob(normalized);
@@ -661,6 +732,8 @@ class ERPBackend {
         lines.push(`- Type: ${operation.type || "-"}`);
         lines.push(`- Work Center: ${operation.workCenter || "-"}`);
         lines.push(`- Material Lots: ${operation.requiredMaterialLots.join(", ") || "-"}`);
+        lines.push(`- Other Material: ${operation.customMaterialText || "-"}`);
+        lines.push(`- Tools: ${operation.tools.map((tool) => tool.name || tool.fusionToolNumber || tool.id).join(", ") || "-"}`);
         lines.push(`- Instruments: ${operation.requiredInstruments.join(", ") || "-"}`);
         lines.push(`- Status: ${operation.status || "-"}`);
         lines.push("");
@@ -694,17 +767,22 @@ class ERPBackend {
   }
 
   buildMaterialSummary(material) {
+    const normalized = this.normalizeMaterial(material);
     return {
-      id: material.id,
-      serialCode: material.serialCode,
-      materialType: material.materialType,
-      supplier: material.supplier,
-      traceabilityLevel: material.traceabilityLevel,
-      dateReceived: material.dateReceived,
-      status: material.status || "active",
-      updatedAt: material.updatedAt || material.createdAt || "",
-      attachmentCount: Array.isArray(material.attachments) ? material.attachments.length : 0,
-      usageCount: Array.isArray(material.usageRefs) ? material.usageRefs.length : 0
+      id: normalized.id,
+      serialCode: normalized.serialCode,
+      materialType: normalized.materialType,
+      materialFamily: normalized.materialFamily,
+      materialAlloy: normalized.materialAlloy,
+      form: normalized.form,
+      dimensions: normalized.dimensions,
+      supplier: normalized.supplier,
+      traceabilityLevel: normalized.traceabilityLevel,
+      dateReceived: normalized.dateReceived,
+      status: normalized.status || "active",
+      updatedAt: normalized.updatedAt || normalized.createdAt || "",
+      attachmentCount: Array.isArray(normalized.attachments) ? normalized.attachments.length : 0,
+      usageCount: Array.isArray(normalized.usageRefs) ? normalized.usageRefs.length : 0
     };
   }
 
@@ -718,7 +796,7 @@ class ERPBackend {
     if (options.acquireLock) {
       await this.acquireLock("material", materialId, path.join(root, "material.json"));
     }
-    return material;
+    return this.normalizeMaterial(material);
   }
 
   async readSerialWordList(filename) {
@@ -744,10 +822,16 @@ class ERPBackend {
   }
 
   normalizeMaterial(material) {
+    const shapeDimensions = normalizeShapeDimensions(material?.shapeDimensions);
+    const materialFamily = String(material?.materialFamily || "").trim();
+    const materialAlloy = String(material?.materialAlloy || "").trim();
+    const legacyMaterialType = String(material?.materialType || "").trim();
     return {
       id: material?.id || randomId("material"),
       serialCode: String(material?.serialCode || "").trim(),
-      materialType: String(material?.materialType || "").trim(),
+      materialType: materialAlloy || materialFamily || legacyMaterialType,
+      materialFamily,
+      materialAlloy,
       form: String(material?.form || "").trim(),
       supplier: String(material?.supplier || "").trim(),
       dateReceived: String(material?.dateReceived || todayIso()).trim(),
@@ -755,7 +839,8 @@ class ERPBackend {
       heatNumber: String(material?.heatNumber || "").trim(),
       lotNumber: String(material?.lotNumber || "").trim(),
       materialSpec: String(material?.materialSpec || "").trim(),
-      dimensions: String(material?.dimensions || "").trim(),
+      shapeDimensions,
+      dimensions: materialDimensionsSummary(String(material?.form || "").trim(), shapeDimensions, String(material?.dimensions || "").trim()),
       traceabilityLevel: String(material?.traceabilityLevel || "").trim(),
       originalStockIdentifier: String(material?.originalStockIdentifier || "").trim(),
       customerName: String(material?.customerName || "").trim(),
@@ -765,7 +850,9 @@ class ERPBackend {
       attachments: Array.isArray(material?.attachments) ? material.attachments : [],
       jobs: Array.isArray(material?.jobs) ? material.jobs : [],
       changeLog: Array.isArray(material?.changeLog) ? material.changeLog : [],
-      usageRefs: Array.isArray(material?.usageRefs) ? material.usageRefs : []
+      usageRefs: Array.isArray(material?.usageRefs) ? material.usageRefs : [],
+      createdAt: String(material?.createdAt || "").trim(),
+      updatedAt: String(material?.updatedAt || "").trim()
     };
   }
 
@@ -776,7 +863,7 @@ class ERPBackend {
       normalized.serialCode = await this.generateMaterialSerial();
     }
     if (!normalized.materialType || !normalized.supplier) {
-      throw new Error("Material type and supplier are required.");
+      throw new Error("Material selection and supplier are required.");
     }
     const timestamp = nowIso();
     const existing = await this.loadMaterial(normalized.id);
@@ -808,7 +895,8 @@ class ERPBackend {
       "",
       `Generated: ${nowIso()}`,
       "",
-      `- Material Type: ${material.materialType || "-"}`,
+      `- Material: ${material.materialFamily || "-"}`,
+      `- Alloy: ${material.materialAlloy || material.materialType || "-"}`,
       `- Form: ${material.form || "-"}`,
       `- Supplier: ${material.supplier || "-"}`,
       `- Traceability: ${material.traceabilityLevel || "-"}`,
@@ -817,6 +905,11 @@ class ERPBackend {
       "## Notes",
       "",
       material.notes || "No notes.",
+      "",
+      "## Shape",
+      "",
+      `- Shape: ${material.form || "-"}`,
+      `- Dimensions: ${material.dimensions || "-"}`,
       "",
       "## Usage",
       ""
@@ -861,6 +954,29 @@ class ERPBackend {
       copied.push(await this.copyMaterialAttachment(materialId, sourcePath));
     }
     return copied;
+  }
+
+  async openMaterialAttachment(materialId, attachmentId) {
+    const dataRoot = await this.requireDataFolder();
+    const material = await this.loadMaterial(materialId);
+    if (!material) {
+      throw new Error(`Material not found: ${materialId}`);
+    }
+    const attachment = (material.attachments || []).find((item) => item.id === attachmentId);
+    if (!attachment) {
+      throw new Error("Attachment not found.");
+    }
+    const targetPath = attachment.storedPath
+      ? path.join(dataRoot, attachment.storedPath)
+      : attachment.originalPath;
+    if (!targetPath || !(await pathExists(targetPath))) {
+      throw new Error("Attachment file could not be found.");
+    }
+    const openError = await shell.openPath(targetPath);
+    if (openError) {
+      throw new Error(openError);
+    }
+    return true;
   }
 
   async copyMaterialAttachment(materialId, sourcePath) {
@@ -1316,14 +1432,15 @@ class ERPBackend {
 
   async loadWorkspace() {
     const dataFolder = await this.requireDataFolder();
-    const [dashboard, jobs, materials, instruments, templates, libraries, standards] = await Promise.all([
+    const [dashboard, jobs, materials, instruments, templates, libraries, standards, preferences] = await Promise.all([
       this.getDashboardState(),
       this.listJobSummaries(),
       this.listMaterials(),
       this.listInstruments(),
       this.loadTemplates(),
       this.loadLibraries(),
-      this.listStandards()
+      this.listStandards(),
+      this.loadPreferences(dataFolder)
     ]);
     return {
       dataFolder,
@@ -1334,6 +1451,7 @@ class ERPBackend {
       templates,
       libraries,
       standards,
+      preferences,
       constants: {
         material: MATERIAL_CONSTANTS,
         jobStatuses: ["Open", "In Process", "On Hold", "Complete", "Archived"],
@@ -1363,7 +1481,6 @@ class ERPBackend {
         author: "",
         notes: ""
       },
-      tools: imported.tools || [],
       parts: [
         {
           id: randomId("part"),
@@ -1384,9 +1501,11 @@ class ERPBackend {
             sequence: index + 1,
             folderName: `${String(index + 1).padStart(3, "0")}-${slugify(sheet.operation.title || "operation")}`,
             setupTemplateRefs: toDisplayList(sheet.operation.setupTemplateRefs || ["milling"]),
-            jobToolRefs: toDisplayList(sheet.operation.jobToolRefs || sheet.operation.toolIds || []),
+            tools: (sheet.operation.tools || []).map((tool) => this.normalizeTool(tool)),
+            jobToolRefs: [],
             requiredMaterialLots: [],
             requiredInstruments: [],
+            customMaterialText: "",
             inspectionPlan: sheet.operation.inspectionPlan || {
               feature: "",
               method: "",
@@ -1679,9 +1798,15 @@ class ERPBackend {
     if (result.canceled || !result.filePaths.length) {
       return null;
     }
+    const uniqueFilePaths = [...new Map(
+      result.filePaths.map((filePath) => {
+        const resolved = path.resolve(filePath);
+        return [resolved.toLowerCase(), resolved];
+      })
+    ).values()];
     const sheets = [];
     let jobTools = [];
-    for (const filePath of result.filePaths) {
+    for (const filePath of uniqueFilePaths) {
       const raw = await fs.readFile(filePath, "utf8");
       const sheet = buildSetupSheetImport(filePath, raw);
       const merged = mergeJobTools(jobTools, sheet.tools);
@@ -1693,7 +1818,7 @@ class ERPBackend {
         operation: sheet.operation
       });
     }
-    return { sheets, tools: jobTools };
+    return { sheets: dedupeImportedSheets(sheets), tools: jobTools };
   }
 
   async exportJobPdf(jobId, destinationPath) {
@@ -1747,6 +1872,10 @@ class ERPBackend {
     });
     await fs.writeFile(outputPath, pdf);
     printWindow.close();
+    const openError = await shell.openPath(outputPath);
+    if (openError) {
+      console.warn(`Unable to open exported PDF: ${openError}`);
+    }
     return outputPath;
   }
 }
@@ -1900,12 +2029,18 @@ function toolRecordFromObject(object, sourceFile) {
   const description = readField(object, ["description", "tooldescription", "comment", "comments", "name"], ["description", "comment"]);
   const type = readField(object, ["type", "tooltype"], ["type"]);
   const diameter = readField(object, ["diameter", "tooldiameter", "dia"], ["diameter"]);
-  const length = readField(object, ["stickout", "toolstickout", "length", "toollength", "overalllength", "flutelength"], ["stickout", "length", "flute"]);
-  const holder = readField(object, ["holder", "holderdescription", "holdername", "holdertype", "toolholder"], ["holder"]);
+  const length = readField(object, ["stickout", "toolstickout", "length", "toollength", "overalllength", "flutelength", "shoulderlength"], ["stickout", "length", "flute"]);
+  const holder = readField(object, ["holder", "holderdescription", "holdername", "holdertype", "holderproduct", "holderid", "toolholder"], ["holder"]);
+  const vendor = readField(object, ["vendor", "manufacturer"], ["vendor", "manufacturer"]);
+  const product = readField(object, ["product", "productid", "partnumber"], ["product", "part"]);
   const baseName = description || type || toolValue;
   if (!baseName && !toolNumber) {
     return null;
   }
+  const detailLines = [
+    vendor ? `Vendor: ${vendor}` : "",
+    product ? `Product: ${product}` : ""
+  ].filter(Boolean);
   return {
     id: crypto.randomUUID(),
     name: `${toolNumber ? `T${toolNumber} - ` : ""}${baseName || "Fusion Tool"}`,
@@ -1915,7 +2050,8 @@ function toolRecordFromObject(object, sourceFile) {
     holder,
     source: "Fusion 360",
     fusionToolNumber: toolNumber,
-    details: [`Imported from: ${sourceFile}`].join("\n")
+    details: detailLines.join("\n"),
+    importedFrom: sourceFile
   };
 }
 
@@ -1931,6 +2067,10 @@ function dedupeImportedTools(tools) {
 }
 
 function parseFusionTools(filePath, raw) {
+  const fusionHtmlTools = parseFusionHtmlTools(filePath, raw);
+  if (fusionHtmlTools.length) {
+    return fusionHtmlTools;
+  }
   const rows = rowsFromSetupSheet(filePath, raw);
   const objects = objectsFromRows(rows);
   return dedupeImportedTools(
@@ -1938,6 +2078,32 @@ function parseFusionTools(filePath, raw) {
       .map((object) => toolRecordFromObject(object, path.basename(filePath)))
       .filter(Boolean)
   );
+}
+
+function parseFusionHtmlTools(filePath, raw) {
+  const tools = [];
+  const toolRows = raw.matchAll(/<tr\b[^>]*class=["']?info["']?[^>]*>([\s\S]*?)(?=<tr\b[^>]*class=["']?space["']?)/gi);
+  for (const rowMatch of toolRows) {
+    const rowHtml = rowMatch[1];
+    const toolNumber = rowHtml.match(/<table\b[^>]*class=["']?info["']?[^>]*>\s*<tr><td><b>\s*T\s*(\d+)\s*<\/b>/i)?.[1];
+    if (!toolNumber) {
+      continue;
+    }
+    const fields = { tool: `T${toolNumber}` };
+    const pairMatches = rowHtml.matchAll(/<div\b[^>]*class=["']?description["']?[^>]*>([\s\S]*?)<\/div>\s*<div\b[^>]*class=["']?value["']?[^>]*>([\s\S]*?)<\/div>/gi);
+    for (const pairMatch of pairMatches) {
+      const key = normalizeHeader(cleanCell(pairMatch[1]).replace(/:$/, ""));
+      const value = cleanCell(pairMatch[2]);
+      if (key && value) {
+        fields[key] = value;
+      }
+    }
+    const tool = toolRecordFromObject(fields, path.basename(filePath));
+    if (tool) {
+      tools.push(tool);
+    }
+  }
+  return dedupeImportedTools(tools);
 }
 
 function extractFusionHeader(raw) {
@@ -1954,9 +2120,17 @@ function parseCycleTimeSeconds(value) {
   const hours = text.match(/(\d+(?:\.\d+)?)\s*h/i);
   const minutes = text.match(/(\d+(?:\.\d+)?)\s*m/i);
   const secondMatch = text.match(/(\d+(?:\.\d+)?)\s*s/i);
+  const colon = text.match(/(?:(\d+):)?(\d+):(\d+(?:\.\d+)?)/) || text.match(/(\d+):(\d+(?:\.\d+)?)/);
   if (hours) seconds += Number(hours[1]) * 3600;
   if (minutes) seconds += Number(minutes[1]) * 60;
   if (secondMatch) seconds += Number(secondMatch[1]);
+  if (!seconds && colon) {
+    if (colon.length === 4) {
+      seconds += Number(colon[1] || 0) * 3600 + Number(colon[2]) * 60 + Number(colon[3]);
+    } else {
+      seconds += Number(colon[1]) * 60 + Number(colon[2]);
+    }
+  }
   return seconds;
 }
 
@@ -1993,10 +2167,13 @@ function parseFusionOperationSummaries(raw) {
     }
     const toolNumber = rowHtml.match(/<b>\s*T\s*(\d+)\s*<\/b>/i)?.[1] || "";
     operations.push({
-      operationLabel: cleanCell(rowHtml.match(/Operation\s+\d+\/\d+/i)?.[0] || ""),
+      operationLabel: cleanCell(rowHtml.match(/<div\b[^>]*class=["']?value["']?[^>]*>\s*(Operation\s+\d+\/\d+)\s*<\/div>/i)?.[1] || rowHtml.match(/Operation\s+\d+\/\d+/i)?.[0] || ""),
       description: fields.Description || "",
       strategy: fields.Strategy || "",
+      wcs: fields.WCS || "",
       coolant: fields.Coolant || "",
+      maxSpindleSpeed: fields["Maximum Spindle Speed"] || "",
+      maxFeedrate: fields["Maximum Feedrate"] || "",
       cycleTime: fields["Estimated Cycle Time"] || "",
       toolNumber
     });
@@ -2004,12 +2181,35 @@ function parseFusionOperationSummaries(raw) {
   return operations;
 }
 
+function buildFusionSummaryTool(summary, sourceFile) {
+  const toolNumber = String(summary?.toolNumber || "").trim();
+  const baseName = summary?.description || summary?.operationLabel || "";
+  if (!toolNumber && !baseName) {
+    return null;
+  }
+  return {
+    id: crypto.randomUUID(),
+    name: `${toolNumber ? `T${toolNumber} - ` : ""}${baseName || "Fusion Tool"}`,
+    description: summary?.strategy || "",
+    diameter: "",
+    length: "",
+    holder: "",
+    source: "Fusion 360",
+    fusionToolNumber: toolNumber,
+    details: "",
+    importedFrom: sourceFile
+  };
+}
+
 function buildSetupSheetImport(filePath, raw) {
   const header = extractFusionHeader(raw);
-  const tools = parseFusionTools(filePath, raw);
   const operationSummaries = parseFusionOperationSummaries(raw);
-  const cycleTime = formatCycleTime(operationSummaries.reduce((sum, item) => sum + parseCycleTimeSeconds(item.cycleTime), 0));
   const source = path.basename(filePath);
+  const parsedTools = parseFusionTools(filePath, raw);
+  const tools = parsedTools.length
+    ? parsedTools
+    : dedupeImportedTools(operationSummaries.map((item) => buildFusionSummaryTool(item, source)).filter(Boolean));
+  const cycleTime = formatCycleTime(operationSummaries.reduce((sum, item) => sum + parseCycleTimeSeconds(item.cycleTime), 0));
   const toolIds = tools.map((tool) => tool.id);
   return {
     source,
@@ -2023,12 +2223,23 @@ function buildSetupSheetImport(filePath, raw) {
       workCenter: "",
       status: "Ready",
       setupInstructions: "",
-      workInstructions: operationSummaries.map((item) => [item.operationLabel, item.description, item.strategy && `Strategy: ${item.strategy}`, item.toolNumber && `T${item.toolNumber}`].filter(Boolean).join(" | ")).join("\n"),
+      workInstructions: "",
       parameters: [
         header.program ? { id: crypto.randomUUID(), label: "Program", value: header.program } : null,
         cycleTime ? { id: crypto.randomUUID(), label: "Cycle Time", value: cycleTime } : null
       ].filter(Boolean),
       stepImages: [],
+      tools: tools.map((tool) => ({
+        id: crypto.randomUUID(),
+        name: tool.name,
+        diameter: tool.diameter,
+        length: tool.length,
+        holder: tool.holder,
+        details: tool.details,
+        fusionToolNumber: tool.fusionToolNumber,
+        source: tool.source,
+        importedFrom: tool.importedFrom || source
+      })),
       setupTemplateRefs: ["milling"],
       jobToolRefs: toolIds,
       requiredMaterialLots: [],
@@ -2058,6 +2269,67 @@ function mergeJobTools(existingTools, importedTools) {
     }
   }
   return { tools, idMap };
+}
+
+function importedSheetFingerprint(sheet) {
+  const toolSignature = (sheet?.operation?.tools || [])
+    .map((tool) => [normalizeText(tool.fusionToolNumber), normalizeText(tool.name)].join(":"))
+    .sort()
+    .join("|");
+  return [
+    normalizeText(sheet?.header?.program),
+    normalizeText(sheet?.header?.documentPath),
+    normalizeText(sheet?.header?.jobDescription),
+    normalizeText(sheet?.source),
+    normalizeText(sheet?.operation?.title),
+    normalizeText(sheet?.operation?.workInstructions),
+    toolSignature
+  ].join("||");
+}
+
+function dedupeImportedSheets(sheets) {
+  const seen = new Set();
+  const deduped = [];
+  for (const sheet of sheets) {
+    const key = importedSheetFingerprint(sheet);
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    deduped.push(sheet);
+  }
+  return deduped;
+}
+
+function normalizeShapeDimensions(shapeDimensions) {
+  const entries = Object.entries(shapeDimensions || {})
+    .map(([key, value]) => [key, String(value || "").trim()])
+    .filter(([, value]) => value);
+  return Object.fromEntries(entries);
+}
+
+function materialDimensionsSummary(form, shapeDimensions, fallback = "") {
+  const dimensions = normalizeShapeDimensions(shapeDimensions);
+  const join = (...values) => values.filter(Boolean).join(" x ");
+  const prefixed = (label, value) => value ? `${label} ${value}` : "";
+  switch (form) {
+    case "Round bar":
+      return prefixed("Dia", dimensions.diameter) || fallback;
+    case "Round Tube":
+      return join(prefixed("OD", dimensions.outerDiameter), prefixed("Wall", dimensions.wallThickness)) || fallback;
+    case "Sheet":
+      return prefixed("Thickness", dimensions.thickness) || fallback;
+    case "Rectangle bar":
+      return join(prefixed("Width", dimensions.width), prefixed("Thickness", dimensions.thickness)) || fallback;
+    case "Rectangle Tube":
+      return join(prefixed("Width", dimensions.width), prefixed("Height", dimensions.height), prefixed("Wall", dimensions.wallThickness)) || fallback;
+    case "Angle":
+      return join(prefixed("Leg A", dimensions.legA), prefixed("Leg B", dimensions.legB), prefixed("Thickness", dimensions.thickness)) || fallback;
+    case "Other":
+      return dimensions.custom || fallback;
+    default:
+      return fallback;
+  }
 }
 
 module.exports = {

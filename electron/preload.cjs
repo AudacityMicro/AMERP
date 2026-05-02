@@ -6,6 +6,7 @@ contextBridge.exposeInMainWorld("amerp", {
   selectDataFolder: () => invoke("select-data-folder"),
   getDataFolder: () => invoke("get-data-folder"),
   loadWorkspace: () => invoke("load-workspace"),
+  savePreferences: (preferences) => invoke("save-preferences", preferences),
 
   listJobs: () => invoke("list-jobs"),
   loadJob: (id, options) => invoke("load-job", id, options),
@@ -21,6 +22,7 @@ contextBridge.exposeInMainWorld("amerp", {
   archiveMaterial: (id) => invoke("archive-material", id),
   generateMaterialSerial: () => invoke("generate-material-serial"),
   chooseMaterialAttachments: (materialId) => invoke("choose-material-attachments", materialId),
+  openMaterialAttachment: (materialId, attachmentId) => invoke("open-material-attachment", materialId, attachmentId),
 
   listInstruments: () => invoke("list-instruments"),
   loadInstrument: (id, options) => invoke("load-instrument", id, options),
