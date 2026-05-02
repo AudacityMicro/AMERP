@@ -1,9 +1,25 @@
 @echo off
 setlocal
 set "ROOT=%~dp0"
+set "NODE=%USERPROFILE%\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe"
 set "ELECTRON=%ROOT%node_modules\electron\dist\electron.exe"
 set "DIST=%ROOT%dist\index.html"
 set "DIST_ASSETS=%ROOT%dist\assets"
+
+if not exist "%NODE%" (
+  if exist "C:\Program Files\nodejs\node.exe" (
+    set "NODE=C:\Program Files\nodejs\node.exe"
+  ) else (
+    where node >nul 2>nul
+    if errorlevel 1 (
+      echo Node.js was not found.
+      echo Install Node.js or run from Codex after workspace dependencies are available.
+      pause
+      exit /b 1
+    )
+    set "NODE=node"
+  )
+)
 
 if not exist "%ELECTRON%" (
   echo Electron runtime was not found.
@@ -44,5 +60,5 @@ if defined NEEDS_BUILD (
 )
 
 pushd "%ROOT%"
-start "Setup Sheet Generator" "%ELECTRON%" "."
+start "AMERP" "%ELECTRON%" "."
 popd

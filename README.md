@@ -23,6 +23,22 @@ Phase 1 centers the workflow on:
 - `scripts/import_materials_sqlite.py`
   - SQLite export helper for importing legacy Materials-Database records
 
+## Local Run
+
+Preferred Windows entrypoints:
+
+- `Start-App.cmd`
+- `Start-Dev.cmd`
+- `Build-App.cmd`
+
+You can also use:
+
+- `npm start`
+- `npm run dev`
+- `npm run build`
+
+The scripts are configured to prefer a known-good Node path before falling back to `PATH`, because some Windows environments expose a broken `node` resolution.
+
 ## Canonical Data Root
 
 The selected ERP data folder is the system of record. It contains:
