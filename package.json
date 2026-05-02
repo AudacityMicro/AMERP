@@ -1,7 +1,7 @@
 {
-  "name": "setup-sheet-generator",
+  "name": "amerp",
   "version": "0.1.0",
-  "description": "Electron app for jobshop machining setup sheets and work instructions.",
+  "description": "Local-first Electron ERP for ISO9001-oriented jobshops.",
   "private": true,
   "packageManager": "pnpm@10.33.2",
   "main": "electron/main.cjs",

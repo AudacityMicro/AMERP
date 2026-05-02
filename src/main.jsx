@@ -1,259 +1,218 @@
-import React, { useEffect, useMemo, useState } from 'react';
-import { createRoot } from 'react-dom/client';
+import React, { useEffect, useState } from "react";
+import { createRoot } from "react-dom/client";
 import {
   Archive,
-  BookOpen,
   ClipboardList,
-  Copy,
+  Database,
   FileDown,
   FolderOpen,
-  ImagePlus,
+  Gauge,
+  Hammer,
+  Import,
   Library,
-  ListPlus,
-  PanelLeft,
+  Package,
   Plus,
-  Printer,
+  RefreshCcw,
   Save,
-  Settings,
-  Trash2,
+  ShieldCheck,
   Wrench,
   X
-} from 'lucide-react';
-import './styles.css';
+} from "lucide-react";
+import "./styles.css";
 
-const api = window.setupSheets;
+const api = window.amerp;
 
-const SPECIAL_LIBRARY_FIELDS = {
-  sawBlades: 'sawBladeId',
-  blastMedia: 'blastMediaId',
-  tumblingMedia: 'tumblingMediaId'
-};
-
-const today = () => new Date().toISOString().slice(0, 10);
 const nowIso = () => new Date().toISOString();
-const newId = (prefix) => `${prefix}-${crypto.randomUUID()}`;
-
-const defaultRevision = () => ({
-  number: 'A',
-  date: today(),
-  author: '',
-  notes: ''
-});
+const today = () => new Date().toISOString().slice(0, 10);
+const uid = (prefix) => `${prefix}-${crypto.randomUUID()}`;
 
 const blankJob = () => ({
-  id: newId('job'),
-  customer: '',
-  jobNumber: '',
-  jobName: '',
-  partNumber: '',
-  partName: '',
-  material: '',
-  quantity: '',
-  revision: defaultRevision(),
-  setupSheets: [],
+  id: uid("job"),
+  jobNumber: "",
+  customer: "",
+  status: "Open",
+  priority: "Normal",
+  dueDate: "",
+  notes: "",
+  revision: {
+    number: "A",
+    date: today(),
+    author: "",
+    notes: ""
+  },
   tools: [],
-  operations: [],
+  parts: [blankPart()],
   createdAt: nowIso(),
   updatedAt: nowIso()
 });
 
-const blankRecord = () => ({
-  id: newId('record'),
-  name: '',
-  description: '',
-  details: ''
+const blankPart = () => ({
+  id: uid("part"),
+  partNumber: "",
+  partName: "",
+  description: "",
+  quantity: "",
+  materialSpec: "",
+  revision: {
+    number: "A",
+    date: today(),
+    notes: ""
+  },
+  notes: "",
+  operations: [blankOperation(1)]
 });
 
-const blankParameter = () => ({
-  id: newId('parameter'),
-  label: '',
-  value: ''
+const blankOperation = (sequence = 1) => ({
+  id: uid("operation"),
+  sequence,
+  folderName: `${String(sequence).padStart(3, "0")}-operation`,
+  operationCode: `OP${String(sequence).padStart(3, "0")}`,
+  title: `Operation ${sequence}`,
+  type: "General",
+  workCenter: "",
+  status: "Ready",
+  setupInstructions: "",
+  workInstructions: "",
+  notes: "",
+  parameters: [blankParameter()],
+  stepImages: [],
+  setupTemplateRefs: [],
+  jobToolRefs: [],
+  requiredMaterialLots: [],
+  requiredInstruments: [],
+  inspectionPlan: {
+    feature: "",
+    method: "",
+    sampleSize: "",
+    frequency: "",
+    resultPlaceholderRefs: []
+  }
 });
 
-const blankStep = () => ({
-  id: newId('step'),
-  instruction: '',
-  images: []
+const blankParameter = () => ({ id: uid("parameter"), label: "", value: "" });
+
+const blankMaterial = () => ({
+  id: uid("material"),
+  serialCode: "",
+  materialType: "",
+  form: "",
+  supplier: "",
+  dateReceived: today(),
+  purchaseOrder: "",
+  heatNumber: "",
+  lotNumber: "",
+  materialSpec: "",
+  dimensions: "",
+  traceabilityLevel: "Standard material certs",
+  originalStockIdentifier: "",
+  customerName: "",
+  storageLocation: "",
+  status: "active",
+  notes: "",
+  attachments: [],
+  jobs: [],
+  changeLog: [],
+  usageRefs: []
 });
 
-const titleFromName = (name) => String(name || 'Library')
-  .replace(/([a-z])([A-Z])/g, '$1 $2')
-  .replace(/[-_]+/g, ' ')
-  .replace(/\b\w/g, (letter) => letter.toUpperCase());
-
-const libraryList = (libraries) => Object.values(libraries || {})
-  .sort((a, b) => (Number(a.order || 1000) - Number(b.order || 1000)) || String(a.label || a.name).localeCompare(String(b.label || b.name)));
-
-const defaultTemplateLibraryNames = (template) => {
-  const text = `${template?.name || ''} ${template?.category || ''} ${template?.id || ''}`.toLowerCase();
-  if (text.includes('saw')) return ['machines', 'sawBlades'];
-  if (text.includes('mill') || text.includes('turn')) return ['machines', 'fixtures'];
-  if (text.includes('drill') || text.includes('tap')) return ['machines'];
-  if (text.includes('blast')) return ['machines', 'blastMedia'];
-  if (text.includes('tumbl')) return ['machines', 'tumblingMedia'];
-  return [];
-};
-
-const templateLibraryNames = (template) => {
-  if (!template) return [];
-  if (Object.prototype.hasOwnProperty.call(template, 'libraryNames')) {
-    return [...new Set((Array.isArray(template.libraryNames) ? template.libraryNames : []).filter(Boolean))];
-  }
-  return defaultTemplateLibraryNames(template);
-};
-
-const operationLibraryNames = (operation) => {
-  if (!operation) return [];
-  if (Object.prototype.hasOwnProperty.call(operation, 'libraryNames')) {
-    return [...new Set((Array.isArray(operation.libraryNames) ? operation.libraryNames : []).filter(Boolean))];
-  }
-  return defaultTemplateLibraryNames(operation);
-};
-
-const isFixtureLibrary = (libraryOrName, libraries = {}) => {
-  const library = typeof libraryOrName === 'string' ? libraries[libraryOrName] : libraryOrName;
-  const text = `${library?.name || libraryOrName || ''} ${library?.label || ''}`.toLowerCase();
-  return text.includes('fixture');
-};
-
-const operationSelectedLibraryIds = (operation, libraryName) => {
-  const genericSelection = operation?.librarySelections?.[libraryName];
-  if (Array.isArray(genericSelection)) return genericSelection;
-  const specialField = SPECIAL_LIBRARY_FIELDS[libraryName];
-  return specialField && operation?.[specialField] ? [operation[specialField]] : [];
-};
-
-const normalizeParameter = (parameter) => ({
-  id: parameter.id || newId('parameter'),
-  label: parameter.label || '',
-  value: parameter.value || ''
+const blankInstrumentPayload = () => ({
+  instrument: {
+    instrument_id: uid("INS"),
+    tool_name: "",
+    tool_type: "",
+    manufacturer: "",
+    model: "",
+    serial_number: "",
+    measuring_range: "",
+    resolution: "",
+    accuracy: "",
+    location: "",
+    owner_department: "",
+    status: "In service",
+    notes: "",
+    date_added: today(),
+    active: true,
+    service_date: "",
+    retired_date: ""
+  },
+  calibrations: []
 });
 
-const operationFromTemplate = (template) => ({
-  id: newId('operation'),
-  templateId: template?.id || 'generic',
-  type: template?.name || 'Generic Operation',
-  title: template?.name || 'Generic Operation',
-  libraryNames: templateLibraryNames(template),
-  librarySelections: {},
-  machineId: '',
-  fixtureIds: [],
-  toolIds: [],
-  sawBladeId: '',
-  blastMediaId: '',
-  tumblingMediaId: '',
-  parameters: (template?.defaultParameters || [{ label: 'Parameter', value: '' }]).map((parameter) => ({
-    ...normalizeParameter(parameter),
-    id: newId('parameter')
-  })),
-  notes: '',
-  steps: (template?.defaultSteps || ['Document operation instructions.']).map((instruction) => ({
-    ...blankStep(),
-    instruction
-  }))
+const blankCalibration = () => ({
+  calibration_id: uid("CAL"),
+  calibration_date: today(),
+  next_due_date: "",
+  performed_by: "",
+  calibration_vendor: "",
+  standard_id: "",
+  standard_name: "",
+  standard_identifier: "",
+  standard_description: "",
+  traceability_reference: "",
+  result: "",
+  measurement_notes: "",
+  environmental_notes: "",
+  certificate_number: "",
+  attachment_path: "",
+  notes: ""
 });
 
-const recordName = (libraries, libraryName, id) => {
-  const record = libraries?.[libraryName]?.records?.find((item) => item.id === id);
-  if (!record) return '';
-  if (libraryName === 'tools' && record.length) return `${record.name} (${record.length})`;
-  return record.name || '';
-};
-
-const toolName = (tools, id) => {
-  const tool = (tools || []).find((item) => item.id === id);
-  if (!tool) return '';
-  return tool.length ? `${tool.name} (${tool.length})` : tool.name || '';
-};
-
-const operationText = (operation) => `${operation.title || ''} ${operation.type || ''} ${operation.templateId || ''}`.toLowerCase();
-const isSawingOperation = (operation) => operationText(operation).includes('saw');
-const isBlastingOperation = (operation) => operationText(operation).includes('blast');
-const isTumblingOperation = (operation) => operationText(operation).includes('tumbl');
-const isMillingOperation = (operation) => operationText(operation).includes('mill');
-const isTurningOperation = (operation) => operationText(operation).includes('turn');
-const usesToolsAndFixtures = (operation) => isMillingOperation(operation) || isTurningOperation(operation);
-
-const formatDateTime = (value) => {
-  if (!value) return '';
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return date.toLocaleString();
-};
-
-const validateJob = (job) => {
-  const errors = [];
-  if (!job.jobNumber?.trim() && !job.jobName?.trim()) {
-    errors.push('job number or job name');
-  }
-  if (!job.partNumber?.trim() && !job.partName?.trim()) {
-    errors.push('part number or part name');
-  }
-  if (!job.operations?.length) {
-    errors.push('at least one operation');
-  }
-  return errors;
-};
+const blankTemplate = () => ({
+  id: uid("template"),
+  name: "New Template",
+  category: "General",
+  libraryNames: [],
+  defaultParameters: [blankParameter()],
+  defaultSteps: ["Document operation instructions."]
+});
 
 function App() {
-  const [route, setRoute] = useState(() => window.location.hash.replace(/^#/, '') || '/');
-
-  useEffect(() => {
-    const onHashChange = () => setRoute(window.location.hash.replace(/^#/, '') || '/');
-    window.addEventListener('hashchange', onHashChange);
-    return () => window.removeEventListener('hashchange', onHashChange);
-  }, []);
-
+  const route = window.location.hash.replace(/^#/, "") || "/";
   if (!api) {
-    return (
-      <div className="fatal">
-        <h1>Setup Sheet Generator</h1>
-        <p>This app must run inside Electron so it can access the secure filesystem API.</p>
-      </div>
-    );
+    return <Fatal title="AMERP" message="Run the app inside Electron so the secure local file APIs are available." />;
   }
-
-  if (route.startsWith('/print/')) {
-    const jobId = decodeURIComponent(route.replace('/print/', '').split('?')[0]);
+  if (route.startsWith("/print/")) {
+    const jobId = decodeURIComponent(route.replace("/print/", "").split("?")[0]);
     return <PrintPacket jobId={jobId} />;
   }
-
   return <Workspace />;
 }
 
 function Workspace() {
-  const [dataFolder, setDataFolder] = useState(null);
-  const [jobs, setJobs] = useState([]);
+  const [workspace, setWorkspace] = useState(null);
+  const [view, setView] = useState("dashboard");
+  const [busy, setBusy] = useState(false);
+  const [status, setStatus] = useState("");
+
   const [selectedJobId, setSelectedJobId] = useState(null);
   const [job, setJob] = useState(null);
-  const [libraries, setLibraries] = useState({});
-  const [templates, setTemplates] = useState([]);
-  const [view, setView] = useState('jobs');
-  const [status, setStatus] = useState('');
-  const [busy, setBusy] = useState(false);
 
-  const selectedTemplate = useMemo(() => templates[0] || null, [templates]);
+  const [selectedMaterialId, setSelectedMaterialId] = useState(null);
+  const [material, setMaterial] = useState(null);
 
-  useEffect(() => {
-    refreshAll();
-  }, []);
+  const [selectedInstrumentId, setSelectedInstrumentId] = useState(null);
+  const [instrumentPayload, setInstrumentPayload] = useState(null);
 
-  const refreshAll = async () => {
+  const [selectedTemplateId, setSelectedTemplateId] = useState(null);
+
+  const showStatus = (message) => {
+    setStatus(message);
+    window.clearTimeout(showStatus.timer);
+    showStatus.timer = window.setTimeout(() => setStatus(""), 5000);
+  };
+
+  const refreshWorkspace = async (preserveSelection = true) => {
     setBusy(true);
     try {
-      const folder = await api.getDataFolder();
-      setDataFolder(folder);
-      if (!folder) return;
-      const [nextJobs, nextLibraries, nextTemplates] = await Promise.all([
-        api.listJobs(),
-        api.loadLibraries(),
-        api.loadTemplates()
-      ]);
-      setJobs(nextJobs);
-      setLibraries(nextLibraries);
-      setTemplates(nextTemplates);
-      if (!job && nextJobs[0]) {
-        await openJob(nextJobs[0].id);
+      const next = await api.loadWorkspace();
+      setWorkspace(next);
+      if (!preserveSelection) {
+        setSelectedJobId(null);
+        setSelectedMaterialId(null);
+        setSelectedInstrumentId(null);
+      }
+      if (!selectedTemplateId && next.templates?.[0]) {
+        setSelectedTemplateId(next.templates[0].id);
       }
     } catch (error) {
       showStatus(error.message || String(error));
@@ -262,131 +221,117 @@ function Workspace() {
     }
   };
 
-  const showStatus = (message) => {
-    setStatus(message);
-    window.clearTimeout(showStatus.timer);
-    showStatus.timer = window.setTimeout(() => setStatus(''), 4500);
-  };
-
-  const chooseFolder = async () => {
-    setBusy(true);
-    try {
-      const folder = await api.selectDataFolder();
-      setDataFolder(folder);
-      await refreshAll();
-      showStatus(folder ? `Using data folder: ${folder}` : 'No data folder selected.');
-    } catch (error) {
-      showStatus(error.message || String(error));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const openJob = async (id) => {
-    if (!id) return;
-    setBusy(true);
-    try {
-      const loaded = await api.loadJob(id);
-      setSelectedJobId(id);
-      setJob(loaded);
-      setView('jobs');
-    } catch (error) {
-      showStatus(error.message || String(error));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const createBlankJob = () => {
-    const nextJob = blankJob();
-    setJob(nextJob);
-    setSelectedJobId(nextJob.id);
-    setView('jobs');
-    showStatus('New blank job created.');
-  };
-
-  const createJobFromSetupSheets = async () => {
-    setBusy(true);
-    try {
-      const imported = await api.importFusionSetupSheets();
-      if (!imported?.sheets?.length) return;
-      const nextJob = blankJob();
-
-      const firstHeader = imported.sheets[0].header || {};
-      nextJob.jobNumber = firstHeader.program || '';
-      nextJob.jobName = firstHeader.jobDescription || firstHeader.documentPath || '';
-      nextJob.partName = firstHeader.documentPath || '';
-      nextJob.setupSheets = imported.sheets.map((sheet) => ({
-        source: sheet.source,
-        header: sheet.header
-      }));
-      nextJob.tools = imported.tools || [];
-      nextJob.operations = imported.sheets.map((sheet) => sheet.operation);
-      showStatus(`Created job from ${imported.sheets.length} setup sheet${imported.sheets.length === 1 ? '' : 's'} with ${(imported.tools || []).length} job tool${(imported.tools || []).length === 1 ? '' : 's'}.`);
-
-      setJob(nextJob);
-      setSelectedJobId(nextJob.id);
-      setView('jobs');
-    } catch (error) {
-      showStatus(error.message || String(error));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const duplicateJob = () => {
-    if (!job) return;
-    const nextJob = {
-      ...structuredClone(job),
-      id: newId('job'),
-      jobNumber: job.jobNumber ? `${job.jobNumber}-copy` : '',
-      jobName: job.jobName ? `${job.jobName} Copy` : '',
-      revision: { ...job.revision, date: today() },
-      createdAt: nowIso(),
-      updatedAt: nowIso()
+  useEffect(() => {
+    refreshWorkspace(false);
+    const release = () => {
+      api.releaseAllLocks().catch(() => {});
     };
-    setJob(nextJob);
-    setSelectedJobId(nextJob.id);
-    showStatus('Duplicated job. Save it to create the new JSON file.');
+    window.addEventListener("beforeunload", release);
+    return () => {
+      release();
+      window.removeEventListener("beforeunload", release);
+    };
+  }, []);
+
+  const openJob = async (jobId) => {
+    setBusy(true);
+    try {
+      if (selectedJobId && selectedJobId !== jobId) {
+        await api.releaseLock("job", selectedJobId);
+      }
+      const loaded = await api.loadJob(jobId, { acquireLock: true });
+      setSelectedJobId(jobId);
+      setJob(loaded);
+      setView("jobs");
+    } catch (error) {
+      showStatus(error.message || String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const openMaterial = async (materialId) => {
+    setBusy(true);
+    try {
+      if (selectedMaterialId && selectedMaterialId !== materialId) {
+        await api.releaseLock("material", selectedMaterialId);
+      }
+      const loaded = await api.loadMaterial(materialId, { acquireLock: true });
+      setSelectedMaterialId(materialId);
+      setMaterial(loaded);
+      setView("materials");
+    } catch (error) {
+      showStatus(error.message || String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const openInstrument = async (instrumentId) => {
+    setBusy(true);
+    try {
+      if (selectedInstrumentId && selectedInstrumentId !== instrumentId) {
+        await api.releaseLock("instrument", selectedInstrumentId);
+      }
+      const loaded = await api.loadInstrument(instrumentId, { acquireLock: true });
+      setSelectedInstrumentId(instrumentId);
+      setInstrumentPayload(loaded);
+      setView("metrology");
+    } catch (error) {
+      showStatus(error.message || String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const createNewJob = () => {
+    if (selectedJobId) api.releaseLock("job", selectedJobId).catch(() => {});
+    setSelectedJobId(null);
+    setJob(blankJob());
+    setView("jobs");
+  };
+
+  const createJobFromFusion = async () => {
+    setBusy(true);
+    try {
+      const imported = await api.createJobFromFusion();
+      if (!imported) return;
+      if (selectedJobId) await api.releaseLock("job", selectedJobId);
+      setSelectedJobId(null);
+      setJob(imported);
+      setView("jobs");
+      showStatus("Imported Fusion setup sheets into a new job draft.");
+    } catch (error) {
+      showStatus(error.message || String(error));
+    } finally {
+      setBusy(false);
+    }
   };
 
   const saveCurrentJob = async () => {
-    if (!job) return null;
-    const validationErrors = validateJob(job);
-    if (validationErrors.length) {
-      showStatus(`Add ${validationErrors.join(', ')} before saving.`);
-      return null;
-    }
-
+    if (!job) return;
     setBusy(true);
     try {
       const saved = await api.saveJob(job);
       setJob(saved);
       setSelectedJobId(saved.id);
-      setJobs(await api.listJobs());
-      showStatus('Job saved.');
-      return saved;
+      await refreshWorkspace();
+      showStatus("Job saved.");
     } catch (error) {
       showStatus(error.message || String(error));
-      return null;
     } finally {
       setBusy(false);
     }
   };
 
-  const deleteCurrentJob = async () => {
-    if (!job) return;
-    const label = job.jobNumber || job.jobName || 'this job';
-    if (!window.confirm(`Delete ${label}? This removes its JSON file and copied images.`)) return;
+  const archiveCurrentJob = async () => {
+    if (!selectedJobId) return;
     setBusy(true);
     try {
-      await api.deleteJob(job.id);
-      const nextJobs = await api.listJobs();
-      setJobs(nextJobs);
-      setJob(null);
-      setSelectedJobId(null);
-      if (nextJobs[0]) await openJob(nextJobs[0].id);
-      showStatus('Job deleted.');
+      const saved = await api.archiveJob(selectedJobId);
+      setJob(saved);
+      await refreshWorkspace();
+      showStatus("Job archived.");
     } catch (error) {
       showStatus(error.message || String(error));
     } finally {
@@ -394,22 +339,23 @@ function Workspace() {
     }
   };
 
-  const addOperation = (template = selectedTemplate) => {
-    const nextOperation = operationFromTemplate(template);
-    setJob((current) => ({
-      ...(current || blankJob()),
-      operations: [...(current?.operations || []), nextOperation]
-    }));
+  const createNewMaterial = async () => {
+    if (selectedMaterialId) api.releaseLock("material", selectedMaterialId).catch(() => {});
+    const serial = await api.generateMaterialSerial().catch(() => "");
+    setSelectedMaterialId(null);
+    setMaterial({ ...blankMaterial(), serialCode: serial });
+    setView("materials");
   };
 
-  const exportPdf = async () => {
-    if (!job) return;
-    const saved = await saveCurrentJob();
-    if (!saved) return;
+  const saveCurrentMaterial = async () => {
+    if (!material) return;
     setBusy(true);
     try {
-      const outputPath = await api.exportJobPdf(saved.id);
-      if (outputPath) showStatus(`PDF exported: ${outputPath}`);
+      const saved = await api.saveMaterial(material);
+      setMaterial(saved);
+      setSelectedMaterialId(saved.id);
+      await refreshWorkspace();
+      showStatus("Material saved.");
     } catch (error) {
       showStatus(error.message || String(error));
     } finally {
@@ -417,120 +363,190 @@ function Workspace() {
     }
   };
 
-  const openPrintPreview = async () => {
-    if (!job) return;
-    const saved = await saveCurrentJob();
-    if (!saved) return;
-    window.location.hash = `/print/${encodeURIComponent(saved.id)}`;
+  const addMaterialAttachments = async () => {
+    if (!material?.id) {
+      showStatus("Save the material once before adding attachments.");
+      return;
+    }
+    setBusy(true);
+    try {
+      const attachments = await api.chooseMaterialAttachments(material.id);
+      setMaterial((current) => ({
+        ...current,
+        attachments: [...(current.attachments || []), ...attachments]
+      }));
+      showStatus(`Added ${attachments.length} attachment${attachments.length === 1 ? "" : "s"}.`);
+    } catch (error) {
+      showStatus(error.message || String(error));
+    } finally {
+      setBusy(false);
+    }
   };
 
-  if (!dataFolder) {
-    return (
-      <div className="setup-screen">
-        <div className="setup-panel">
-          <div className="setup-icon"><FolderOpen size={34} /></div>
-          <h1>Choose a Data Folder</h1>
-          <p>Setup Sheet Generator stores jobs, reusable libraries, templates, and step images as JSON files in a folder you choose.</p>
-          <button className="primary-button" onClick={chooseFolder} disabled={busy}>
-            <FolderOpen size={18} />
-            Select Folder
-          </button>
-          {status && <p className="status-text">{status}</p>}
-        </div>
-      </div>
-    );
+  const archiveCurrentMaterial = async () => {
+    if (!selectedMaterialId) return;
+    setBusy(true);
+    try {
+      const saved = await api.archiveMaterial(selectedMaterialId);
+      setMaterial(saved);
+      await refreshWorkspace();
+      showStatus("Material archived.");
+    } catch (error) {
+      showStatus(error.message || String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const createNewInstrument = () => {
+    if (selectedInstrumentId) api.releaseLock("instrument", selectedInstrumentId).catch(() => {});
+    setSelectedInstrumentId(null);
+    setInstrumentPayload(blankInstrumentPayload());
+    setView("metrology");
+  };
+
+  const saveCurrentInstrument = async () => {
+    if (!instrumentPayload) return;
+    setBusy(true);
+    try {
+      const saved = await api.saveInstrument(instrumentPayload);
+      setInstrumentPayload(saved);
+      setSelectedInstrumentId(saved.instrument.instrument_id);
+      await refreshWorkspace();
+      showStatus("Instrument saved.");
+    } catch (error) {
+      showStatus(error.message || String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const archiveCurrentInstrument = async () => {
+    if (!selectedInstrumentId) return;
+    setBusy(true);
+    try {
+      const saved = await api.archiveInstrument(selectedInstrumentId);
+      setInstrumentPayload(saved);
+      await refreshWorkspace();
+      showStatus("Instrument archived.");
+    } catch (error) {
+      showStatus(error.message || String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const runImport = async (type) => {
+    setBusy(true);
+    try {
+      const result = type === "setup"
+        ? await api.importLegacySetup()
+        : type === "materials"
+          ? await api.importLegacyMaterials()
+          : await api.importLegacyMetrology();
+      if (!result) return;
+      await refreshWorkspace();
+      showStatus(`Import complete: ${JSON.stringify(result)}`);
+    } catch (error) {
+      showStatus(error.message || String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const rebuildIndex = async () => {
+    setBusy(true);
+    try {
+      await api.rebuildIndex();
+      await refreshWorkspace();
+      showStatus("Search index rebuilt.");
+    } catch (error) {
+      showStatus(error.message || String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!workspace) {
+    return <LoadingScreen message="Loading AMERP workspace..." />;
   }
+
+  const selectedTemplate = workspace.templates.find((item) => item.id === selectedTemplateId) || workspace.templates[0] || null;
 
   return (
     <div className="app-shell">
       <aside className="sidebar">
         <div className="brand-row">
-          <ClipboardList size={24} />
+          <Hammer size={26} />
           <div>
-            <h1>Setup Sheets</h1>
-            <span>Process docs</span>
+            <h1>AMERP</h1>
+            <span>Jobshop ERP</span>
           </div>
         </div>
 
-        <div className="folder-chip" title={dataFolder}>
+        <button className="folder-pill" onClick={() => api.selectDataFolder().then(() => refreshWorkspace(false))}>
           <FolderOpen size={16} />
-          <span>{dataFolder}</span>
-        </div>
+          <span title={workspace.dataFolder}>{workspace.dataFolder}</span>
+        </button>
 
-        <nav className="nav-tabs" aria-label="Primary">
-          <button className={view === 'jobs' ? 'active' : ''} onClick={() => setView('jobs')} title="Jobs">
-            <PanelLeft size={17} />
-            Jobs
-          </button>
-          <button className={view === 'libraries' ? 'active' : ''} onClick={() => setView('libraries')} title="Libraries">
-            <Library size={17} />
-            Libraries
-          </button>
-          <button className={view === 'templates' ? 'active' : ''} onClick={() => setView('templates')} title="Templates">
-            <BookOpen size={17} />
-            Templates
-          </button>
+        <nav className="nav-tabs">
+          <NavButton icon={ClipboardList} active={view === "dashboard"} label="Dashboard" onClick={() => setView("dashboard")} />
+          <NavButton icon={Package} active={view === "jobs"} label="Jobs" onClick={() => setView("jobs")} />
+          <NavButton icon={Database} active={view === "materials"} label="Materials" onClick={() => setView("materials")} />
+          <NavButton icon={Gauge} active={view === "metrology"} label="Metrology" onClick={() => setView("metrology")} />
+          <NavButton icon={Library} active={view === "templates"} label="Templates" onClick={() => setView("templates")} />
+          <NavButton icon={Import} active={view === "imports"} label="Imports" onClick={() => setView("imports")} />
         </nav>
 
-        <button className="sidebar-action" onClick={createJobFromSetupSheets}>
-          <Plus size={17} />
-          New From Setup Sheets
-        </button>
+        <div className="sidebar-section">
+          <div className="sidebar-heading">Quick Actions</div>
+          <button className="sidebar-action" onClick={createNewJob}><Plus size={15} /> New Job</button>
+          <button className="sidebar-action" onClick={createJobFromFusion}><Plus size={15} /> New From Fusion</button>
+          <button className="sidebar-action" onClick={createNewMaterial}><Plus size={15} /> New Material</button>
+          <button className="sidebar-action" onClick={createNewInstrument}><Plus size={15} /> New Instrument</button>
+        </div>
 
-        <button className="sidebar-secondary-action" onClick={createBlankJob}>
-          <Plus size={17} />
-          New Blank Job
-        </button>
-
-        <div className="job-list">
-          {jobs.length === 0 && <div className="empty-list">No saved jobs yet.</div>}
-          {jobs.map((item) => (
-            <button
-              key={item.id}
-              className={`job-list-item ${selectedJobId === item.id ? 'selected' : ''}`}
-              onClick={() => openJob(item.id)}
-            >
-              <strong>{item.jobNumber || item.jobName || 'Untitled Job'}</strong>
-              <span>{item.partNumber || item.partName || item.customer || 'No part details'}</span>
-              <small>Rev {item.revision || '-'} {formatDateTime(item.updatedAt)}</small>
-            </button>
-          ))}
+        <div className="sidebar-section">
+          <div className="sidebar-heading">Jobs</div>
+          <div className="record-list">
+            {workspace.jobs.map((item) => (
+              <button key={item.id} className={`record-list-item ${selectedJobId === item.id ? "selected" : ""}`} onClick={() => openJob(item.id)}>
+                <strong>{item.jobNumber || item.id}</strong>
+                <span>{item.customer || item.routeSummary || "No customer"}</span>
+                <small>{item.partCount} parts / {item.operationCount} ops</small>
+              </button>
+            ))}
+          </div>
         </div>
       </aside>
 
       <main className="workspace">
         <header className="topbar">
           <div>
-            <h2>{view === 'jobs' ? (job?.jobNumber || job?.jobName || 'Job Editor') : view === 'libraries' ? 'Reusable Libraries' : 'Operation Templates'}</h2>
-            <p>{view === 'jobs' ? 'Start from Fusion setup sheets, then refine job-specific operations and tools.' : view === 'libraries' ? 'Maintain machines, fixtures, blades, and finishing media.' : 'Configure default fields and starting instruction steps.'}</p>
+            <h2>{titleForView(view)}</h2>
+            <p>{subtitleForView(view)}</p>
           </div>
           <div className="toolbar">
-            <button onClick={chooseFolder} title="Change data folder">
-              <FolderOpen size={17} />
-              Folder
-            </button>
-            {view === 'jobs' && (
+            <button onClick={() => refreshWorkspace()}><RefreshCcw size={16} /> Refresh</button>
+            <button onClick={rebuildIndex}><ShieldCheck size={16} /> Rebuild Index</button>
+            {view === "jobs" && (
               <>
-                <button onClick={duplicateJob} disabled={!job} title="Duplicate job">
-                  <Copy size={17} />
-                  Duplicate
-                </button>
-                <button onClick={saveCurrentJob} disabled={!job || busy} title="Save job">
-                  <Save size={17} />
-                  Save
-                </button>
-                <button onClick={openPrintPreview} disabled={!job || busy} title="Open print preview">
-                  <Printer size={17} />
-                  Preview
-                </button>
-                <button onClick={exportPdf} disabled={!job || busy} title="Export PDF">
-                  <FileDown size={17} />
-                  PDF
-                </button>
-                <button className="danger" onClick={deleteCurrentJob} disabled={!job || busy} title="Delete job">
-                  <Trash2 size={17} />
-                  Delete
-                </button>
+                <button onClick={saveCurrentJob} disabled={!job || busy}><Save size={16} /> Save Job</button>
+                <button onClick={() => job?.id && api.exportJobPdf(job.id)} disabled={!job || busy}><FileDown size={16} /> PDF</button>
+                <button className="danger" onClick={archiveCurrentJob} disabled={!selectedJobId || busy}><Archive size={16} /> Archive</button>
+              </>
+            )}
+            {view === "materials" && (
+              <>
+                <button onClick={saveCurrentMaterial} disabled={!material || busy}><Save size={16} /> Save Material</button>
+                <button onClick={addMaterialAttachments} disabled={!material || busy}><FolderOpen size={16} /> Attachments</button>
+                <button className="danger" onClick={archiveCurrentMaterial} disabled={!selectedMaterialId || busy}><Archive size={16} /> Archive</button>
+              </>
+            )}
+            {view === "metrology" && (
+              <>
+                <button onClick={saveCurrentInstrument} disabled={!instrumentPayload || busy}><Save size={16} /> Save Instrument</button>
+                <button className="danger" onClick={archiveCurrentInstrument} disabled={!selectedInstrumentId || busy}><Archive size={16} /> Archive</button>
               </>
             )}
           </div>
@@ -538,833 +554,664 @@ function Workspace() {
 
         {status && <div className="status-banner">{status}</div>}
 
-        {view === 'jobs' && (
-          <JobEditor
+        {view === "dashboard" && <DashboardView workspace={workspace} />}
+        {view === "jobs" && (
+          <JobsView
             job={job}
             setJob={setJob}
-            libraries={libraries}
-            templates={templates}
-            onAddOperation={addOperation}
-            onStatus={showStatus}
+            workspace={workspace}
+            onOpenJob={openJob}
+            onChooseOperationImages={async (jobId, partId, operationId) => api.chooseOperationImages(jobId, partId, operationId)}
           />
         )}
-        {view === 'libraries' && (
-          <LibraryManager
-            libraries={libraries}
-            setLibraries={setLibraries}
-            templates={templates}
-            setTemplates={setTemplates}
-            onStatus={showStatus}
+        {view === "materials" && (
+          <MaterialsView
+            workspace={workspace}
+            material={material}
+            setMaterial={setMaterial}
+            onOpenMaterial={openMaterial}
+            onCreateNew={createNewMaterial}
           />
         )}
-        {view === 'templates' && (
-          <TemplateManager
-            templates={templates}
-            setTemplates={setTemplates}
-            libraries={libraries}
-            onStatus={showStatus}
+        {view === "metrology" && (
+          <MetrologyView
+            workspace={workspace}
+            payload={instrumentPayload}
+            setPayload={setInstrumentPayload}
+            onOpenInstrument={openInstrument}
+            onCreateNew={createNewInstrument}
           />
+        )}
+        {view === "templates" && (
+          <TemplatesView
+            workspace={workspace}
+            selectedTemplate={selectedTemplate}
+            setSelectedTemplateId={setSelectedTemplateId}
+            onStatus={showStatus}
+            onRefresh={refreshWorkspace}
+          />
+        )}
+        {view === "imports" && (
+          <ImportsView onImport={runImport} workspace={workspace} />
         )}
       </main>
     </div>
   );
 }
 
-function JobEditor({ job, setJob, libraries, templates, onAddOperation, onStatus }) {
-  const [templateId, setTemplateId] = useState(templates[0]?.id || 'generic');
+function NavButton({ icon: Icon, active, label, onClick }) {
+  return (
+    <button className={active ? "active" : ""} onClick={onClick}>
+      <Icon size={16} />
+      {label}
+    </button>
+  );
+}
 
-  useEffect(() => {
-    if (templates[0] && !templates.some((template) => template.id === templateId)) {
-      setTemplateId(templates[0].id);
-    }
-  }, [templates, templateId]);
+function DashboardView({ workspace }) {
+  const counts = workspace.dashboard?.counts || {};
+  return (
+    <div className="dashboard-grid">
+      <StatCard label="Open Jobs" value={counts.openJobs || 0} />
+      <StatCard label="Active Materials" value={counts.materials || 0} />
+      <StatCard label="Active Instruments" value={counts.instruments || 0} />
+      <StatCard label="Due / Overdue Gauges" value={counts.overdueInstruments || 0} accent />
 
-  if (!job) {
-    return (
-      <section className="empty-state">
-        <ClipboardList size={34} />
-        <h3>No job selected</h3>
-        <p>Create a job or select a saved job from the sidebar.</p>
+      <section className="panel wide">
+        <div className="panel-heading">
+          <h3>Quality Watch</h3>
+          <span>Upcoming and overdue calibration items</span>
+        </div>
+        <div className="stack-list">
+          {(workspace.dashboard?.overdueInstruments || []).map((item) => (
+            <div className="inline-card" key={item.instrumentId}>
+              <strong>{item.toolName}</strong>
+              <span>{item.instrumentId}</span>
+              <span className={`pill ${item.dueState === "Overdue" ? "danger-pill" : "warn-pill"}`}>{item.dueState}</span>
+            </div>
+          ))}
+          {!workspace.dashboard?.overdueInstruments?.length && <div className="empty-inline">No due or overdue instruments.</div>}
+        </div>
       </section>
-    );
-  }
 
-  const updateField = (field, value) => setJob((current) => ({ ...current, [field]: value }));
-  const updateRevision = (field, value) => setJob((current) => ({
+      <section className="panel wide">
+        <div className="panel-heading">
+          <h3>Recent Audit</h3>
+          <span>Append-only activity log</span>
+        </div>
+        <div className="stack-list">
+          {(workspace.dashboard?.recentAudit || []).map((item, index) => (
+            <div className="inline-card" key={`${item.timestamp}-${index}`}>
+              <strong>{item.eventType}</strong>
+              <span>{item.message}</span>
+              <small>{item.timestamp}</small>
+            </div>
+          ))}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function JobsView({ job, setJob, workspace, onChooseOperationImages }) {
+  if (!job) {
+    return <EmptyState icon={Package} title="No job selected" text="Create a job or pick one from the sidebar." />;
+  }
+  const materials = workspace.materials || [];
+  const instruments = workspace.instruments || [];
+  const templates = workspace.templates || [];
+
+  const updateJob = (patch) => setJob((current) => ({ ...current, ...patch }));
+  const updateRevision = (patch) => setJob((current) => ({ ...current, revision: { ...current.revision, ...patch } }));
+
+  const updatePart = (partId, updater) => setJob((current) => ({
     ...current,
-    revision: { ...current.revision, [field]: value }
+    parts: current.parts.map((part) => part.id === partId ? (typeof updater === "function" ? updater(part) : { ...part, ...updater }) : part)
   }));
 
-  const selectedTemplate = templates.find((template) => template.id === templateId) || templates[0];
-  const hasToolsAndFixturesOperation = (job.operations || []).some(usesToolsAndFixtures);
+  const addPart = () => setJob((current) => ({ ...current, parts: [...current.parts, blankPart()] }));
+  const removePart = (partId) => setJob((current) => ({ ...current, parts: current.parts.filter((part) => part.id !== partId) }));
 
-  const moveOperation = (operationId, direction) => {
-    setJob((current) => {
-      const operations = [...current.operations];
-      const index = operations.findIndex((operation) => operation.id === operationId);
-      const nextIndex = index + direction;
-      if (index < 0 || nextIndex < 0 || nextIndex >= operations.length) return current;
-      [operations[index], operations[nextIndex]] = [operations[nextIndex], operations[index]];
-      return { ...current, operations };
+  const addOperation = (partId, templateId = "") => {
+    const template = templates.find((item) => item.id === templateId);
+    updatePart(partId, (part) => {
+      const sequence = part.operations.length + 1;
+      const operation = blankOperation(sequence);
+      if (template) {
+        operation.title = template.name;
+        operation.type = template.category;
+        operation.setupTemplateRefs = [template.id];
+        operation.parameters = (template.defaultParameters || []).map((item) => ({ ...blankParameter(), label: item.label || "", value: item.value || "" }));
+        operation.workInstructions = (template.defaultSteps || []).join("\n");
+      }
+      return { ...part, operations: [...part.operations, operation] };
     });
   };
 
-  const removeOperation = (operationId) => {
-    setJob((current) => ({
-      ...current,
-      operations: current.operations.filter((operation) => operation.id !== operationId)
-    }));
-  };
-
-  const updateOperation = (operationId, updater) => {
-    setJob((current) => ({
-      ...current,
-      operations: current.operations.map((operation) => {
-        if (operation.id !== operationId) return operation;
-        return typeof updater === 'function' ? updater(operation) : { ...operation, ...updater };
-      })
-    }));
-  };
-
   return (
-    <div className="editor-grid">
-      <section className="panel job-details-panel">
+    <div className="workspace-columns">
+      <section className="panel">
         <div className="panel-heading">
-          <h3>Job Details</h3>
-          <span>Header and revision block</span>
+          <h3>Job Header</h3>
+          <span>Revision-controlled traveler record</span>
         </div>
         <div className="form-grid">
-          <TextField label="Customer" value={job.customer} onChange={(value) => updateField('customer', value)} />
-          <TextField label="Job Number" value={job.jobNumber} onChange={(value) => updateField('jobNumber', value)} />
-          <TextField label="Job Name" value={job.jobName} onChange={(value) => updateField('jobName', value)} />
-          <TextField label="Part Number" value={job.partNumber} onChange={(value) => updateField('partNumber', value)} />
-          <TextField label="Part Name" value={job.partName} onChange={(value) => updateField('partName', value)} />
-          <TextField label="Material" value={job.material} onChange={(value) => updateField('material', value)} />
-          <TextField label="Quantity" value={job.quantity} onChange={(value) => updateField('quantity', value)} />
-          <TextField label="Revision" value={job.revision?.number || ''} onChange={(value) => updateRevision('number', value)} />
-          <TextField label="Revision Date" type="date" value={job.revision?.date || ''} onChange={(value) => updateRevision('date', value)} />
-          <TextField label="Author" value={job.revision?.author || ''} onChange={(value) => updateRevision('author', value)} />
+          <TextField label="Job Number" value={job.jobNumber} onChange={(value) => updateJob({ jobNumber: value })} />
+          <TextField label="Customer" value={job.customer} onChange={(value) => updateJob({ customer: value })} />
+          <SelectField label="Status" value={job.status} options={workspace.constants.jobStatuses} onChange={(value) => updateJob({ status: value })} />
+          <SelectField label="Priority" value={job.priority} options={workspace.constants.priorities} onChange={(value) => updateJob({ priority: value })} />
+          <TextField label="Due Date" type="date" value={job.dueDate} onChange={(value) => updateJob({ dueDate: value })} />
+          <TextField label="Revision" value={job.revision?.number || ""} onChange={(value) => updateRevision({ number: value })} />
+          <TextField label="Revision Date" type="date" value={job.revision?.date || ""} onChange={(value) => updateRevision({ date: value })} />
+          <TextField label="Author" value={job.revision?.author || ""} onChange={(value) => updateRevision({ author: value })} />
         </div>
-        <TextArea label="Revision Notes" value={job.revision?.notes || ''} onChange={(value) => updateRevision('notes', value)} rows={3} />
+        <TextArea label="Revision Notes" value={job.revision?.notes || ""} onChange={(value) => updateRevision({ notes: value })} rows={3} />
+        <TextArea label="Job Notes" value={job.notes || ""} onChange={(value) => updateJob({ notes: value })} rows={4} />
       </section>
 
-      <section className="panel operation-add-panel">
-        <div className="panel-heading">
-          <h3>Add Operation</h3>
-          <span>Start from a template, then customize fields</span>
-        </div>
-        <div className="inline-controls">
-          <select value={templateId} onChange={(event) => setTemplateId(event.target.value)}>
-            {templates.map((template) => (
-              <option key={template.id} value={template.id}>{template.name}</option>
-            ))}
-          </select>
-          <button className="primary-button" onClick={() => onAddOperation(selectedTemplate)}>
-            <ListPlus size={17} />
-            Add
-          </button>
-        </div>
-      </section>
-
-      {hasToolsAndFixturesOperation && (
-        <JobToolsPanel
-          tools={job.tools || []}
-          onChange={(tools) => setJob((current) => ({ ...current, tools }))}
-        />
-      )}
-
-      <section className="operations-stack">
-        {job.operations.length === 0 && (
-          <div className="empty-state compact">
-            <Wrench size={30} />
-            <h3>No operations yet</h3>
-            <p>Add sawing, milling, finishing, inspection, or any custom operation.</p>
+      <section className="panel">
+        <div className="panel-heading inline">
+          <div>
+            <h3>Parts And Routes</h3>
+            <span>Each part owns its own ordered operations</span>
           </div>
-        )}
-        {job.operations.map((operation, index) => (
-          <OperationCard
+          <button onClick={addPart}><Plus size={15} /> Part</button>
+        </div>
+
+        <div className="stack-list">
+          {job.parts.map((part) => (
+            <PartEditor
+              key={part.id}
+              part={part}
+              templates={templates}
+              materials={materials}
+              instruments={instruments}
+              onUpdate={(updater) => updatePart(part.id, updater)}
+              onRemove={() => removePart(part.id)}
+              onAddOperation={addOperation}
+              onChooseOperationImages={onChooseOperationImages}
+              jobId={job.id}
+            />
+          ))}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function PartEditor({ part, templates, materials, instruments, onUpdate, onRemove, onAddOperation, onChooseOperationImages, jobId }) {
+  const updateField = (patch) => onUpdate((current) => ({ ...current, ...patch }));
+  const updateRevision = (patch) => onUpdate((current) => ({ ...current, revision: { ...current.revision, ...patch } }));
+  const updateOperation = (operationId, updater) => onUpdate((current) => ({
+    ...current,
+    operations: current.operations.map((operation) => operation.id === operationId ? (typeof updater === "function" ? updater(operation) : { ...operation, ...updater }) : operation)
+  }));
+  const removeOperation = (operationId) => onUpdate((current) => ({
+    ...current,
+    operations: current.operations.filter((operation) => operation.id !== operationId).map((operation, index) => ({ ...operation, sequence: index + 1 }))
+  }));
+
+  return (
+    <div className="subpanel">
+      <div className="subpanel-header">
+        <div>
+          <h4>{part.partNumber || part.partName || "New Part"}</h4>
+          <span>{part.operations.length} operations</span>
+        </div>
+        <button className="danger subtle" onClick={onRemove}><X size={14} /> Remove Part</button>
+      </div>
+      <div className="form-grid">
+        <TextField label="Part Number" value={part.partNumber} onChange={(value) => updateField({ partNumber: value })} />
+        <TextField label="Part Name" value={part.partName} onChange={(value) => updateField({ partName: value })} />
+        <TextField label="Quantity" value={part.quantity} onChange={(value) => updateField({ quantity: value })} />
+        <TextField label="Material Spec" value={part.materialSpec} onChange={(value) => updateField({ materialSpec: value })} />
+        <TextField label="Part Revision" value={part.revision?.number || ""} onChange={(value) => updateRevision({ number: value })} />
+        <TextField label="Revision Date" type="date" value={part.revision?.date || ""} onChange={(value) => updateRevision({ date: value })} />
+      </div>
+      <TextArea label="Description" value={part.description || ""} onChange={(value) => updateField({ description: value })} rows={2} />
+      <TextArea label="Part Notes" value={part.notes || ""} onChange={(value) => updateField({ notes: value })} rows={2} />
+
+      <div className="subpanel-header">
+        <div>
+          <h4>Operations</h4>
+          <span>Ordered route for this part</span>
+        </div>
+        <div className="toolbar">
+          <select className="compact-select" defaultValue="" onChange={(event) => event.target.value && onAddOperation(part.id, event.target.value)}>
+            <option value="">Add From Template</option>
+            {templates.map((template) => <option key={template.id} value={template.id}>{template.name}</option>)}
+          </select>
+          <button onClick={() => onAddOperation(part.id, "")}><Plus size={14} /> Blank Operation</button>
+        </div>
+      </div>
+
+      <div className="stack-list">
+        {part.operations.map((operation) => (
+          <OperationEditor
             key={operation.id}
             operation={operation}
-            index={index}
-            total={job.operations.length}
-            jobId={job.id}
-            libraries={libraries}
-            jobTools={job.tools || []}
+            materials={materials}
+            instruments={instruments}
             onUpdate={(updater) => updateOperation(operation.id, updater)}
-            onMove={(direction) => moveOperation(operation.id, direction)}
             onRemove={() => removeOperation(operation.id)}
-            onStatus={onStatus}
+            onAddImages={async () => {
+              const images = await onChooseOperationImages(jobId, part.id, operation.id);
+              updateOperation(operation.id, (current) => ({ ...current, stepImages: [...current.stepImages, ...images] }));
+            }}
           />
         ))}
-      </section>
+      </div>
     </div>
   );
 }
 
-function OperationCard({ operation, index, total, jobId, libraries, jobTools, onUpdate, onMove, onRemove, onStatus }) {
-  const updateParameter = (parameterId, patch) => {
-    onUpdate((current) => ({
-      ...current,
-      parameters: current.parameters.map((parameter) => parameter.id === parameterId ? { ...parameter, ...patch } : parameter)
-    }));
-  };
-
-  const addParameter = () => onUpdate((current) => ({
+function OperationEditor({ operation, materials, instruments, onUpdate, onRemove, onAddImages }) {
+  const updateField = (patch) => onUpdate((current) => ({ ...current, ...patch }));
+  const toggleRef = (field, id) => onUpdate((current) => ({
     ...current,
-    parameters: [...current.parameters, blankParameter()]
+    [field]: current[field].includes(id) ? current[field].filter((item) => item !== id) : [...current[field], id]
   }));
-
-  const removeParameter = (parameterId) => onUpdate((current) => ({
+  const updateParameter = (parameterId, patch) => onUpdate((current) => ({
     ...current,
-    parameters: current.parameters.filter((parameter) => parameter.id !== parameterId)
+    parameters: current.parameters.map((parameter) => parameter.id === parameterId ? { ...parameter, ...patch } : parameter)
   }));
-
-  const addStep = () => onUpdate((current) => ({
-    ...current,
-    steps: [...current.steps, blankStep()]
-  }));
-
-  const updateStep = (stepId, patch) => onUpdate((current) => ({
-    ...current,
-    steps: current.steps.map((step) => step.id === stepId ? { ...step, ...patch } : step)
-  }));
-
-  const removeStep = (stepId) => onUpdate((current) => ({
-    ...current,
-    steps: current.steps.filter((step) => step.id !== stepId)
-  }));
-
-  const moveStep = (stepId, direction) => {
-    onUpdate((current) => {
-      const steps = [...current.steps];
-      const stepIndex = steps.findIndex((step) => step.id === stepId);
-      const nextIndex = stepIndex + direction;
-      if (stepIndex < 0 || nextIndex < 0 || nextIndex >= steps.length) return current;
-      [steps[stepIndex], steps[nextIndex]] = [steps[nextIndex], steps[stepIndex]];
-      return { ...current, steps };
-    });
-  };
-
-  const toggleReference = (field, id) => {
-    onUpdate((current) => {
-      const values = new Set(current[field] || []);
-      if (values.has(id)) values.delete(id);
-      else values.add(id);
-      return { ...current, [field]: [...values] };
-    });
-  };
-
-  const assignedLibraries = operationLibraryNames(operation)
-    .map((name) => libraries[name])
-    .filter(Boolean)
-    .filter((library) => !isFixtureLibrary(library) || usesToolsAndFixtures(operation));
-  const machineLibrary = assignedLibraries.find((library) => library.name === 'machines');
-  const fixtureLibrary = assignedLibraries.find((library) => isFixtureLibrary(library));
-  const resourceLibraries = assignedLibraries.filter((library) => (
-    library.name !== 'machines' && !isFixtureLibrary(library)
-  ));
-
-  const toggleLibrarySelection = (libraryName, id) => {
-    onUpdate((current) => {
-      const values = new Set(operationSelectedLibraryIds(current, libraryName));
-      if (values.has(id)) values.delete(id);
-      else values.add(id);
-      const nextIds = [...values];
-      const nextOperation = {
-        ...current,
-        librarySelections: {
-          ...(current.librarySelections || {}),
-          [libraryName]: nextIds
-        }
-      };
-      const specialField = SPECIAL_LIBRARY_FIELDS[libraryName];
-      if (specialField) nextOperation[specialField] = nextIds[0] || '';
-      return nextOperation;
-    });
-  };
-
-  const addImages = async (stepId) => {
-    try {
-      const images = await api.chooseStepImages(jobId);
-      if (!images.length) return;
-      updateStep(stepId, {
-        images: [
-          ...(operation.steps.find((step) => step.id === stepId)?.images || []),
-          ...images
-        ]
-      });
-      onStatus(`${images.length} image${images.length === 1 ? '' : 's'} added.`);
-    } catch (error) {
-      onStatus(error.message || String(error));
-    }
-  };
-
-  const removeImage = (stepId, imageId) => {
-    const step = operation.steps.find((item) => item.id === stepId);
-    updateStep(stepId, {
-      images: (step?.images || []).filter((image) => image.id !== imageId)
-    });
-  };
+  const addParameter = () => onUpdate((current) => ({ ...current, parameters: [...current.parameters, blankParameter()] }));
+  const removeParameter = (parameterId) => onUpdate((current) => ({ ...current, parameters: current.parameters.filter((parameter) => parameter.id !== parameterId) }));
 
   return (
-    <article className="operation-card">
-      <div className="operation-header">
-        <div className="operation-index">{index + 1}</div>
-        <div className="operation-title-fields">
-          <TextField label="Operation Title" value={operation.title || ''} onChange={(value) => onUpdate({ title: value })} />
-        </div>
-        <div className="icon-button-row">
-          <button onClick={() => onMove(-1)} disabled={index === 0} title="Move operation up">↑</button>
-          <button onClick={() => onMove(1)} disabled={index === total - 1} title="Move operation down">↓</button>
-          <button className="danger square" onClick={onRemove} title="Remove operation">
-            <Trash2 size={16} />
-          </button>
-        </div>
-      </div>
-
-      <div className="operation-body">
-        <div className="operation-setup">
-          {machineLibrary && (
-            <LibrarySelect
-              label={machineLibrary.label || 'Machine'}
-              value={operation.machineId || ''}
-              records={machineLibrary.records || []}
-              onChange={(value) => onUpdate({ machineId: value })}
-            />
-          )}
-
-          {usesToolsAndFixtures(operation) && (
-            <div className="tools-picker">
-              <ReferenceChecklist
-                title="Tools"
-                records={jobTools || []}
-                selectedIds={operation.toolIds || []}
-                onToggle={(id) => toggleReference('toolIds', id)}
-              />
-            </div>
-          )}
-
-          {fixtureLibrary && (
-            <ReferenceChecklist
-              title={fixtureLibrary.label || 'Fixtures'}
-              records={fixtureLibrary.records || []}
-              selectedIds={operation.fixtureIds || []}
-              onToggle={(id) => toggleReference('fixtureIds', id)}
-            />
-          )}
-
-          {resourceLibraries.map((library) => (
-            <ReferenceChecklist
-              key={library.name}
-              title={library.label || titleFromName(library.name)}
-              records={library.records || []}
-              selectedIds={operationSelectedLibraryIds(operation, library.name)}
-              onToggle={(id) => toggleLibrarySelection(library.name, id)}
-            />
-          ))}
-
-          {assignedLibraries.length === 0 && !usesToolsAndFixtures(operation) && (
-            <div className="empty-inline">No libraries assigned.</div>
-          )}
-        </div>
-
-        <div className="parameters-block">
-          <div className="subheading-row">
-            <h4>Process Parameters</h4>
-            <button onClick={addParameter} title="Add parameter">
-              <Plus size={16} />
-              Parameter
-            </button>
-          </div>
-          <div className="parameter-list">
-            {operation.parameters.map((parameter) => (
-              <div className="parameter-row" key={parameter.id}>
-                <input value={parameter.label} placeholder="Parameter" onChange={(event) => updateParameter(parameter.id, { label: event.target.value })} />
-                <input value={parameter.value} placeholder="Value" onChange={(event) => updateParameter(parameter.id, { value: event.target.value })} />
-                <button className="danger square" onClick={() => removeParameter(parameter.id)} title="Remove parameter">
-                  <X size={15} />
-                </button>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        <div className="steps-block">
-          <div className="subheading-row">
-            <h4>Instruction Steps</h4>
-            <button onClick={addStep} title="Add step">
-              <Plus size={16} />
-              Step
-            </button>
-          </div>
-          {operation.steps.map((step, stepIndex) => (
-            <div className="step-editor" key={step.id}>
-              <div className="step-number">{stepIndex + 1}</div>
-              <div className="step-content">
-                <textarea value={step.instruction} rows={3} onChange={(event) => updateStep(step.id, { instruction: event.target.value })} placeholder="Instruction step" />
-                <div className="image-strip">
-                  {(step.images || []).map((image) => (
-                    <div className="image-thumb" key={image.id}>
-                      <img src={api.assetUrl(image.relativePath)} alt={image.name || 'Step image'} />
-                      <button className="danger square" onClick={() => removeImage(step.id, image.id)} title="Remove image">
-                        <X size={14} />
-                      </button>
-                    </div>
-                  ))}
-                  <button className="image-add-button" onClick={() => addImages(step.id)} title="Add step images">
-                    <ImagePlus size={17} />
-                    Add Images
-                  </button>
-                </div>
-              </div>
-              <div className="step-actions">
-                <button onClick={() => moveStep(step.id, -1)} disabled={stepIndex === 0} title="Move step up">↑</button>
-                <button onClick={() => moveStep(step.id, 1)} disabled={stepIndex === operation.steps.length - 1} title="Move step down">↓</button>
-                <button className="danger square" onClick={() => removeStep(step.id)} title="Remove step">
-                  <Trash2 size={15} />
-                </button>
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-    </article>
-  );
-}
-
-function LibrarySelect({ label, value, records, onChange }) {
-  return (
-    <label>
-      <span>{label}</span>
-      <select value={value} onChange={(event) => onChange(event.target.value)}>
-        <option value="">None</option>
-        {records.map((record) => (
-          <option key={record.id} value={record.id}>{record.name}</option>
-        ))}
-      </select>
-    </label>
-  );
-}
-
-function ReferenceChecklist({ title, records, selectedIds, onToggle }) {
-  return (
-    <div className="reference-list">
-      <h4>{title}</h4>
-      {records.length === 0 && <span className="muted">Add records in Libraries.</span>}
-      {records.map((record) => (
-        <label key={record.id} className="check-row">
-          <input type="checkbox" checked={selectedIds.includes(record.id)} onChange={() => onToggle(record.id)} />
-          <span>{record.name}{record.length ? ` (${record.length})` : ''}</span>
-        </label>
-      ))}
-    </div>
-  );
-}
-
-function JobToolsPanel({ tools, onChange }) {
-  const addTool = () => onChange([...tools, {
-    ...blankRecord(),
-    length: '',
-    diameter: '',
-    holder: ''
-  }]);
-  const updateTool = (id, patch) => onChange(tools.map((tool) => tool.id === id ? { ...tool, ...patch } : tool));
-  const removeTool = (id) => onChange(tools.filter((tool) => tool.id !== id));
-
-  return (
-    <section className="panel job-tools-panel">
-      <div className="panel-heading inline">
+    <div className="operation-card">
+      <div className="subpanel-header">
         <div>
-          <h3>Job Tools</h3>
-          <span>{tools.length} tool{tools.length === 1 ? '' : 's'} saved with this job</span>
+          <h4>{operation.sequence}. {operation.title || "Operation"}</h4>
+          <span>{operation.operationCode} • {operation.type || "General"}</span>
         </div>
-        <button onClick={addTool}>
-          <Plus size={16} />
-          Tool
-        </button>
+        <button className="danger subtle" onClick={onRemove}><X size={14} /> Remove</button>
       </div>
-      {tools.length === 0 ? (
-        <div className="empty-inline">Import Fusion setup sheets when creating a job, or add job-specific tools here.</div>
-      ) : (
-        <div className="job-tools-grid">
-          {tools.map((tool) => (
-            <div className="job-tool-card" key={tool.id}>
-              <TextField label="Tool" value={tool.name || ''} onChange={(value) => updateTool(tool.id, { name: value })} />
-              <TextField label="Diameter" value={tool.diameter || ''} onChange={(value) => updateTool(tool.id, { diameter: value })} />
-              <TextField label="Length / Stickout" value={tool.length || ''} onChange={(value) => updateTool(tool.id, { length: value })} />
-              <TextField label="Holder" value={tool.holder || ''} onChange={(value) => updateTool(tool.id, { holder: value })} />
-              <TextArea label="Details" value={tool.details || ''} onChange={(value) => updateTool(tool.id, { details: value })} rows={2} />
-              <button className="danger" onClick={() => removeTool(tool.id)}>
-                <Trash2 size={16} />
-                Remove
-              </button>
-            </div>
-          ))}
+
+      <div className="form-grid">
+        <TextField label="Sequence" value={String(operation.sequence || "")} onChange={(value) => updateField({ sequence: Number(value || 0) || 1 })} />
+        <TextField label="Op Code" value={operation.operationCode || ""} onChange={(value) => updateField({ operationCode: value })} />
+        <TextField label="Title" value={operation.title || ""} onChange={(value) => updateField({ title: value })} />
+        <TextField label="Type" value={operation.type || ""} onChange={(value) => updateField({ type: value })} />
+        <TextField label="Work Center" value={operation.workCenter || ""} onChange={(value) => updateField({ workCenter: value })} />
+        <TextField label="Status" value={operation.status || ""} onChange={(value) => updateField({ status: value })} />
+      </div>
+
+      <TextArea label="Setup Instructions" value={operation.setupInstructions || ""} onChange={(value) => updateField({ setupInstructions: value })} rows={3} />
+      <TextArea label="Work Instructions" value={operation.workInstructions || ""} onChange={(value) => updateField({ workInstructions: value })} rows={4} />
+      <TextArea label="Operation Notes" value={operation.notes || ""} onChange={(value) => updateField({ notes: value })} rows={2} />
+
+      <div className="subpanel-header">
+        <div>
+          <h4>Parameters</h4>
+          <span>Traveler and setup values</span>
         </div>
-      )}
-    </section>
+        <button onClick={addParameter}><Plus size={14} /> Parameter</button>
+      </div>
+      <div className="parameter-list">
+        {operation.parameters.map((parameter) => (
+          <div className="parameter-row" key={parameter.id}>
+            <input value={parameter.label} placeholder="Label" onChange={(event) => updateParameter(parameter.id, { label: event.target.value })} />
+            <input value={parameter.value} placeholder="Value" onChange={(event) => updateParameter(parameter.id, { value: event.target.value })} />
+            <button className="danger subtle square" onClick={() => removeParameter(parameter.id)}><X size={13} /></button>
+          </div>
+        ))}
+      </div>
+
+      <div className="link-grid">
+        <RecordChecklist
+          title="Material Lots"
+          items={materials.map((item) => ({ id: item.id, label: `${item.serialCode} • ${item.materialType}` }))}
+          selected={operation.requiredMaterialLots || []}
+          onToggle={(id) => toggleRef("requiredMaterialLots", id)}
+        />
+        <RecordChecklist
+          title="Inspection Instruments"
+          items={instruments.map((item) => ({ id: item.instrumentId, label: `${item.toolName} • ${item.dueState}` }))}
+          selected={operation.requiredInstruments || []}
+          onToggle={(id) => toggleRef("requiredInstruments", id)}
+        />
+      </div>
+
+      <div className="subpanel-header">
+        <div>
+          <h4>Step Images</h4>
+          <span>{operation.stepImages?.length || 0} linked assets</span>
+        </div>
+        <button onClick={onAddImages}><FolderOpen size={14} /> Add Images</button>
+      </div>
+      <div className="image-strip">
+        {(operation.stepImages || []).map((image) => (
+          <figure key={image.id} className="image-chip">
+            <img src={api.assetUrl(image.relativePath)} alt={image.name || "Operation image"} />
+            <figcaption>{image.name}</figcaption>
+          </figure>
+        ))}
+        {!operation.stepImages?.length && <div className="empty-inline">No images attached.</div>}
+      </div>
+    </div>
   );
 }
 
-function LibraryManager({ libraries, setLibraries, templates, setTemplates, onStatus }) {
-  const librariesInOrder = libraryList(libraries);
-  const [active, setActive] = useState(librariesInOrder[0]?.name || '');
-  const library = libraries[active] || librariesInOrder[0] || null;
-
-  useEffect(() => {
-    if (librariesInOrder[0] && !librariesInOrder.some((item) => item.name === active)) {
-      setActive(librariesInOrder[0].name);
-    }
-    if (!librariesInOrder.length && active) setActive('');
-  }, [active, librariesInOrder]);
-
-  const updateLibrary = (patch) => {
-    if (!library) return;
-    setLibraries((current) => ({
-      ...current,
-      [library.name]: {
-        ...library,
-        ...patch
-      }
-    }));
-  };
-
-  const updateRecords = (records) => {
-    if (!library) return;
-    setLibraries((current) => ({
-      ...current,
-      [library.name]: {
-        ...(current[library.name] || library),
-        records
-      }
-    }));
-  };
-
-  const save = async () => {
-    if (!library) return;
-    try {
-      const saved = await api.saveLibrary(library);
-      setLibraries((current) => ({ ...current, [saved.name]: saved }));
-      setActive(saved.name);
-      onStatus(`${saved.label} saved.`);
-    } catch (error) {
-      onStatus(error.message || String(error));
-    }
-  };
-
-  const addLibrary = () => {
-    const name = newId('library');
-    const next = {
-      name,
-      label: 'New Library',
-      order: 1000 + librariesInOrder.length,
-      records: []
-    };
-    setLibraries((current) => ({ ...current, [name]: next }));
-    setActive(name);
-  };
-
-  const removeLibrary = async () => {
-    if (!library) return;
-    if (!window.confirm(`Delete the "${library.label || library.name}" library? Existing jobs will keep their saved text and IDs.`)) return;
-
-    try {
-      await api.deleteLibrary(library.name);
-      setLibraries((current) => {
-        const next = { ...current };
-        delete next[library.name];
-        return next;
-      });
-
-      const nextTemplates = templates.map((template) => ({
-        ...template,
-        libraryNames: templateLibraryNames(template).filter((name) => name !== library.name)
-      }));
-      const changedTemplates = nextTemplates.filter((template, index) => (
-        templateLibraryNames(templates[index]).length !== template.libraryNames.length
-      ));
-      await Promise.all(changedTemplates.map((template) => api.saveTemplate(template)));
-      setTemplates(nextTemplates);
-      setActive(librariesInOrder.find((item) => item.name !== library.name)?.name || '');
-      onStatus(`${library.label || library.name} deleted.`);
-    } catch (error) {
-      onStatus(error.message || String(error));
-    }
-  };
-
-  const addRecord = () => updateRecords([...(library.records || []), blankRecord()]);
-  const removeRecord = (id) => updateRecords((library.records || []).filter((record) => record.id !== id));
-  const updateRecord = (id, patch) => updateRecords((library.records || []).map((record) => record.id === id ? { ...record, ...patch } : record));
-
-  if (!library) {
-    return (
-      <section className="empty-state">
-        <Library size={34} />
-        <h3>No libraries</h3>
-        <button className="primary-button" onClick={addLibrary}>
-          <Plus size={17} />
-          Add Library
-        </button>
-      </section>
-    );
-  }
-
+function RecordChecklist({ title, items, selected, onToggle }) {
   return (
-    <section className="panel">
-      <div className="library-layout">
-        <div className="library-tabs">
-          <button className="sidebar-action" onClick={addLibrary}>
-            <Plus size={16} />
-            New Library
-          </button>
-          {librariesInOrder.map((item) => (
-            <button key={item.name} className={library.name === item.name ? 'active' : ''} onClick={() => setActive(item.name)}>
-              <Archive size={16} />
-              <span>{item.label || titleFromName(item.name)}</span>
-            </button>
-          ))}
-        </div>
-        <div className="library-editor">
-          <div className="panel-heading inline">
-            <div>
-              <h3>{library.label || active}</h3>
-              <span>{(library.records || []).length} saved record{(library.records || []).length === 1 ? '' : 's'}</span>
-            </div>
-            <div className="toolbar">
-              <button className="danger" onClick={removeLibrary}>
-                <Trash2 size={16} />
-                Delete Library
-              </button>
-              <button onClick={addRecord}>
-                <Plus size={16} />
-                Add
-              </button>
-              <button className="primary-button" onClick={save}>
-                <Save size={16} />
-                Save Library
-              </button>
-            </div>
-          </div>
-
-          <div className="form-grid library-meta">
-            <TextField label="Library Name" value={library.label || ''} onChange={(value) => updateLibrary({ label: value })} />
-          </div>
-
-          <div className="record-grid">
-            {(library.records || []).map((record) => (
-              <div className="record-card" key={record.id}>
-                <TextField label="Name" value={record.name} onChange={(value) => updateRecord(record.id, { name: value })} />
-                <TextField label="Description" value={record.description || ''} onChange={(value) => updateRecord(record.id, { description: value })} />
-                <TextArea label="Details" value={record.details || ''} onChange={(value) => updateRecord(record.id, { details: value })} rows={3} />
-                <button className="danger" onClick={() => removeRecord(record.id)}>
-                  <Trash2 size={16} />
-                  Remove
-                </button>
-              </div>
-            ))}
-          </div>
-        </div>
+    <div className="checklist">
+      <h5>{title}</h5>
+      <div className="checklist-items">
+        {items.map((item) => (
+          <label key={item.id} className="check-row">
+            <input type="checkbox" checked={selected.includes(item.id)} onChange={() => onToggle(item.id)} />
+            <span>{item.label}</span>
+          </label>
+        ))}
+        {!items.length && <div className="empty-inline">No records available.</div>}
       </div>
-    </section>
+    </div>
   );
 }
 
-function TemplateManager({ templates, setTemplates, libraries, onStatus }) {
-  const [selectedId, setSelectedId] = useState(templates[0]?.id || '');
-  const selected = templates.find((template) => template.id === selectedId) || templates[0];
-  const librariesInOrder = libraryList(libraries);
-
-  useEffect(() => {
-    if (templates[0] && !templates.some((template) => template.id === selectedId)) setSelectedId(templates[0].id);
-    if (!templates.length && selectedId) setSelectedId('');
-  }, [selectedId, templates]);
-
-  const updateTemplate = (patch) => {
-    setTemplates((current) => current.map((template) => template.id === selected.id ? { ...template, ...patch } : template));
-  };
-
-  const addTemplate = () => {
-    const next = {
-      id: newId('template'),
-      name: 'New Template',
-      category: 'General',
-      libraryNames: [],
-      defaultParameters: [blankParameter()],
-      defaultSteps: ['Document operation instructions.']
-    };
-    setTemplates((current) => [...current, next]);
-    setSelectedId(next.id);
-  };
-
-  const save = async () => {
-    if (!selected) return;
-    try {
-      const saved = await api.saveTemplate(selected);
-      setTemplates((current) => current.map((template) => template.id === saved.id ? saved : template));
-      onStatus(`${saved.name} template saved.`);
-    } catch (error) {
-      onStatus(error.message || String(error));
-    }
-  };
-
-  const removeTemplate = async () => {
-    if (!selected) return;
-    if (!window.confirm(`Delete the "${selected.name}" template? Existing jobs will not be changed.`)) return;
-
-    try {
-      await api.deleteTemplate(selected.id);
-      const remaining = templates.filter((template) => template.id !== selected.id);
-      setTemplates(remaining);
-      setSelectedId(remaining[0]?.id || '');
-      onStatus(`${selected.name} template deleted.`);
-    } catch (error) {
-      onStatus(error.message || String(error));
-    }
-  };
-
-  const updateParameter = (id, patch) => updateTemplate({
-    defaultParameters: (selected.defaultParameters || []).map((parameter) => parameter.id === id ? { ...parameter, ...patch } : parameter)
-  });
-
-  const updateStep = (index, value) => {
-    const steps = [...(selected.defaultSteps || [])];
-    steps[index] = value;
-    updateTemplate({ defaultSteps: steps });
-  };
-
-  const toggleTemplateLibrary = (libraryName) => {
-    const values = new Set(templateLibraryNames(selected));
-    if (values.has(libraryName)) values.delete(libraryName);
-    else values.add(libraryName);
-    updateTemplate({ libraryNames: [...values] });
-  };
-
-  if (!selected) {
-    return (
-      <section className="empty-state">
-        <BookOpen size={34} />
-        <h3>No templates loaded</h3>
-        <button className="primary-button" onClick={addTemplate}>
-          <Plus size={17} />
-          Add Template
-        </button>
-      </section>
-    );
-  }
-
+function MaterialsView({ workspace, material, setMaterial, onOpenMaterial, onCreateNew }) {
   return (
-    <section className="panel">
-      <div className="template-layout">
-        <div className="template-list">
-          <button className="sidebar-action" onClick={addTemplate}>
-            <Plus size={16} />
-            New Template
-          </button>
-          {templates.map((template) => (
-            <button key={template.id} className={template.id === selected.id ? 'selected' : ''} onClick={() => setSelectedId(template.id)}>
-              <strong>{template.name}</strong>
-              <span>{template.category}</span>
-            </button>
-          ))}
-        </div>
-        <div className="template-editor">
-          <div className="panel-heading inline">
-            <div>
-              <h3>{selected.name}</h3>
-              <span>Default parameters and starting steps</span>
-            </div>
-            <div className="toolbar">
-              <button className="danger" onClick={removeTemplate}>
-                <Trash2 size={16} />
-                Delete
-              </button>
-              <button className="primary-button" onClick={save}>
-                <Save size={16} />
-                Save Template
-              </button>
-            </div>
-          </div>
-          <div className="form-grid">
-            <TextField label="Template Name" value={selected.name || ''} onChange={(value) => updateTemplate({ name: value })} />
-            <TextField label="Category" value={selected.category || ''} onChange={(value) => updateTemplate({ category: value })} />
-          </div>
-
+    <div className="workspace-columns">
+      <section className="panel thin">
+        <div className="panel-heading inline">
           <div>
-            <div className="subheading-row">
-              <h4>Assigned Libraries</h4>
-            </div>
-            <div className="template-library-grid">
-              {librariesInOrder.map((library) => (
-                <label key={library.name} className="check-row library-assignment-row">
-                  <input
-                    type="checkbox"
-                    checked={templateLibraryNames(selected).includes(library.name)}
-                    onChange={() => toggleTemplateLibrary(library.name)}
-                  />
-                  <span>{library.label || titleFromName(library.name)}</span>
-                </label>
-              ))}
-              {librariesInOrder.length === 0 && <div className="empty-inline">No libraries available.</div>}
-            </div>
+            <h3>Material Lots</h3>
+            <span>Traceable cert-controlled stock records</span>
           </div>
-
-          <div className="subheading-row">
-            <h4>Default Parameters</h4>
-            <button onClick={() => updateTemplate({ defaultParameters: [...(selected.defaultParameters || []), blankParameter()] })}>
-              <Plus size={16} />
-              Parameter
+          <button onClick={onCreateNew}><Plus size={14} /> New</button>
+        </div>
+        <div className="record-list">
+          {workspace.materials.map((item) => (
+            <button key={item.id} className={`record-list-item ${material?.id === item.id ? "selected" : ""}`} onClick={() => onOpenMaterial(item.id)}>
+              <strong>{item.serialCode}</strong>
+              <span>{item.materialType}</span>
+              <small>{item.traceabilityLevel} • {item.status}</small>
             </button>
-          </div>
-          <div className="parameter-list">
-            {(selected.defaultParameters || []).map((parameter) => (
-              <div className="parameter-row" key={parameter.id}>
-                <input value={parameter.label} placeholder="Parameter" onChange={(event) => updateParameter(parameter.id, { label: event.target.value })} />
-                <input value={parameter.value} placeholder="Default value" onChange={(event) => updateParameter(parameter.id, { value: event.target.value })} />
-                <button className="danger square" onClick={() => updateTemplate({ defaultParameters: selected.defaultParameters.filter((item) => item.id !== parameter.id) })}>
-                  <X size={15} />
-                </button>
+          ))}
+        </div>
+      </section>
+
+      {!material ? (
+        <EmptyState icon={Database} title="No material selected" text="Choose a material record or create a new one." actionLabel="New Material" onAction={onCreateNew} />
+      ) : (
+      <>
+      <section className="panel">
+        <div className="panel-heading">
+          <h3>Material Record</h3>
+          <span>Human-readable canonical lot record</span>
+        </div>
+        <div className="form-grid">
+          <TextField label="Serial Code" value={material.serialCode || ""} onChange={(value) => setMaterial((current) => ({ ...current, serialCode: value }))} />
+          <TextField label="Material Type" value={material.materialType || ""} onChange={(value) => setMaterial((current) => ({ ...current, materialType: value }))} />
+          <SelectField label="Form" value={material.form || workspace.constants.material.forms[0]} options={workspace.constants.material.forms} onChange={(value) => setMaterial((current) => ({ ...current, form: value }))} />
+          <TextField label="Supplier" value={material.supplier || ""} onChange={(value) => setMaterial((current) => ({ ...current, supplier: value }))} />
+          <TextField label="Date Received" type="date" value={material.dateReceived || ""} onChange={(value) => setMaterial((current) => ({ ...current, dateReceived: value }))} />
+          <TextField label="Purchase Order" value={material.purchaseOrder || ""} onChange={(value) => setMaterial((current) => ({ ...current, purchaseOrder: value }))} />
+          <TextField label="Heat Number" value={material.heatNumber || ""} onChange={(value) => setMaterial((current) => ({ ...current, heatNumber: value }))} />
+          <TextField label="Lot Number" value={material.lotNumber || ""} onChange={(value) => setMaterial((current) => ({ ...current, lotNumber: value }))} />
+          <TextField label="Material Spec" value={material.materialSpec || ""} onChange={(value) => setMaterial((current) => ({ ...current, materialSpec: value }))} />
+          <TextField label="Dimensions" value={material.dimensions || ""} onChange={(value) => setMaterial((current) => ({ ...current, dimensions: value }))} />
+          <SelectField label="Traceability" value={material.traceabilityLevel || workspace.constants.material.traceabilityLevels[0]} options={workspace.constants.material.traceabilityLevels} onChange={(value) => setMaterial((current) => ({ ...current, traceabilityLevel: value }))} />
+          <TextField label="Storage Location" value={material.storageLocation || ""} onChange={(value) => setMaterial((current) => ({ ...current, storageLocation: value }))} />
+        </div>
+        <TextArea label="Notes" value={material.notes || ""} onChange={(value) => setMaterial((current) => ({ ...current, notes: value }))} rows={4} />
+      </section>
+
+      <section className="panel">
+        <div className="panel-heading">
+          <h3>Traceability</h3>
+          <span>Job usage and attachments</span>
+        </div>
+        <div className="stack-list">
+          <div className="subpanel">
+            <div className="subpanel-header">
+              <h4>Usage References</h4>
+              <span>{material.usageRefs?.length || 0} links</span>
+            </div>
+            {(material.usageRefs || []).map((ref) => (
+              <div key={`${ref.jobId}-${ref.operationId}`} className="inline-card">
+                <strong>{ref.jobNumber || ref.jobId}</strong>
+                <span>{ref.partNumber || ref.partId} • {ref.operationCode || ref.operationId}</span>
               </div>
             ))}
+            {!material.usageRefs?.length && <div className="empty-inline">No linked job usage yet.</div>}
           </div>
 
-          <div className="subheading-row">
-            <h4>Default Steps</h4>
-            <button onClick={() => updateTemplate({ defaultSteps: [...(selected.defaultSteps || []), ''] })}>
-              <Plus size={16} />
-              Step
-            </button>
-          </div>
-          <div className="default-step-list">
-            {(selected.defaultSteps || []).map((step, index) => (
-              <div className="parameter-row" key={`${selected.id}-${index}`}>
-                <input value={step} placeholder="Default instruction" onChange={(event) => updateStep(index, event.target.value)} />
-                <button className="danger square" onClick={() => updateTemplate({ defaultSteps: selected.defaultSteps.filter((_, stepIndex) => stepIndex !== index) })}>
-                  <X size={15} />
-                </button>
+          <div className="subpanel">
+            <div className="subpanel-header">
+              <h4>Attachments</h4>
+              <span>{material.attachments?.length || 0} files</span>
+            </div>
+            {(material.attachments || []).map((attachment) => (
+              <div key={attachment.id} className="inline-card">
+                <strong>{attachment.originalFilename}</strong>
+                <span>{attachment.attachmentCategory || "Other"}</span>
               </div>
             ))}
+            {!material.attachments?.length && <div className="empty-inline">No attachments copied into the managed file tree.</div>}
           </div>
         </div>
-      </div>
-    </section>
+      </section>
+      </>
+      )}
+    </div>
+  );
+}
+
+function MetrologyView({ workspace, payload, setPayload, onOpenInstrument, onCreateNew }) {
+  const instrument = payload?.instrument;
+  const updateInstrument = (patch) => setPayload((current) => ({ ...current, instrument: { ...current.instrument, ...patch } }));
+  const updateCalibration = (calibrationId, patch) => setPayload((current) => ({
+    ...current,
+    calibrations: current.calibrations.map((item) => item.calibration_id === calibrationId ? { ...item, ...patch } : item)
+  }));
+  const addCalibration = () => setPayload((current) => ({ ...current, calibrations: [...current.calibrations, blankCalibration()] }));
+  const removeCalibration = (calibrationId) => setPayload((current) => ({ ...current, calibrations: current.calibrations.filter((item) => item.calibration_id !== calibrationId) }));
+
+  return (
+    <div className="workspace-columns">
+      <section className="panel thin">
+        <div className="panel-heading inline">
+          <div>
+            <h3>Instruments</h3>
+            <span>Calibration-controlled inspection tools</span>
+          </div>
+          <button onClick={onCreateNew}><Plus size={14} /> New</button>
+        </div>
+        <div className="record-list">
+          {workspace.instruments.map((item) => (
+            <button key={item.instrumentId} className={`record-list-item ${payload?.instrument?.instrument_id === item.instrumentId ? "selected" : ""}`} onClick={() => onOpenInstrument(item.instrumentId)}>
+              <strong>{item.toolName}</strong>
+              <span>{item.instrumentId}</span>
+              <small>{item.dueState}</small>
+            </button>
+          ))}
+        </div>
+      </section>
+      {!payload ? (
+        <EmptyState icon={Gauge} title="No instrument selected" text="Choose an instrument record or create a new one." actionLabel="New Instrument" onAction={onCreateNew} />
+      ) : (
+      <>
+      <section className="panel">
+        <div className="panel-heading">
+          <h3>Instrument Record</h3>
+          <span>Inspection tool and calibration history</span>
+        </div>
+        <div className="form-grid">
+          <TextField label="Instrument ID" value={instrument.instrument_id || ""} onChange={(value) => updateInstrument({ instrument_id: value })} />
+          <TextField label="Tool Name" value={instrument.tool_name || ""} onChange={(value) => updateInstrument({ tool_name: value })} />
+          <TextField label="Tool Type" value={instrument.tool_type || ""} onChange={(value) => updateInstrument({ tool_type: value })} />
+          <TextField label="Manufacturer" value={instrument.manufacturer || ""} onChange={(value) => updateInstrument({ manufacturer: value })} />
+          <TextField label="Model" value={instrument.model || ""} onChange={(value) => updateInstrument({ model: value })} />
+          <TextField label="Serial Number" value={instrument.serial_number || ""} onChange={(value) => updateInstrument({ serial_number: value })} />
+          <TextField label="Range" value={instrument.measuring_range || ""} onChange={(value) => updateInstrument({ measuring_range: value })} />
+          <TextField label="Resolution" value={instrument.resolution || ""} onChange={(value) => updateInstrument({ resolution: value })} />
+          <TextField label="Accuracy" value={instrument.accuracy || ""} onChange={(value) => updateInstrument({ accuracy: value })} />
+          <TextField label="Location" value={instrument.location || ""} onChange={(value) => updateInstrument({ location: value })} />
+          <TextField label="Department" value={instrument.owner_department || ""} onChange={(value) => updateInstrument({ owner_department: value })} />
+          <TextField label="Status" value={instrument.status || ""} onChange={(value) => updateInstrument({ status: value })} />
+        </div>
+        <TextArea label="Notes" value={instrument.notes || ""} onChange={(value) => updateInstrument({ notes: value })} rows={4} />
+      </section>
+
+      <section className="panel">
+        <div className="panel-heading inline">
+          <div>
+            <h3>Calibration Records</h3>
+            <span>{payload.calibrations?.length || 0} records</span>
+          </div>
+          <button onClick={addCalibration}><Plus size={15} /> Calibration</button>
+        </div>
+        <div className="stack-list">
+          {(payload.calibrations || []).map((calibration) => (
+            <div key={calibration.calibration_id} className="subpanel">
+              <div className="subpanel-header">
+                <div>
+                  <h4>{calibration.calibration_date || "Calibration"}</h4>
+                  <span>{calibration.result || "No result"}</span>
+                </div>
+                <button className="danger subtle" onClick={() => removeCalibration(calibration.calibration_id)}><X size={14} /> Remove</button>
+              </div>
+              <div className="form-grid">
+                <TextField label="Calibration Date" type="date" value={calibration.calibration_date || ""} onChange={(value) => updateCalibration(calibration.calibration_id, { calibration_date: value })} />
+                <TextField label="Next Due" type="date" value={calibration.next_due_date || ""} onChange={(value) => updateCalibration(calibration.calibration_id, { next_due_date: value })} />
+                <TextField label="Performed By" value={calibration.performed_by || ""} onChange={(value) => updateCalibration(calibration.calibration_id, { performed_by: value })} />
+                <TextField label="Result" value={calibration.result || ""} onChange={(value) => updateCalibration(calibration.calibration_id, { result: value })} />
+                <TextField label="Standard Name" value={calibration.standard_name || ""} onChange={(value) => updateCalibration(calibration.calibration_id, { standard_name: value })} />
+                <TextField label="Certificate Number" value={calibration.certificate_number || ""} onChange={(value) => updateCalibration(calibration.calibration_id, { certificate_number: value })} />
+              </div>
+              <TextArea label="Notes" value={calibration.notes || ""} onChange={(value) => updateCalibration(calibration.calibration_id, { notes: value })} rows={2} />
+            </div>
+          ))}
+          {!payload.calibrations?.length && <div className="empty-inline">No calibration records yet.</div>}
+        </div>
+      </section>
+      </>
+      )}
+    </div>
+  );
+}
+
+function TemplatesView({ workspace, selectedTemplate, setSelectedTemplateId, onStatus, onRefresh }) {
+  const [template, setTemplate] = useState(selectedTemplate || blankTemplate());
+
+  useEffect(() => {
+    setTemplate(selectedTemplate || blankTemplate());
+  }, [selectedTemplate?.id]);
+
+  const saveTemplate = async () => {
+    try {
+      await api.saveTemplate(template);
+      await onRefresh();
+      onStatus("Template saved.");
+    } catch (error) {
+      onStatus(error.message || String(error));
+    }
+  };
+
+  if (!selectedTemplate) {
+    return <EmptyState icon={Library} title="No template selected" text="Create a template after the workspace loads." />;
+  }
+
+  return (
+    <div className="workspace-columns">
+      <section className="panel thin">
+        <div className="panel-heading inline">
+          <div>
+            <h3>Templates</h3>
+            <span>Reusable route starters</span>
+          </div>
+          <button onClick={() => setTemplate(blankTemplate())}><Plus size={14} /> New</button>
+        </div>
+        <div className="record-list">
+          {workspace.templates.map((item) => (
+            <button key={item.id} className={`record-list-item ${template.id === item.id ? "selected" : ""}`} onClick={() => setSelectedTemplateId(item.id)}>
+              <strong>{item.name}</strong>
+              <span>{item.category}</span>
+            </button>
+          ))}
+        </div>
+      </section>
+      <section className="panel">
+        <div className="panel-heading inline">
+          <div>
+            <h3>Template Editor</h3>
+            <span>Operation defaults and instructions</span>
+          </div>
+          <button onClick={saveTemplate}><Save size={14} /> Save Template</button>
+        </div>
+        <div className="form-grid">
+          <TextField label="Name" value={template.name || ""} onChange={(value) => setTemplate((current) => ({ ...current, name: value }))} />
+          <TextField label="Category" value={template.category || ""} onChange={(value) => setTemplate((current) => ({ ...current, category: value }))} />
+        </div>
+        <TextArea label="Default Instructions" value={(template.defaultSteps || []).join("\n")} onChange={(value) => setTemplate((current) => ({ ...current, defaultSteps: value.split(/\r?\n/).filter(Boolean) }))} rows={6} />
+      </section>
+    </div>
+  );
+}
+
+function ImportsView({ onImport, workspace }) {
+  return (
+    <div className="workspace-columns">
+      <section className="panel">
+        <div className="panel-heading">
+          <h3>Legacy Imports</h3>
+          <span>One-time migration into the AMERP file tree</span>
+        </div>
+        <div className="action-grid">
+          <button className="import-card" onClick={() => onImport("setup")}>
+            <Wrench size={20} />
+            <strong>Import Setup Sheet Data</strong>
+            <span>Templates, libraries, and legacy single-part jobs.</span>
+          </button>
+          <button className="import-card" onClick={() => onImport("materials")}>
+            <Database size={20} />
+            <strong>Import Materials Data</strong>
+            <span>SQLite materials, attachments, job usage, and change log.</span>
+          </button>
+          <button className="import-card" onClick={() => onImport("metrology")}>
+            <Gauge size={20} />
+            <strong>Import Metrology Data</strong>
+            <span>Instruments, standards, and calibration history.</span>
+          </button>
+        </div>
+      </section>
+
+      <section className="panel">
+        <div className="panel-heading">
+          <h3>Current Workspace</h3>
+          <span>Quick phase-1 readiness check</span>
+        </div>
+        <div className="stack-list">
+          <div className="inline-card"><strong>{workspace.jobs.length}</strong><span>Jobs loaded</span></div>
+          <div className="inline-card"><strong>{workspace.materials.length}</strong><span>Materials loaded</span></div>
+          <div className="inline-card"><strong>{workspace.instruments.length}</strong><span>Instruments loaded</span></div>
+          <div className="inline-card"><strong>{workspace.templates.length}</strong><span>Operation templates</span></div>
+        </div>
+      </section>
+    </div>
   );
 }
 
 function PrintPacket({ jobId }) {
   const [job, setJob] = useState(null);
-  const [libraries, setLibraries] = useState({});
-  const [error, setError] = useState('');
+  const [materials, setMaterials] = useState([]);
+  const [instruments, setInstruments] = useState([]);
+  const [error, setError] = useState("");
 
   useEffect(() => {
     const load = async () => {
       try {
-        const [loadedJob, loadedLibraries] = await Promise.all([
+        const [loadedJob, materialRows, instrumentRows] = await Promise.all([
           api.loadJob(jobId),
-          api.loadLibraries()
+          api.listMaterials(),
+          api.listInstruments()
         ]);
-        if (!loadedJob) throw new Error('Job not found.');
+        if (!loadedJob) throw new Error("Job not found.");
         setJob(loadedJob);
-        setLibraries(loadedLibraries);
+        setMaterials(materialRows);
+        setInstruments(instrumentRows);
       } catch (loadError) {
         setError(loadError.message || String(loadError));
       }
@@ -1372,189 +1219,116 @@ function PrintPacket({ jobId }) {
     load();
   }, [jobId]);
 
-  if (error) {
-    return <div className="fatal"><h1>Print Error</h1><p>{error}</p></div>;
-  }
+  if (error) return <Fatal title="Print Error" message={error} />;
+  if (!job) return <LoadingScreen message="Loading traveler..." />;
 
-  if (!job) {
-    return <div className="fatal"><h1>Loading job packet...</h1></div>;
-  }
+  const materialMap = new Map(materials.map((item) => [item.id, item]));
+  const instrumentMap = new Map(instruments.map((item) => [item.instrumentId, item]));
 
   return (
     <div className="print-shell">
       <div className="print-actions screen-only">
-        <button onClick={() => { window.location.hash = '/'; }}>
-          <PanelLeft size={17} />
-          Back
-        </button>
-        <button onClick={() => window.print()}>
-          <Printer size={17} />
-          Print
-        </button>
+        <button onClick={() => { window.location.hash = "/"; }}>Back</button>
+        <button onClick={() => window.print()}>Print</button>
       </div>
 
-      <section className="print-page packet-cover-page">
+      <section className="print-page">
         <header className="packet-header">
           <div>
-            <h1>{job.jobNumber || job.jobName || 'Untitled Job'}</h1>
-            <p>{job.partNumber || ''} {job.partName || ''}</p>
+            <h1>{job.jobNumber || "Untitled Job"}</h1>
+            <p>{job.customer || "No customer"}</p>
           </div>
           <div className="revision-box">
-            <strong>Rev {job.revision?.number || '-'}</strong>
-            <span>{job.revision?.date || ''}</span>
+            <strong>Rev {job.revision?.number || "-"}</strong>
+            <span>{job.revision?.date || ""}</span>
           </div>
         </header>
-
         <div className="packet-grid">
-          <PrintField label="Customer" value={job.customer} />
-          <PrintField label="Material" value={job.material} />
-          <PrintField label="Quantity" value={job.quantity} />
+          <PrintField label="Status" value={job.status} />
+          <PrintField label="Priority" value={job.priority} />
+          <PrintField label="Due Date" value={job.dueDate} />
           <PrintField label="Author" value={job.revision?.author} />
         </div>
-
-        {job.revision?.notes && (
-          <div className="print-note">
-            <strong>Revision Notes</strong>
-            <p>{job.revision.notes}</p>
-          </div>
-        )}
-
         <div className="route-summary">
-          <h2>Process Route</h2>
+          <h2>Parts And Routes</h2>
           <ol>
-            {job.operations.map((operation) => (
-              <li key={operation.id}>{operation.title || operation.type}</li>
+            {job.parts.map((part) => (
+              <li key={part.id}>{part.partNumber || part.partName || part.id} • {part.operations.length} operations</li>
             ))}
           </ol>
         </div>
       </section>
 
-      {job.operations.map((operation, index) => (
-        <PrintOperation key={operation.id} operation={operation} index={index} libraries={libraries} jobTools={job.tools || []} />
+      {job.parts.map((part) => (
+        <section className="print-page" key={part.id}>
+          <header className="operation-print-header">
+            <span>Part</span>
+            <h2>{part.partNumber || part.partName || part.id}</h2>
+          </header>
+          <div className="packet-grid">
+            <PrintField label="Description" value={part.description} />
+            <PrintField label="Quantity" value={part.quantity} />
+            <PrintField label="Material Spec" value={part.materialSpec} />
+            <PrintField label="Revision" value={part.revision?.number} />
+          </div>
+          {part.operations.map((operation) => (
+            <div className="print-operation-block" key={operation.id}>
+              <h3>{operation.sequence}. {operation.title}</h3>
+              <div className="print-two-column">
+                <div>
+                  <PrintField label="Op Code" value={operation.operationCode} compact />
+                  <PrintField label="Type" value={operation.type} compact />
+                  <PrintField label="Work Center" value={operation.workCenter} compact />
+                  <PrintField label="Status" value={operation.status} compact />
+                </div>
+                <div>
+                  <PrintField label="Material Lots" value={(operation.requiredMaterialLots || []).map((id) => materialMap.get(id)?.serialCode || id).join(", ")} compact />
+                  <PrintField label="Instruments" value={(operation.requiredInstruments || []).map((id) => instrumentMap.get(id)?.toolName || id).join(", ")} compact />
+                </div>
+              </div>
+              {operation.parameters?.length > 0 && (
+                <table className="print-table">
+                  <tbody>
+                    {operation.parameters.map((parameter) => (
+                      <tr key={parameter.id}>
+                        <th>{parameter.label}</th>
+                        <td>{parameter.value}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+              {operation.setupInstructions && <div className="print-note"><strong>Setup</strong><p>{operation.setupInstructions}</p></div>}
+              {operation.workInstructions && <div className="print-note"><strong>Work Instructions</strong><p>{operation.workInstructions}</p></div>}
+              {operation.stepImages?.length > 0 && (
+                <div className="print-images">
+                  {operation.stepImages.map((image) => <img key={image.id} src={api.assetUrl(image.relativePath)} alt={image.name || "Step"} />)}
+                </div>
+              )}
+            </div>
+          ))}
+        </section>
       ))}
     </div>
   );
 }
 
-function PrintOperation({ operation, index, libraries, jobTools }) {
-  const operationTools = (operation.toolIds || [])
-    .map((id) => (jobTools || []).find((tool) => tool.id === id))
-    .filter(Boolean)
-    .filter(() => usesToolsAndFixtures(operation));
-  const assignedLibraries = operationLibraryNames(operation)
-    .map((name) => libraries[name])
-    .filter(Boolean)
-    .filter((library) => !isFixtureLibrary(library) || usesToolsAndFixtures(operation));
-  const setupRows = assignedLibraries.map((library) => {
-    if (library.name === 'machines') {
-      return [library.label || 'Machine', recordName(libraries, library.name, operation.machineId)];
-    }
-    if (isFixtureLibrary(library)) {
-      return [
-        library.label || 'Fixtures',
-        (operation.fixtureIds || []).map((id) => recordName(libraries, library.name, id)).filter(Boolean).join(', ')
-      ];
-    }
-    return [
-      library.label || titleFromName(library.name),
-      operationSelectedLibraryIds(operation, library.name).map((id) => recordName(libraries, library.name, id)).filter(Boolean).join(', ')
-    ];
-  }).filter(([, value]) => String(value || '').trim());
-
-  const parameterRows = (operation.parameters || [])
-    .filter((parameter) => String(parameter.label || '').trim() || String(parameter.value || '').trim());
-  const instructionSteps = (operation.steps || [])
-    .filter((step) => String(step.instruction || '').trim() || (step.images || []).length > 0);
-
-  return (
-    <section className="print-page operation-print-page">
-      <header className="operation-print-header">
-        <span>Operation {index + 1}</span>
-        <h2>{operation.title || operation.type}</h2>
-      </header>
-
-      {(setupRows.length > 0 || parameterRows.length > 0) && (
-        <div className="print-two-column">
-          {setupRows.length > 0 && (
-            <div>
-              <h3>Setup</h3>
-              {setupRows.map(([label, value]) => (
-                <PrintField key={`${label}-${value}`} label={label} value={value} compact />
-              ))}
-            </div>
-          )}
-          {parameterRows.length > 0 && (
-            <div>
-              <h3>Parameters</h3>
-              <table className="print-table">
-                <tbody>
-                  {parameterRows.map((parameter) => (
-                    <tr key={parameter.id}>
-                      <th>{parameter.label}</th>
-                      <td>{parameter.value}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
-      )}
-
-      {operationTools.length > 0 && (
-        <>
-          <h3>Tools</h3>
-          <table className="print-table tool-print-table">
-            <thead>
-              <tr>
-                <th>Tool</th>
-                <th>Diameter</th>
-                <th>Length / Stickout</th>
-                <th>Holder</th>
-              </tr>
-            </thead>
-            <tbody>
-              {operationTools.map((tool) => (
-                <tr key={tool.id}>
-                  <td>{tool.name || '-'}</td>
-                  <td>{tool.diameter || '-'}</td>
-                  <td>{tool.length || '-'}</td>
-                  <td>{tool.holder || '-'}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </>
-      )}
-
-      {instructionSteps.length > 0 && (
-        <>
-          <h3>Work Instructions</h3>
-          <ol className="print-steps">
-            {instructionSteps.map((step) => (
-              <li key={step.id}>
-                {step.instruction && <p>{step.instruction}</p>}
-                {(step.images || []).length > 0 && (
-                  <div className="print-images">
-                    {step.images.map((image) => (
-                      <img key={image.id} src={api.assetUrl(image.relativePath)} alt={image.name || 'Step image'} />
-                    ))}
-                  </div>
-                )}
-              </li>
-            ))}
-          </ol>
-        </>
-      )}
-    </section>
-  );
-}
-
-function TextField({ label, value, onChange, type = 'text' }) {
+function TextField({ label, value, onChange, type = "text" }) {
   return (
     <label className="field">
       <span>{label}</span>
-      <input type={type} value={value || ''} onChange={(event) => onChange(event.target.value)} />
+      <input type={type} value={value || ""} onChange={(event) => onChange(event.target.value)} />
+    </label>
+  );
+}
+
+function SelectField({ label, value, options, onChange }) {
+  return (
+    <label className="field">
+      <span>{label}</span>
+      <select value={value || ""} onChange={(event) => onChange(event.target.value)}>
+        {options.map((option) => <option key={option} value={option}>{option}</option>)}
+      </select>
     </label>
   );
 }
@@ -1563,18 +1337,68 @@ function TextArea({ label, value, onChange, rows = 4 }) {
   return (
     <label className="field full">
       <span>{label}</span>
-      <textarea value={value || ''} rows={rows} onChange={(event) => onChange(event.target.value)} />
+      <textarea value={value || ""} rows={rows} onChange={(event) => onChange(event.target.value)} />
     </label>
+  );
+}
+
+function EmptyState({ icon: Icon, title, text, actionLabel, onAction }) {
+  return (
+    <section className="empty-state">
+      <Icon size={34} />
+      <h3>{title}</h3>
+      <p>{text}</p>
+      {actionLabel && <button onClick={onAction}>{actionLabel}</button>}
+    </section>
+  );
+}
+
+function LoadingScreen({ message }) {
+  return <div className="setup-screen"><div className="setup-panel"><h1>{message}</h1></div></div>;
+}
+
+function Fatal({ title, message }) {
+  return <div className="fatal"><h1>{title}</h1><p>{message}</p></div>;
+}
+
+function StatCard({ label, value, accent = false }) {
+  return (
+    <section className={`panel stat-card ${accent ? "accent-card" : ""}`}>
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </section>
   );
 }
 
 function PrintField({ label, value, compact = false }) {
   return (
-    <div className={`print-field ${compact ? 'compact' : ''}`}>
+    <div className={`print-field ${compact ? "compact" : ""}`}>
       <span>{label}</span>
-      <strong>{value || '-'}</strong>
+      <strong>{value || "-"}</strong>
     </div>
   );
 }
 
-createRoot(document.getElementById('root')).render(<App />);
+function titleForView(view) {
+  return {
+    dashboard: "Dashboard",
+    jobs: "Jobs",
+    materials: "Materials",
+    metrology: "Metrology",
+    templates: "Templates",
+    imports: "Imports"
+  }[view] || "AMERP";
+}
+
+function subtitleForView(view) {
+  return {
+    dashboard: "Job-centered ERP status, audit visibility, and quality watch.",
+    jobs: "Jobs contain parts, and each part owns an ordered route.",
+    materials: "Local-first material cert and traceability records.",
+    metrology: "Calibration-controlled instruments linked into operations.",
+    templates: "Reusable operation defaults and routing helpers.",
+    imports: "One-time migration tools for the three legacy projects."
+  }[view] || "";
+}
+
+createRoot(document.getElementById("root")).render(<App />);

@@ -1,39 +1,50 @@
-# Setup Sheet Generator
+# AMERP
 
-Electron + React app for creating jobshop machining setup sheets and work instructions.
+AMERP is a local-first `Electron + React` ERP for jobshops, geared toward ISO9001-style traceability and quality records.
 
-## Run The App
+Phase 1 centers the workflow on:
 
-Double-click:
+- `Job -> Part -> ordered Operations`
+- setup documentation and traveler packets
+- material cert and lot traceability
+- metrology / calibration visibility for inspection tools
+- a human-readable canonical file tree with generated Markdown history records
 
-```bat
-Start-App.cmd
-```
+## Current Architecture
 
-This launches the built Electron app directly. It does not require a dev server.
+- `electron/main.cjs`
+  - Electron shell and IPC wiring
+- `electron/backend/erp.cjs`
+  - file-backed repositories, importers, audit trail, lock handling, and PDF export
+- `src/main.jsx`
+  - unified ERP UI and print packet renderer
+- `src/styles.css`
+  - main application and print styling
+- `scripts/import_materials_sqlite.py`
+  - SQLite export helper for importing legacy Materials-Database records
 
-## Development Run
+## Canonical Data Root
 
-From this folder, run:
+The selected ERP data folder is the system of record. It contains:
 
-```bat
-Start-Dev.cmd
-```
+- `config/`
+- `jobs/`
+- `materials/`
+- `metrology/`
+- `templates/operations/`
+- `libraries/`
+- `audit/`
+- `cache/`
+- `locks/`
 
-The app prompts for a data folder on first launch. Jobs, libraries, templates, and copied step images are stored as JSON and files in that selected folder.
+All business data is stored as readable JSON and Markdown companion files. The search index under `cache/` is disposable.
 
-## Build Renderer
+## Legacy Imports
 
-```bat
-Build-App.cmd
-```
+Phase 1 includes one-time import flows for:
 
-## Development Notes
+- `SetupSheetGenerator`
+- `Materials-Database`
+- `Metrology-Tracker`
 
-- Electron main process: `electron/main.cjs`
-- Secure preload API: `electron/preload.cjs`
-- React app and print packet view: `src/main.jsx`
-- Styling: `src/styles.css`
-- Data folders created by the app: `jobs/`, `libraries/`, `templates/`, and `assets/`
-
-This first version runs locally on Windows. Installer/portable EXE packaging is intentionally deferred.
+After import, AMERP becomes the authoritative application for those records.

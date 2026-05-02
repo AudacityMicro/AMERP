@@ -5,3 +5,5 @@ dist/
 .smoke-data*/
 *.log
 pnpm.cjs
+__pycache__/
+*.pyc
