@@ -19,6 +19,7 @@ contextBridge.exposeInMainWorld("amerp", {
   deleteJob: (id) => invoke("delete-job", id),
   createJobFromFusion: () => invoke("create-job-from-fusion"),
   importSubtractPurchaseOrders: (filePaths) => invoke("import-subtract-purchase-orders", filePaths),
+  importXometryPurchaseOrders: (filePaths) => invoke("import-xometry-purchase-orders", filePaths),
   importXometryTravelers: (jobId, filePaths) => invoke("import-xometry-travelers", jobId, filePaths),
   chooseJobDocuments: (jobId) => invoke("choose-job-documents", jobId),
   choosePartDocuments: (jobId, partId) => invoke("choose-part-documents", jobId, partId),

@@ -65,6 +65,8 @@ const blankPart = () => ({
   description: "",
   quantity: "",
   materialSpec: "",
+  requiredMaterialLots: [],
+  customMaterialText: "",
   revision: {
     number: "A",
     date: today(),
@@ -86,12 +88,14 @@ const blankOperation = (sequence = 1) => ({
   status: "Ready",
   setupInstructions: "",
   workInstructions: "",
+  instructionSteps: [],
   notes: "",
   parameters: [blankParameter()],
   stepImages: [],
   tools: [],
   setupTemplateRefs: [],
   jobToolRefs: [],
+  librarySelections: {},
   requiredMaterialLots: [],
   requiredInstruments: [],
   customMaterialText: "",
@@ -105,6 +109,7 @@ const blankOperation = (sequence = 1) => ({
 });
 
 const blankParameter = () => ({ id: uid("parameter"), label: "", value: "" });
+const blankInstructionStep = (text = "") => ({ id: uid("step"), text, images: [] });
 const OPERATION_TYPE_OPTIONS = ["General", "Machining", "Inspection", "Cutoff", "Finishing", "Deburr", "Assembly"];
 const OPERATION_STATUS_OPTIONS = ["Ready", "In Process", "Complete", "Hold"];
 const blankOperationTool = () => ({
@@ -197,6 +202,19 @@ const blankMaterialFamily = () => ({
   id: uid("material-family"),
   name: "",
   alloys: [""]
+});
+
+const blankLibraryRecord = () => ({
+  id: uid("library-record"),
+  name: "New Record",
+  active: true
+});
+
+const blankLibraryDefinition = (order = 1000) => ({
+  name: uid("library").toLowerCase(),
+  label: "New Library",
+  order,
+  records: []
 });
 
 const blankCustomer = (name = "") => ({
@@ -414,6 +432,50 @@ function summarizeJobTool(tool) {
   const name = tool?.name || tool?.description || "Tool";
   const diameter = tool?.diameter ? `Dia ${tool.diameter}` : "";
   return [number, name, diameter].filter(Boolean).join(" - ");
+}
+
+function libraryList(libraries) {
+  return Object.values(libraries || {}).sort((a, b) => Number(a.order || 1000) - Number(b.order || 1000) || String(a.label || "").localeCompare(String(b.label || "")));
+}
+
+function selectedLibraryNamesForOperation(operation, templates) {
+  const templateLibraryNames = (templates || [])
+    .filter((template) => (operation?.setupTemplateRefs || []).includes(template.id))
+    .flatMap((template) => template.libraryNames || []);
+  const savedLibraryNames = Object.entries(operation?.librarySelections || {})
+    .filter(([, selectedIds]) => Array.isArray(selectedIds) && selectedIds.length)
+    .map(([libraryName]) => libraryName);
+  return Array.from(new Set([...templateLibraryNames, ...savedLibraryNames]));
+}
+
+function summarizeOperationLibraries(operation, libraries, templates) {
+  return selectedLibraryNamesForOperation(operation, templates)
+    .map((libraryName) => {
+      const library = libraries?.[libraryName] || null;
+      const selectedIds = operation?.librarySelections?.[libraryName] || [];
+      if (!selectedIds.length) {
+        return "";
+      }
+      const recordMap = new Map((library?.records || []).map((record) => [record.id, record.name]));
+      const selectedNames = selectedIds.map((recordId) => recordMap.get(recordId) || `[Missing] ${recordId}`);
+      return `${library?.label || libraryName}: ${selectedNames.join(", ")}`;
+    })
+    .filter(Boolean);
+}
+
+function instructionStepsFromOperation(operation) {
+  if (Array.isArray(operation?.instructionSteps) && operation.instructionSteps.length) {
+    return operation.instructionSteps;
+  }
+  const lines = String(operation?.workInstructions || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  return lines.map((line) => blankInstructionStep(line));
+}
+
+function serializeInstructionSteps(steps) {
+  return (steps || []).map((step) => String(step.text || "").trim()).filter(Boolean).join("\n");
 }
 
 function normalizeImportText(value) {
@@ -920,6 +982,37 @@ function Workspace() {
     }
   };
 
+  const importXometryPurchaseOrders = async () => {
+    setBusy(true);
+    try {
+      const imported = await api.importXometryPurchaseOrders();
+      if (!imported) return;
+      const importedJobs = imported.jobs || [];
+      if (!importedJobs.length) {
+        const firstError = imported.errors?.[0]?.message;
+        showStatus(firstError || "No Xometry purchase orders were imported.");
+        await refreshWorkspace();
+        return;
+      }
+      await refreshWorkspace();
+      await openJob(importedJobs[0].id);
+      const messageParts = [`Imported ${importedJobs.length} Xometry purchase order job${importedJobs.length === 1 ? "" : "s"}.`];
+      if (imported.warnings?.length) {
+        const warningLines = [...new Set(imported.warnings.map((warning) => warning.message).filter(Boolean))];
+        messageParts.push(`Warnings:\n- ${warningLines.join("\n- ")}`);
+      }
+      if (imported.errors?.length) {
+        const errorLines = [...new Set(imported.errors.map((item) => item.message).filter(Boolean))];
+        messageParts.push(`Skipped:\n- ${errorLines.join("\n- ")}`);
+      }
+      showStatus(messageParts.join("\n"));
+    } catch (error) {
+      showStatus(error.message || String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const updateJobPartOperations = (partId, importedOperations, importedTools = []) => {
     setJob((current) => ({
       ...current,
@@ -938,6 +1031,13 @@ function Workspace() {
             folderName: `${String(sequence).padStart(3, "0")}-${(operation.folderName || operation.title || "operation").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "operation"}`,
             operationCode: operation.operationCode || `OP${String(sequence).padStart(3, "0")}`,
             parameters: (operation.parameters || []).map((parameter) => ({ ...blankParameter(), ...parameter, id: uid("parameter") })),
+            instructionSteps: Array.isArray(operation.instructionSteps)
+              ? operation.instructionSteps.map((step) => ({
+                id: step.id || uid("step"),
+                text: step.text || "",
+                images: Array.isArray(step.images) ? step.images : []
+              }))
+              : [],
             stepImages: [],
             tools: ((operation.tools && operation.tools.length) ? operation.tools : importedTools).map((tool) => ({ ...blankOperationTool(), ...tool, id: uid("tool") })),
             setupTemplateRefs: [...(operation.setupTemplateRefs || [])],
@@ -1718,6 +1818,7 @@ function Workspace() {
             onBackToJob={backToJob}
             onBackToPart={backToPart}
             onImportSubtractPurchaseOrders={importSubtractPurchaseOrders}
+            onImportXometryPurchaseOrders={importXometryPurchaseOrders}
             onImportXometryIntoJob={importXometryIntoJob}
             onAssignNextJobNumber={assignNextJobNumber}
             onImportFusionToPart={importFusionIntoPart}
@@ -1868,7 +1969,9 @@ function LegacyJobsView({ job, setJob, workspace, onChooseOperationImages, onImp
         operation.title = template.name;
         operation.type = template.category;
         operation.setupTemplateRefs = [template.id];
+        operation.librarySelections = Object.fromEntries((template.libraryNames || []).map((libraryName) => [libraryName, []]));
         operation.parameters = (template.defaultParameters || []).map((item) => ({ ...blankParameter(), label: item.label || "", value: item.value || "" }));
+        operation.instructionSteps = (template.defaultSteps || []).map((step) => blankInstructionStep(step));
         operation.workInstructions = (template.defaultSteps || []).join("\n");
       }
       return { ...part, operations: [...part.operations, operation] };
@@ -2306,6 +2409,7 @@ function JobsView({
   onBackToJob,
   onBackToPart,
   onImportSubtractPurchaseOrders,
+  onImportXometryPurchaseOrders,
   onImportXometryIntoJob,
   onAssignNextJobNumber,
   onChooseOperationImages,
@@ -2352,7 +2456,9 @@ function JobsView({
         operation.title = template.name;
         operation.type = template.category;
         operation.setupTemplateRefs = [template.id];
+        operation.librarySelections = Object.fromEntries((template.libraryNames || []).map((libraryName) => [libraryName, []]));
         operation.parameters = (template.defaultParameters || []).map((item) => ({ ...blankParameter(), label: item.label || "", value: item.value || "" }));
+        operation.instructionSteps = (template.defaultSteps || []).map((step) => blankInstructionStep(step));
         operation.workInstructions = (template.defaultSteps || []).join("\n");
       }
       return { ...part, operations: [...part.operations, operation] };
@@ -2368,9 +2474,29 @@ function JobsView({
       .filter((operation) => operation.id !== operationId)
       .map((operation, index) => ({ ...operation, sequence: index + 1 }))
   }));
+  const moveOperation = (partId, operationId, direction) => updatePart(partId, (part) => {
+    const currentIndex = part.operations.findIndex((operation) => operation.id === operationId);
+    if (currentIndex < 0) {
+      return part;
+    }
+    const targetIndex = currentIndex + direction;
+    if (targetIndex < 0 || targetIndex >= part.operations.length) {
+      return part;
+    }
+    const nextOperations = [...part.operations];
+    const [movedOperation] = nextOperations.splice(currentIndex, 1);
+    nextOperations.splice(targetIndex, 0, movedOperation);
+    return {
+      ...part,
+      operations: nextOperations.map((operation, index) => ({
+        ...operation,
+        sequence: index + 1
+      }))
+    };
+  });
 
   if (jobScreen === "list") {
-    return <JobListScreen jobs={workspace.jobs} onOpenJob={onOpenJob} onCreateJob={onCreateJob} onImportSubtractPurchaseOrders={onImportSubtractPurchaseOrders} />;
+    return <JobListScreen jobs={workspace.jobs} onOpenJob={onOpenJob} onCreateJob={onCreateJob} onImportSubtractPurchaseOrders={onImportSubtractPurchaseOrders} onImportXometryPurchaseOrders={onImportXometryPurchaseOrders} />;
   }
 
   if (!job) {
@@ -2385,6 +2511,8 @@ function JobsView({
         operation={selectedOperation}
         materials={materials}
         instruments={instruments}
+        libraries={workspace.libraries || {}}
+        templates={templates}
         constants={workspace.constants}
         preferences={workspace.preferences}
         onUpdate={(updater) => updateOperation(selectedPart.id, selectedOperation.id, updater)}
@@ -2393,8 +2521,7 @@ function JobsView({
           onBackToPart();
         }}
         onAddImages={async () => {
-          const images = await onChooseOperationImages(job.id, selectedPart.id, selectedOperation.id);
-          updateOperation(selectedPart.id, selectedOperation.id, (current) => ({ ...current, stepImages: [...current.stepImages, ...images] }));
+          return onChooseOperationImages(job.id, selectedPart.id, selectedOperation.id);
         }}
         onCreateInlineMaterial={onCreateInlineMaterial}
         onAddMaterialFamily={onAddMaterialFamily}
@@ -2433,6 +2560,13 @@ function JobsView({
         onAddOperation={addOperation}
         onImportFusion={onImportFusionToPart}
         onOpenOperation={(operationId) => onOpenOperation(selectedPart.id, operationId)}
+        onMoveOperation={(operationId, direction) => moveOperation(selectedPart.id, operationId, direction)}
+        materials={materials}
+        constants={workspace.constants}
+        preferences={workspace.preferences}
+        onCreateInlineMaterial={onCreateInlineMaterial}
+        onAddMaterialFamily={onAddMaterialFamily}
+        onAddMaterialAlloy={onAddMaterialAlloy}
       />
     );
   }
@@ -2469,7 +2603,7 @@ function JobsView({
   );
 }
 
-function JobListScreen({ jobs, onOpenJob, onCreateJob, onImportSubtractPurchaseOrders }) {
+function JobListScreen({ jobs, onOpenJob, onCreateJob, onImportSubtractPurchaseOrders, onImportXometryPurchaseOrders }) {
   const [query, setQuery] = useState("");
   const [showArchived, setShowArchived] = useState(false);
   const filteredJobs = jobs.filter((item) => {
@@ -2491,6 +2625,7 @@ function JobListScreen({ jobs, onOpenJob, onCreateJob, onImportSubtractPurchaseO
           <button onClick={() => setShowArchived((current) => !current)}>
             {showArchived ? "Hide Archived" : "Show Archived"}
           </button>
+          <button onClick={onImportXometryPurchaseOrders}><Import size={15} /> Import Xometry PO</button>
           <button onClick={onImportSubtractPurchaseOrders}><Import size={15} /> Import Subtract PO</button>
           <button onClick={onCreateJob}><Plus size={15} /> New Job</button>
         </div>
@@ -2648,7 +2783,7 @@ function JobDetailScreen({
               {job.parts.map((part) => (
                 <button key={part.id} className="record-list-item" onClick={() => onOpenPart(part.id)}>
                   <strong>{part.partNumber || part.partName || "New Part"}</strong>
-                  <span>{part.materialSpec || part.description || "No part description"}</span>
+                  <span>{part.materialSpec || "No material spec"}</span>
                   <small>{part.operations.length} operations</small>
                 </button>
               ))}
@@ -2683,6 +2818,9 @@ function PartDetailScreen({
   busy,
   part,
   templates,
+  materials,
+  constants,
+  preferences,
   onUpdate,
   onRemove,
   onAddDocuments,
@@ -2693,65 +2831,113 @@ function PartDetailScreen({
   onReviseDocument,
   onAddOperation,
   onImportFusion,
-  onOpenOperation
+  onOpenOperation,
+  onMoveOperation,
+  onCreateInlineMaterial,
+  onAddMaterialFamily,
+  onAddMaterialAlloy
 }) {
+  const [showMaterialPicker, setShowMaterialPicker] = useState(false);
   const updateField = (patch) => onUpdate((current) => ({ ...current, ...patch }));
   const updateRevision = (patch) => onUpdate((current) => ({ ...current, revision: { ...current.revision, ...patch } }));
+  const selectedMaterials = (materials || []).filter((item) => (part.requiredMaterialLots || []).includes(item.id));
 
   return (
     <div className="workflow-stack">
-      <section className="panel">
-        <div className="panel-heading inline">
-          <div>
-            <h3>Part Detail</h3>
-            <span>{part.operations.length} operations</span>
+      <div className="record-grid job-detail-columns">
+        <section className="panel">
+          <div className="panel-heading inline">
+            <div>
+              <h3>Part Detail</h3>
+              <span>{part.operations.length} operations</span>
+            </div>
+            <div className="toolbar">
+              <button className="danger subtle" onClick={onRemove}><X size={14} /> Remove Part</button>
+            </div>
           </div>
-          <div className="toolbar">
-            <button className="danger subtle" onClick={onRemove}><X size={14} /> Remove Part</button>
+          <div className="form-grid compact-4">
+            <TextField label="Part Number" value={part.partNumber} onChange={(value) => updateField({ partNumber: value })} />
+            <TextField label="Part Name" value={part.partName} onChange={(value) => updateField({ partName: value })} />
+            <TextField label="Quantity" value={part.quantity} onChange={(value) => updateField({ quantity: value })} />
+            <TextField label="Material Spec" value={part.materialSpec} onChange={(value) => updateField({ materialSpec: value })} />
+            <TextField label="Part Revision" value={part.revision?.number || ""} onChange={(value) => updateRevision({ number: value })} />
+            <TextField label="Revision Date" type="date" value={part.revision?.date || ""} onChange={(value) => updateRevision({ date: value })} />
           </div>
-        </div>
-        <div className="form-grid compact-4">
-          <TextField label="Part Number" value={part.partNumber} onChange={(value) => updateField({ partNumber: value })} />
-          <TextField label="Part Name" value={part.partName} onChange={(value) => updateField({ partName: value })} />
-          <TextField label="Quantity" value={part.quantity} onChange={(value) => updateField({ quantity: value })} />
-          <TextField label="Material Spec" value={part.materialSpec} onChange={(value) => updateField({ materialSpec: value })} />
-          <TextField label="Part Revision" value={part.revision?.number || ""} onChange={(value) => updateRevision({ number: value })} />
-          <TextField label="Revision Date" type="date" value={part.revision?.date || ""} onChange={(value) => updateRevision({ date: value })} />
-        </div>
-        <TextArea label="Description" value={part.description || ""} onChange={(value) => updateField({ description: value })} rows={2} />
-        <TextArea label="Part Notes" value={part.notes || ""} onChange={(value) => updateField({ notes: value })} rows={2} />
-      </section>
-
-      <section className="panel">
-        <div className="panel-heading inline">
-          <div>
-            <h3>Operations</h3>
-            <span>{part.operations.length} total</span>
-          </div>
-          <div className="toolbar">
-            <button onClick={() => onImportFusion(part.id)} disabled={busy}><Import size={14} /> From Fusion</button>
-            <select className="compact-select" defaultValue="" disabled={busy} onChange={(event) => event.target.value && onAddOperation(part.id, event.target.value)}>
-              <option value="">Add From Template</option>
-              {templates.map((template) => <option key={template.id} value={template.id}>{template.name}</option>)}
-            </select>
-            <button onClick={() => onAddOperation(part.id, "")} disabled={busy}><Plus size={14} /> Blank Operation</button>
-          </div>
-        </div>
-        <div className="record-list">
-          {part.operations.map((operation) => (
-            <button key={operation.id} className="record-list-item record-list-row" onClick={() => onOpenOperation(operation.id)}>
-              <strong>{operation.sequence}. {operation.title || "Operation"}</strong>
-              <div className="record-row-meta">
-                <small>{operation.operationCode || "No code"}</small>
-                <small>{operation.type || "General"}</small>
-                <small>{operation.tools?.length || 0} tools</small>
-                <small>{(operation.requiredMaterialLots?.length || 0) + (operation.customMaterialText ? 1 : 0)} materials</small>
+          <div className="subpanel top-gap">
+            <div className="subpanel-header">
+              <div>
+                <h4>Part Materials</h4>
+                <span>{selectedMaterials.length} linked / {part.customMaterialText ? "Other set" : "No other material"}</span>
               </div>
-            </button>
-          ))}
-          {!part.operations.length && <div className="empty-inline">No operations yet. Add one when you are ready.</div>}
-        </div>
-      </section>
+              <button onClick={() => setShowMaterialPicker(true)}><Database size={14} /> Select Materials</button>
+            </div>
+            <div className="summary-lines">
+              {selectedMaterials.map((item) => (
+                <p key={item.id} className="summary-line"><strong>{item.serialCode}</strong><span>{[item.materialFamily, materialDisplayType(item)].filter(Boolean).join(" / ") || "-"}</span></p>
+              ))}
+              {!selectedMaterials.length && <div className="empty-inline">No linked material records.</div>}
+              {part.customMaterialText && <p className="summary-line"><strong>Other</strong><span>{part.customMaterialText}</span></p>}
+            </div>
+          </div>
+          <TextArea label="Part Notes" value={part.notes || ""} onChange={(value) => updateField({ notes: value })} rows={3} />
+        </section>
+
+        <section className="panel">
+          <div className="panel-heading inline">
+            <div>
+              <h3>Operations</h3>
+              <span>{part.operations.length} total</span>
+            </div>
+            <div className="toolbar">
+              <button onClick={() => onImportFusion(part.id)} disabled={busy}><Import size={14} /> From Fusion</button>
+              <select className="compact-select" defaultValue="" disabled={busy} onChange={(event) => event.target.value && onAddOperation(part.id, event.target.value)}>
+                <option value="">Add From Template</option>
+                {templates.map((template) => <option key={template.id} value={template.id}>{template.name}</option>)}
+              </select>
+              <button onClick={() => onAddOperation(part.id, "")} disabled={busy}><Plus size={14} /> Blank Operation</button>
+            </div>
+          </div>
+          <div className="record-list">
+            {part.operations.map((operation) => (
+              <button key={operation.id} className="record-list-item record-list-row" onClick={() => onOpenOperation(operation.id)}>
+                <div className="record-row-primary">
+                  <strong>{operation.sequence}. {operation.title || "Operation"}</strong>
+                </div>
+                <div className="record-row-meta">
+                  <small>{operation.operationCode || "No code"}</small>
+                  <small>{operation.type || "General"}</small>
+                  <small>{operation.tools?.length || 0} tools</small>
+                  <div className="tiny-toolbar">
+                    <button
+                      type="button"
+                      className="inline-action-button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onMoveOperation(operation.id, -1);
+                      }}
+                      disabled={operation.sequence <= 1}
+                    >
+                      Up
+                    </button>
+                    <button
+                      type="button"
+                      className="inline-action-button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onMoveOperation(operation.id, 1);
+                      }}
+                      disabled={operation.sequence >= part.operations.length}
+                    >
+                      Down
+                    </button>
+                  </div>
+                </div>
+              </button>
+            ))}
+            {!part.operations.length && <div className="empty-inline">No operations yet. Add one when you are ready.</div>}
+          </div>
+        </section>
+      </div>
 
       <DocumentsPanel
         title="Part Attachments"
@@ -2764,6 +2950,24 @@ function PartDetailScreen({
         onReviseDocument={onReviseDocument}
         emptyText="No part attachments attached yet."
       />
+
+      <MaterialPickerDialog
+        open={showMaterialPicker}
+        materials={materials}
+        constants={constants}
+        preferences={preferences}
+        selectedIds={part.requiredMaterialLots || []}
+        customMaterialText={part.customMaterialText || ""}
+        singleSelect
+        onClose={() => setShowMaterialPicker(false)}
+        onApply={({ selectedIds, customMaterialText }) => {
+          updateField({ requiredMaterialLots: selectedIds, customMaterialText });
+          setShowMaterialPicker(false);
+        }}
+        onCreateInlineMaterial={onCreateInlineMaterial}
+        onAddMaterialFamily={onAddMaterialFamily}
+        onAddMaterialAlloy={onAddMaterialAlloy}
+      />
     </div>
   );
 }
@@ -2772,8 +2976,9 @@ function OperationDetailScreen({
   job,
   part,
   operation,
-  materials,
   instruments,
+  libraries,
+  templates,
   constants,
   preferences,
   onUpdate,
@@ -2783,8 +2988,17 @@ function OperationDetailScreen({
   onAddMaterialFamily,
   onAddMaterialAlloy
 }) {
-  const [showMaterialPicker, setShowMaterialPicker] = useState(false);
   const updateField = (patch) => onUpdate((current) => ({ ...current, ...patch }));
+  const updateInstructionSteps = (updater) => onUpdate((current) => {
+    const currentSteps = instructionStepsFromOperation(current);
+    const nextSteps = typeof updater === "function" ? updater(currentSteps) : updater;
+    return {
+      ...current,
+      instructionSteps: nextSteps,
+      workInstructions: serializeInstructionSteps(nextSteps),
+      stepImages: nextSteps.flatMap((step) => step.images || [])
+    };
+  });
   const toggleRef = (field, id) => onUpdate((current) => ({
     ...current,
     [field]: current[field].includes(id) ? current[field].filter((item) => item !== id) : [...current[field], id]
@@ -2801,7 +3015,31 @@ function OperationDetailScreen({
   }));
   const addTool = () => onUpdate((current) => ({ ...current, tools: [...(current.tools || []), blankOperationTool()] }));
   const removeTool = (toolId) => onUpdate((current) => ({ ...current, tools: (current.tools || []).filter((tool) => tool.id !== toolId) }));
-  const selectedMaterials = materials.filter((item) => (operation.requiredMaterialLots || []).includes(item.id));
+  const instructionSteps = instructionStepsFromOperation(operation);
+  const assignedLibraryNames = selectedLibraryNamesForOperation(operation, templates);
+  const updateLibrarySelections = (libraryName, recordId) => onUpdate((current) => {
+    const currentSelection = current.librarySelections?.[libraryName] || [];
+    return {
+      ...current,
+      librarySelections: {
+        ...(current.librarySelections || {}),
+        [libraryName]: currentSelection.includes(recordId)
+          ? currentSelection.filter((item) => item !== recordId)
+          : [...currentSelection, recordId]
+      }
+    };
+  });
+
+  const addInstructionStep = () => updateInstructionSteps((current) => [...current, blankInstructionStep("")]);
+  const changeInstructionStep = (stepId, text) => updateInstructionSteps((current) => current.map((step) => step.id === stepId ? { ...step, text } : step));
+  const removeInstructionStep = (stepId) => updateInstructionSteps((current) => current.filter((step) => step.id !== stepId));
+  const addImagesToStep = async (stepId) => {
+    const images = await onAddImages();
+    if (!images?.length) {
+      return;
+    }
+    updateInstructionSteps((current) => current.map((step) => step.id === stepId ? { ...step, images: [...(step.images || []), ...images] } : step));
+  };
 
   return (
     <>
@@ -2834,7 +3072,42 @@ function OperationDetailScreen({
             </div>
           </div>
           <TextArea label="Setup Instructions" value={operation.setupInstructions || ""} onChange={(value) => updateField({ setupInstructions: value })} rows={2} />
-          <TextArea label="Work Instructions" value={operation.workInstructions || ""} onChange={(value) => updateField({ workInstructions: value })} rows={3} />
+          <div className="template-editor-block">
+            <div className="subpanel-header">
+              <div>
+                <h4>Operation Steps</h4>
+                <span>{instructionSteps.length} step{instructionSteps.length === 1 ? "" : "s"}</span>
+              </div>
+              <button onClick={addInstructionStep}><Plus size={14} /> Step</button>
+            </div>
+            <div className="instruction-step-list">
+              {instructionSteps.map((step, index) => (
+                <div key={step.id} className="instruction-step-card">
+                  <div className="subpanel-header">
+                    <div>
+                      <h5>Step {index + 1}</h5>
+                      <span>{step.images?.length || 0} photo{(step.images?.length || 0) === 1 ? "" : "s"}</span>
+                    </div>
+                    <div className="toolbar">
+                      <button onClick={() => void addImagesToStep(step.id)}><FolderOpen size={14} /> Photos</button>
+                      <button className="danger subtle" onClick={() => removeInstructionStep(step.id)}><X size={14} /> Remove</button>
+                    </div>
+                  </div>
+                  <TextArea label="Instruction" value={step.text || ""} onChange={(value) => changeInstructionStep(step.id, value)} rows={2} />
+                  <div className="image-strip">
+                    {(step.images || []).map((image) => (
+                      <figure key={image.id} className="image-chip">
+                        <img src={api.assetUrl(image.relativePath)} alt={image.name || "Step photo"} />
+                        <figcaption>{image.name}</figcaption>
+                      </figure>
+                    ))}
+                    {!step.images?.length && <div className="empty-inline">No photos attached to this step.</div>}
+                  </div>
+                </div>
+              ))}
+              {!instructionSteps.length && <div className="empty-inline">No operation steps yet.</div>}
+            </div>
+          </div>
           <TextArea label="Operation Notes" value={operation.notes || ""} onChange={(value) => updateField({ notes: value })} rows={2} />
         </section>
 
@@ -2868,17 +3141,33 @@ function OperationDetailScreen({
         <section className="panel">
           <div className="subpanel-header">
             <div>
-              <h4>Materials</h4>
-              <span>{selectedMaterials.length} linked / {operation.customMaterialText ? "Other set" : "No other material"}</span>
+              <h4>Libraries</h4>
+              <span>{assignedLibraryNames.length} assigned</span>
             </div>
-            <button onClick={() => setShowMaterialPicker(true)}><Database size={14} /> Select Materials</button>
           </div>
-          <div className="summary-lines">
-            {selectedMaterials.map((item) => (
-              <p key={item.id} className="summary-line"><strong>{item.serialCode}</strong><span>{[item.materialFamily, materialDisplayType(item)].filter(Boolean).join(" / ") || "-"}</span></p>
-            ))}
-            {!selectedMaterials.length && <div className="empty-inline">No linked material records.</div>}
-            {operation.customMaterialText && <p className="summary-line"><strong>Other</strong><span>{operation.customMaterialText}</span></p>}
+          <div className="stack-list">
+            {assignedLibraryNames.map((libraryName) => {
+              const library = libraries?.[libraryName] || null;
+              const selectedIds = operation.librarySelections?.[libraryName] || [];
+              const recordMap = new Map((library?.records || []).map((record) => [record.id, record.name]));
+              const missingRecords = selectedIds.filter((recordId) => !recordMap.has(recordId));
+              return (
+                <div key={libraryName} className="subpanel">
+                  <RecordChecklist
+                    title={library?.label || libraryName}
+                    items={(library?.records || []).filter((record) => record.active !== false).map((record) => ({ id: record.id, label: record.name }))}
+                    selected={selectedIds}
+                    onToggle={(recordId) => updateLibrarySelections(libraryName, recordId)}
+                  />
+                  {missingRecords.length ? (
+                    <div className="missing-records-note">
+                      Missing records: {missingRecords.map((recordId) => recordMap.get(recordId) || recordId).join(", ")}
+                    </div>
+                  ) : null}
+                </div>
+              );
+            })}
+            {!assignedLibraryNames.length && <div className="empty-inline">No libraries assigned from the template.</div>}
           </div>
         </section>
 
@@ -2910,42 +3199,8 @@ function OperationDetailScreen({
           </div>
         </section>
 
-        <section className="panel">
-          <div className="subpanel-header">
-            <div>
-              <h4>Step Images</h4>
-              <span>{operation.stepImages?.length || 0} images</span>
-            </div>
-            <button onClick={onAddImages}><FolderOpen size={14} /> Add Images</button>
-          </div>
-          <div className="image-strip">
-            {(operation.stepImages || []).map((image) => (
-              <figure key={image.id} className="image-chip">
-                <img src={api.assetUrl(image.relativePath)} alt={image.name || "Operation image"} />
-                <figcaption>{image.name}</figcaption>
-              </figure>
-            ))}
-            {!operation.stepImages?.length && <div className="empty-inline">No images attached.</div>}
-          </div>
-        </section>
       </div>
 
-      <MaterialPickerDialog
-        open={showMaterialPicker}
-        materials={materials}
-        constants={constants}
-        preferences={preferences}
-        selectedIds={operation.requiredMaterialLots || []}
-        customMaterialText={operation.customMaterialText || ""}
-        onClose={() => setShowMaterialPicker(false)}
-        onApply={({ selectedIds, customMaterialText }) => {
-          updateField({ requiredMaterialLots: selectedIds, customMaterialText });
-          setShowMaterialPicker(false);
-        }}
-        onCreateInlineMaterial={onCreateInlineMaterial}
-        onAddMaterialFamily={onAddMaterialFamily}
-        onAddMaterialAlloy={onAddMaterialAlloy}
-      />
     </>
   );
 }
@@ -2957,6 +3212,7 @@ function MaterialPickerDialog({
   preferences,
   selectedIds,
   customMaterialText,
+  singleSelect = false,
   onClose,
   onApply,
   onCreateInlineMaterial,
@@ -2993,7 +3249,12 @@ function MaterialPickerDialog({
   }, [open, selectedIds, customMaterialText]);
 
   const toggleSelection = (materialId) => {
-    setLocalSelectedIds((current) => current.includes(materialId) ? current.filter((item) => item !== materialId) : [...current, materialId]);
+    setLocalSelectedIds((current) => {
+      if (singleSelect) {
+        return current.includes(materialId) ? [] : [materialId];
+      }
+      return current.includes(materialId) ? current.filter((item) => item !== materialId) : [...current, materialId];
+    });
   };
 
   const startCreateMaterial = async () => {
@@ -3010,7 +3271,12 @@ function MaterialPickerDialog({
       return;
     }
     const saved = await onCreateInlineMaterial(draftMaterial);
-    setLocalSelectedIds((current) => current.includes(saved.id) ? current : [...current, saved.id]);
+    setLocalSelectedIds((current) => {
+      if (singleSelect) {
+        return [saved.id];
+      }
+      return current.includes(saved.id) ? current : [...current, saved.id];
+    });
     setDraftMaterial(syncMaterialClassification(saved, preferences));
   };
 
@@ -3111,8 +3377,16 @@ function MaterialPickerDialog({
                 </thead>
                 <tbody>
                   {pageItems.map((item) => (
-                    <tr key={item.id}>
-                      <td><input type="checkbox" checked={localSelectedIds.includes(item.id)} onChange={() => toggleSelection(item.id)} /></td>
+                    <tr key={item.id} className={localSelectedIds.includes(item.id) ? "selected" : ""} onClick={() => toggleSelection(item.id)}>
+                      <td>
+                        <input
+                          type={singleSelect ? "radio" : "checkbox"}
+                          name={singleSelect ? "material-picker-selection" : undefined}
+                          checked={localSelectedIds.includes(item.id)}
+                          onChange={() => toggleSelection(item.id)}
+                          onClick={(event) => event.stopPropagation()}
+                        />
+                      </td>
                       {MATERIAL_RESULT_COLUMNS.map((column) => (
                         <td key={column.key}>
                           {column.key === "status"
@@ -3920,7 +4194,8 @@ function MetrologyView({ workspace, screen, payload, setPayload, onOpenInstrumen
 
 function TemplateSettingsSection({ workspace, selectedTemplate, setSelectedTemplateId, onStatus, onRefresh }) {
   const [template, setTemplate] = useState(selectedTemplate || blankTemplate());
-  const libraries = Object.keys(workspace.libraries || {});
+  const libraries = libraryList(workspace.libraries);
+  const assignedMissingLibraries = (template.libraryNames || []).filter((name) => !(workspace.libraries || {})[name]);
 
   useEffect(() => {
     setTemplate(selectedTemplate || blankTemplate());
@@ -4013,10 +4288,16 @@ function TemplateSettingsSection({ workspace, selectedTemplate, setSelectedTempl
           <label className="field full">
             <span>Assigned Libraries</span>
             <div className="library-chip-grid">
-              {libraries.map((name) => (
-                <label key={name} className={`library-chip ${template.libraryNames.includes(name) ? "active" : ""}`}>
-                  <input type="checkbox" checked={template.libraryNames.includes(name)} onChange={() => toggleLibrary(name)} />
-                  <span>{name}</span>
+              {libraries.map((library) => (
+                <label key={library.name} className={`library-chip ${template.libraryNames.includes(library.name) ? "active" : ""}`}>
+                  <input type="checkbox" checked={template.libraryNames.includes(library.name)} onChange={() => toggleLibrary(library.name)} />
+                  <span>{library.label}</span>
+                </label>
+              ))}
+              {assignedMissingLibraries.map((name) => (
+                <label key={`missing-${name}`} className="library-chip active disabled">
+                  <input type="checkbox" checked disabled />
+                  <span>{name} (missing)</span>
                 </label>
               ))}
               {!libraries.length && <div className="empty-inline">No libraries available.</div>}
@@ -4059,6 +4340,155 @@ function TemplateSettingsSection({ workspace, selectedTemplate, setSelectedTempl
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+function LibrarySettingsSection({ workspace, onStatus, onRefresh }) {
+  const [libraries, setLibraries] = useState(libraryList(workspace.libraries));
+  const [selectedLibraryName, setSelectedLibraryName] = useState(libraryList(workspace.libraries)[0]?.name || null);
+  const [deletingLibraryName, setDeletingLibraryName] = useState("");
+
+  useEffect(() => {
+    const nextLibraries = libraryList(workspace.libraries);
+    setLibraries(nextLibraries);
+    setSelectedLibraryName((current) => nextLibraries.some((library) => library.name === current) ? current : nextLibraries[0]?.name || null);
+  }, [workspace.libraries]);
+
+  const selectedLibrary = libraries.find((library) => library.name === selectedLibraryName) || null;
+  const updateLibrary = (libraryName, updater) => {
+    setLibraries((current) => current.map((library) => {
+      if (library.name !== libraryName) {
+        return library;
+      }
+      return typeof updater === "function" ? updater(library) : { ...library, ...updater };
+    }));
+  };
+  const addLibrary = () => {
+    const nextOrder = Math.max(0, ...libraries.map((library) => Number(library.order || 0))) + 1;
+    const library = blankLibraryDefinition(nextOrder);
+    setLibraries((current) => [...current, library]);
+    setSelectedLibraryName(library.name);
+  };
+  const addLibraryRecord = () => {
+    if (!selectedLibrary) {
+      return;
+    }
+    updateLibrary(selectedLibrary.name, (current) => ({
+      ...current,
+      records: [...(current.records || []), blankLibraryRecord()]
+    }));
+  };
+  const updateLibraryRecord = (recordId, patch) => {
+    if (!selectedLibrary) {
+      return;
+    }
+    updateLibrary(selectedLibrary.name, (current) => ({
+      ...current,
+      records: (current.records || []).map((record) => record.id === recordId ? { ...record, ...patch } : record)
+    }));
+  };
+  const removeLibraryRecord = (recordId) => {
+    if (!selectedLibrary) {
+      return;
+    }
+    updateLibrary(selectedLibrary.name, (current) => ({
+      ...current,
+      records: (current.records || []).filter((record) => record.id !== recordId)
+    }));
+  };
+  const deleteLibrary = async () => {
+    if (!selectedLibrary) {
+      return;
+    }
+    try {
+      const libraryName = selectedLibrary.name;
+      const remainingLibraries = libraries.filter((library) => library.name !== libraryName);
+      setDeletingLibraryName(libraryName);
+      setLibraries(remainingLibraries);
+      setSelectedLibraryName(remainingLibraries[0]?.name || null);
+      await api.deleteLibrary(libraryName);
+      await onRefresh();
+      setDeletingLibraryName("");
+      onStatus("Library deleted.");
+    } catch (error) {
+      setDeletingLibraryName("");
+      await onRefresh();
+      onStatus(error.message || String(error));
+    }
+  };
+
+  useAutoSave({
+    value: selectedLibrary,
+    resetKey: `library:${selectedLibrary?.name || "none"}`,
+    enabled: Boolean(selectedLibrary) && selectedLibrary.name !== deletingLibraryName,
+    isReady: (current) => Boolean(current),
+    save: (current) => api.saveLibrary(current),
+    onSaved: async (saved) => {
+      setLibraries((current) => current.some((library) => library.name === saved.name)
+        ? current.map((library) => library.name === saved.name ? saved : library)
+        : [...current, saved]);
+      setSelectedLibraryName(saved.name);
+      await onRefresh();
+    },
+    onError: (error) => onStatus(error.message || String(error))
+  });
+
+  return (
+    <div className="catalog-layout settings-template-layout">
+      <div className="catalog-list">
+        <button className="sidebar-action" onClick={addLibrary}><Plus size={14} /> New Library</button>
+        {libraries.map((library) => (
+          <button key={library.name} className={`record-list-item ${selectedLibraryName === library.name ? "selected" : ""}`} onClick={() => setSelectedLibraryName(library.name)}>
+            <strong>{library.label || "New Library"}</strong>
+            <span>{library.records?.length || 0} saved records</span>
+          </button>
+        ))}
+        {!libraries.length && <div className="empty-inline">No libraries saved yet.</div>}
+      </div>
+
+      {!selectedLibrary ? (
+        <div className="subpanel">
+          <div className="empty-inline">Choose a library or create a new one.</div>
+        </div>
+      ) : (
+        <div className="subpanel">
+          <div className="subpanel-header">
+            <div>
+              <h4>{selectedLibrary.label || "New Library"}</h4>
+              <span>{selectedLibrary.records?.length || 0} saved records</span>
+            </div>
+            <div className="toolbar">
+              <button className="danger subtle" onClick={deleteLibrary}><X size={14} /> Delete Library</button>
+              <button onClick={addLibraryRecord}><Plus size={14} /> Add</button>
+            </div>
+          </div>
+          <div className="form-grid compact-2">
+            <TextField
+              label="Library Name"
+              value={selectedLibrary.label || ""}
+              onChange={(value) => updateLibrary(selectedLibrary.name, { label: value })}
+            />
+          </div>
+          <div className="template-editor-block">
+            <div className="subpanel-header">
+              <div>
+                <h4>Records</h4>
+                <span>Name-only library entries used in templates and operations.</span>
+              </div>
+            </div>
+            <div className="parameter-list">
+              {(selectedLibrary.records || []).map((record) => (
+                <div className="parameter-row library-record-row" key={record.id}>
+                  <input value={record.name || ""} placeholder="Record name" onChange={(event) => updateLibraryRecord(record.id, { name: event.target.value })} />
+                  <button className="danger subtle square" onClick={() => removeLibraryRecord(record.id)}><X size={13} /></button>
+                </div>
+              ))}
+              {!selectedLibrary.records?.length && <div className="empty-inline">No records saved yet.</div>}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -4232,6 +4662,20 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
       <section className="panel">
         <div className="panel-heading inline">
           <div>
+            <h3>Reusable Libraries</h3>
+            <span>Maintain machines, fixtures, blades, and other reusable lookup lists.</span>
+          </div>
+        </div>
+        <LibrarySettingsSection
+          workspace={workspace}
+          onStatus={onStatus}
+          onRefresh={onRefresh}
+        />
+      </section>
+
+      <section className="panel">
+        <div className="panel-heading inline">
+          <div>
             <h3>Operation Templates</h3>
             <span>Standardize starting operations, parameters, and steps.</span>
           </div>
@@ -4371,20 +4815,23 @@ function PrintPacket({ jobId }) {
   const [job, setJob] = useState(null);
   const [materials, setMaterials] = useState([]);
   const [instruments, setInstruments] = useState([]);
+  const [libraries, setLibraries] = useState({});
   const [error, setError] = useState("");
 
   useEffect(() => {
     const load = async () => {
       try {
-        const [loadedJob, materialRows, instrumentRows] = await Promise.all([
+        const [loadedJob, materialRows, instrumentRows, loadedLibraries] = await Promise.all([
           api.loadJob(jobId),
           api.listMaterials(),
-          api.listInstruments()
+          api.listInstruments(),
+          api.loadLibraries()
         ]);
         if (!loadedJob) throw new Error("Job not found.");
         setJob(loadedJob);
         setMaterials(materialRows);
         setInstruments(instrumentRows);
+        setLibraries(loadedLibraries || {});
       } catch (loadError) {
         setError(loadError.message || String(loadError));
       }
@@ -4440,45 +4887,60 @@ function PrintPacket({ jobId }) {
               <PrintField label="Description" value={part.description} compact />
               <PrintField label="Quantity" value={part.quantity} compact />
               <PrintField label="Material Spec" value={part.materialSpec} compact />
+              <PrintField label="Material Lots" value={[(part.requiredMaterialLots || []).map((id) => materialMap.get(id)?.serialCode || id).join(", "), part.customMaterialText || ""].filter(Boolean).join(" / ")} compact />
               <PrintField label="Revision" value={part.revision?.number} compact />
             </div>
-            {part.operations.map((operation) => (
-              <div className="print-operation-block" key={operation.id}>
-                <h3>{operation.sequence}. {operation.title}</h3>
-                <div className="print-two-column compact-grid">
-                  <div>
-                    <PrintField label="Op Code" value={operation.operationCode} compact />
-                    <PrintField label="Type" value={operation.type} compact />
-                    <PrintField label="Work Center" value={operation.workCenter} compact />
-                    <PrintField label="Status" value={operation.status} compact />
+            {part.operations.map((operation) => {
+              const instructionSteps = instructionStepsFromOperation(operation);
+              return (
+                <div className="print-operation-block" key={operation.id}>
+                  <h3>{operation.sequence}. {operation.title}</h3>
+                  <div className="print-two-column compact-grid">
+                    <div>
+                      <PrintField label="Op Code" value={operation.operationCode} compact />
+                      <PrintField label="Type" value={operation.type} compact />
+                      <PrintField label="Work Center" value={operation.workCenter} compact />
+                      <PrintField label="Status" value={operation.status} compact />
+                    </div>
+                    <div>
+                      <PrintField label="Tools" value={(operation.tools || []).map((tool) => summarizeJobTool(tool)).join(", ")} compact />
+                      <PrintField label="Libraries" value={summarizeOperationLibraries(operation, libraries, []).join(" | ")} compact />
+                      <PrintField label="Instruments" value={(operation.requiredInstruments || []).map((id) => instrumentMap.get(id)?.toolName || id).join(", ")} compact />
+                    </div>
                   </div>
-                  <div>
-                    <PrintField label="Material Lots" value={[(operation.requiredMaterialLots || []).map((id) => materialMap.get(id)?.serialCode || id).join(", "), operation.customMaterialText || ""].filter(Boolean).join(" / ")} compact />
-                    <PrintField label="Tools" value={(operation.tools || []).map((tool) => summarizeJobTool(tool)).join(", ")} compact />
-                    <PrintField label="Instruments" value={(operation.requiredInstruments || []).map((id) => instrumentMap.get(id)?.toolName || id).join(", ")} compact />
-                  </div>
+                  {operation.parameters?.length > 0 && (
+                    <table className="print-table compact">
+                      <tbody>
+                        {operation.parameters.map((parameter) => (
+                          <tr key={parameter.id}>
+                            <th>{parameter.label}</th>
+                            <td>{parameter.value}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
+                  {operation.setupInstructions && <div className="print-note compact"><strong>Setup</strong><p>{operation.setupInstructions}</p></div>}
+                  {instructionSteps.length > 0 ? (
+                    <div className="print-note compact">
+                      <strong>Work Instructions</strong>
+                      <div className="print-step-list">
+                        {instructionSteps.map((step, index) => (
+                          <div key={step.id || index} className="print-step-block">
+                            <p>{index + 1}. {step.text || ""}</p>
+                            {step.images?.length > 0 && (
+                              <div className="print-images compact">
+                                {step.images.map((image) => <img key={image.id} src={api.assetUrl(image.relativePath)} alt={image.name || "Step"} />)}
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : operation.workInstructions ? <div className="print-note compact"><strong>Work Instructions</strong><p>{operation.workInstructions}</p></div> : null}
                 </div>
-                {operation.parameters?.length > 0 && (
-                  <table className="print-table compact">
-                    <tbody>
-                      {operation.parameters.map((parameter) => (
-                        <tr key={parameter.id}>
-                          <th>{parameter.label}</th>
-                          <td>{parameter.value}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                )}
-                {operation.setupInstructions && <div className="print-note compact"><strong>Setup</strong><p>{operation.setupInstructions}</p></div>}
-                {operation.workInstructions && <div className="print-note compact"><strong>Work Instructions</strong><p>{operation.workInstructions}</p></div>}
-                {operation.stepImages?.length > 0 && (
-                  <div className="print-images compact">
-                    {operation.stepImages.map((image) => <img key={image.id} src={api.assetUrl(image.relativePath)} alt={image.name || "Step"} />)}
-                  </div>
-                )}
-              </div>
-            ))}
+              );
+            })}
           </div>
         ))}
       </section>

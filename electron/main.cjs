@@ -81,6 +81,7 @@ app.whenReady().then(async () => {
   ipcMain.handle("delete-job", (_event, id) => backend.deleteJob(id));
   ipcMain.handle("create-job-from-fusion", () => backend.createJobFromFusionImport(mainWindow));
   ipcMain.handle("import-subtract-purchase-orders", (_event, filePaths) => backend.importSubtractPurchaseOrders(filePaths || null, mainWindow));
+  ipcMain.handle("import-xometry-purchase-orders", (_event, filePaths) => backend.importXometryPurchaseOrders(filePaths || null, mainWindow));
   ipcMain.handle("import-xometry-travelers", (_event, jobId, filePaths) => backend.importXometryTravelers(jobId, filePaths || null, mainWindow));
 ipcMain.handle("choose-job-documents", (_event, jobId) => backend.chooseJobDocuments(jobId, mainWindow));
 ipcMain.handle("choose-part-documents", (_event, jobId, partId) => backend.choosePartDocuments(jobId, partId, mainWindow));

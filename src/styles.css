@@ -191,6 +191,22 @@ button:disabled:hover {
   gap: 0.6rem;
 }
 
+.instruction-step-list {
+  display: grid;
+  gap: 0.7rem;
+}
+
+.instruction-step-card {
+  padding: 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--panel-2);
+}
+
+.instruction-step-card h5 {
+  margin: 0;
+}
+
 .record-list-item,
 .sidebar-action {
   justify-content: flex-start;
@@ -918,6 +934,16 @@ button:disabled:hover {
   line-height: 1.35;
 }
 
+.print-step-list {
+  display: grid;
+  gap: 0.45rem;
+  margin-top: 0.25rem;
+}
+
+.print-step-block p {
+  margin: 0.2rem 0 0;
+}
+
 .print-operation-block {
   margin-top: 0.8rem;
   break-inside: avoid;
@@ -1187,12 +1213,26 @@ button:disabled:hover {
   background: #eef5f1;
 }
 
+.library-chip.disabled {
+  opacity: 0.72;
+}
+
 .template-editor-block {
   margin-top: 1rem;
 }
 
 .template-step-row {
   grid-template-columns: 1fr auto;
+}
+
+.library-record-row {
+  grid-template-columns: 1fr auto;
+}
+
+.missing-records-note {
+  margin-top: 0.45rem;
+  color: #9a5a00;
+  font-size: 0.9rem;
 }
 
 .table-wrap.compact {

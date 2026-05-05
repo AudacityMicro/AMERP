@@ -92,16 +92,20 @@ class ERPBackend {
       await ensureDir(path.join(root, relative));
     }
 
-    for (const library of DEFAULT_LIBRARY_DEFINITIONS) {
-      const filePath = path.join(root, "libraries", `${safeFileName(library.name)}.json`);
-      if (!(await pathExists(filePath))) {
+    const librariesRoot = path.join(root, "libraries");
+    const existingLibraryFiles = (await fs.readdir(librariesRoot)).filter((name) => name.endsWith(".json"));
+    if (!existingLibraryFiles.length) {
+      for (const library of DEFAULT_LIBRARY_DEFINITIONS) {
+        const filePath = path.join(librariesRoot, `${safeFileName(library.name)}.json`);
         await writeJson(filePath, library);
       }
     }
 
-    for (const template of DEFAULT_TEMPLATES) {
-      const filePath = path.join(root, "templates", "operations", `${safeFileName(template.id)}.json`);
-      if (!(await pathExists(filePath))) {
+    const templatesRoot = path.join(root, "templates", "operations");
+    const existingTemplateFiles = (await fs.readdir(templatesRoot)).filter((name) => name.endsWith(".json"));
+    if (!existingTemplateFiles.length) {
+      for (const template of DEFAULT_TEMPLATES) {
+        const filePath = path.join(templatesRoot, `${safeFileName(template.id)}.json`);
         await writeJson(filePath, template);
       }
     }
@@ -288,15 +292,16 @@ class ERPBackend {
     const entries = await fs.readdir(folder);
     const libraries = {};
     for (const entry of entries.filter((name) => name.endsWith(".json"))) {
-      const library = await readJson(path.join(folder, entry), null);
-      if (!library?.name) {
+      const filePath = path.join(folder, entry);
+      const library = await readJson(filePath, null);
+      if (!library?.name && !library?.label) {
         continue;
       }
-      libraries[library.name] = {
-        ...library,
-        order: Number(library.order || 1000),
-        records: Array.isArray(library.records) ? library.records : []
-      };
+      const normalized = this.normalizeLibrary(library);
+      libraries[normalized.name] = normalized;
+      if (JSON.stringify(library) !== JSON.stringify(normalized)) {
+        await writeJson(filePath, normalized);
+      }
     }
     return Object.fromEntries(
       Object.values(libraries)
@@ -307,12 +312,7 @@ class ERPBackend {
 
   async saveLibrary(library) {
     const dataRoot = await this.requireDataFolder();
-    const normalized = {
-      name: safeFileName(library?.name || randomId("library")),
-      label: String(library?.label || library?.name || "Library").trim(),
-      order: Number(library?.order || 1000),
-      records: Array.isArray(library?.records) ? library.records : []
-    };
+    const normalized = this.normalizeLibrary(library);
     await writeJson(path.join(dataRoot, "libraries", `${normalized.name}.json`), normalized);
     await this.appendAudit("library_saved", normalized.name, `Saved library ${normalized.label}.`);
     return normalized;
@@ -603,23 +603,14 @@ class ERPBackend {
           continue;
         }
         operation.workInstructions = await readText(path.join(opRoot, "work-instructions.md"), operation.workInstructions || "");
-        operation.setupInstructions = operation.setupInstructions || "";
-        operation.parameters = Array.isArray(operation.parameters) ? operation.parameters : [];
-        operation.stepImages = Array.isArray(operation.stepImages) ? operation.stepImages : [];
-        operation.tools = Array.isArray(operation.tools) ? operation.tools.map((tool) => this.normalizeTool(tool)) : [];
-        operation.requiredMaterialLots = toDisplayList(operation.requiredMaterialLots);
-        operation.requiredInstruments = toDisplayList(operation.requiredInstruments);
-        operation.setupTemplateRefs = toDisplayList(operation.setupTemplateRefs);
-        operation.jobToolRefs = toDisplayList(operation.jobToolRefs);
-        operation.customMaterialText = String(operation.customMaterialText || "").trim();
-        operations.push(operation);
+        operations.push(this.normalizeOperation(operation, operations.length));
       }
       operations.sort((a, b) => Number(a.sequence || 0) - Number(b.sequence || 0));
-      parts.push({
+      parts.push(this.normalizePart({
         ...part,
         documents: (Array.isArray(part.documents) ? part.documents : []).map((document) => this.normalizeDocument(document)),
         operations
-      });
+      }));
     }
     parts.sort((a, b) => String(a.partNumber || a.partName || "").localeCompare(String(b.partNumber || b.partName || "")));
     const totalOperations = parts.reduce((sum, part) => sum + part.operations.length, 0);
@@ -693,6 +684,14 @@ class ERPBackend {
     };
   }
 
+  normalizeInstructionStep(step) {
+    return {
+      id: step?.id || randomId("step"),
+      text: String(step?.text || "").trim(),
+      images: (Array.isArray(step?.images) ? step.images : []).map((image) => this.normalizeStepImage(image))
+    };
+  }
+
   normalizeTool(tool) {
     return {
       id: tool?.id || randomId("tool"),
@@ -706,9 +705,49 @@ class ERPBackend {
     };
   }
 
+  normalizeLibraryRecord(record, index = 0) {
+    if (typeof record === "string") {
+      return {
+        id: randomId("library-record"),
+        name: String(record).trim(),
+        active: true
+      };
+    }
+    return {
+      id: record?.id || randomId("library-record"),
+      name: String(record?.name || "").trim(),
+      active: record?.active !== false
+    };
+  }
+
+  normalizeLibrary(library) {
+    const normalizedName = safeFileName(library?.name || library?.label || randomId("library"));
+    const normalizedRecords = (Array.isArray(library?.records) ? library.records : [])
+      .map((record, index) => this.normalizeLibraryRecord(record, index))
+      .filter((record) => record.name);
+    return {
+      name: normalizedName,
+      label: String(library?.label || library?.name || "Library").trim(),
+      order: Number(library?.order || 1000),
+      records: normalizedRecords
+    };
+  }
+
+  normalizeLibrarySelections(librarySelections) {
+    const output = {};
+    for (const [libraryName, selectedIds] of Object.entries(librarySelections || {})) {
+      const normalizedName = safeFileName(libraryName);
+      if (!normalizedName) {
+        continue;
+      }
+      output[normalizedName] = toDisplayList(selectedIds);
+    }
+    return output;
+  }
+
   normalizeOperation(operation, index = 0) {
     const sequence = Number(operation?.sequence || index + 1) || index + 1;
-    return {
+    const normalized = {
       id: operation?.id || randomId("operation"),
       sequence,
       folderName: operation?.folderName || `${String(sequence).padStart(3, "0")}-${slugify(operation?.title || operation?.type || "operation")}`,
@@ -719,12 +758,15 @@ class ERPBackend {
       status: String(operation?.status || "Ready").trim(),
       setupInstructions: String(operation?.setupInstructions || "").trim(),
       workInstructions: String(operation?.workInstructions || "").trim(),
+      instructionSteps: (Array.isArray(operation?.instructionSteps) ? operation.instructionSteps : [])
+        .map((item) => this.normalizeInstructionStep(item)),
       notes: String(operation?.notes || "").trim(),
       parameters: (Array.isArray(operation?.parameters) ? operation.parameters : []).map((item) => this.normalizeParameter(item)),
       stepImages: (Array.isArray(operation?.stepImages) ? operation.stepImages : []).map((item) => this.normalizeStepImage(item)),
       tools: (Array.isArray(operation?.tools) ? operation.tools : []).map((item) => this.normalizeTool(item)),
       setupTemplateRefs: toDisplayList(operation?.setupTemplateRefs),
       jobToolRefs: toDisplayList(operation?.jobToolRefs),
+      librarySelections: this.normalizeLibrarySelections(operation?.librarySelections),
       requiredMaterialLots: toDisplayList(operation?.requiredMaterialLots),
       requiredInstruments: toDisplayList(operation?.requiredInstruments),
       customMaterialText: String(operation?.customMaterialText || "").trim(),
@@ -736,10 +778,26 @@ class ERPBackend {
         resultPlaceholderRefs: toDisplayList(operation?.inspectionPlan?.resultPlaceholderRefs)
       }
     };
+    if (!normalized.instructionSteps.length && normalized.workInstructions) {
+      normalized.instructionSteps = normalized.workInstructions
+        .split(/\r?\n/)
+        .map((line) => String(line || "").trim())
+        .filter(Boolean)
+        .map((text) => this.normalizeInstructionStep({ text, images: [] }));
+    }
+    normalized.stepImages = normalized.instructionSteps.length
+      ? normalized.instructionSteps.flatMap((step) => step.images || [])
+      : normalized.stepImages;
+    normalized.workInstructions = normalized.instructionSteps.length
+      ? normalized.instructionSteps.map((step) => step.text).filter(Boolean).join("\n")
+      : normalized.workInstructions;
+    return normalized;
   }
 
   normalizePart(part) {
     const operations = (Array.isArray(part?.operations) ? part.operations : []).map((operation, index) => this.normalizeOperation(operation, index));
+    const inheritedMaterialLots = Array.from(new Set(operations.flatMap((operation) => operation.requiredMaterialLots || [])));
+    const inheritedCustomMaterial = operations.map((operation) => String(operation.customMaterialText || "").trim()).find(Boolean) || "";
     return {
       id: part?.id || randomId("part"),
       partNumber: String(part?.partNumber || "").trim(),
@@ -747,6 +805,8 @@ class ERPBackend {
       description: String(part?.description || "").trim(),
       quantity: String(part?.quantity || "").trim(),
       materialSpec: String(part?.materialSpec || "").trim(),
+      requiredMaterialLots: toDisplayList(part?.requiredMaterialLots?.length ? part.requiredMaterialLots : inheritedMaterialLots),
+      customMaterialText: String(part?.customMaterialText || inheritedCustomMaterial || "").trim(),
       revision: {
         number: String(part?.revision?.number || "").trim(),
         date: String(part?.revision?.date || "").trim(),
@@ -849,7 +909,7 @@ class ERPBackend {
       routeSummary: summary.routeSummary
     };
     await writeJson(path.join(jobRoot, "job.json"), header);
-    await writeText(path.join(jobRoot, "history.md"), this.jobHistoryMarkdown(normalized));
+    await writeText(path.join(jobRoot, "history.md"), await this.jobHistoryMarkdown(normalized));
     await this.appendAudit("job_saved", normalized.id, `Saved job ${normalized.jobNumber || normalized.id}.`);
     await this.rebuildCrossReferences();
     return this.loadJob(normalized.id);
@@ -1309,7 +1369,22 @@ class ERPBackend {
     }
   }
 
-  jobHistoryMarkdown(job) {
+  formatOperationLibrarySelections(operation, libraries) {
+    const lines = [];
+    for (const [libraryName, selectedIds] of Object.entries(operation?.librarySelections || {})) {
+      if (!selectedIds?.length) {
+        continue;
+      }
+      const library = libraries?.[libraryName] || null;
+      const recordMap = new Map((library?.records || []).map((record) => [record.id, record.name]));
+      const selectedNames = selectedIds.map((recordId) => recordMap.get(recordId) || `[Missing] ${recordId}`);
+      lines.push(`${library?.label || libraryName}: ${selectedNames.join(", ")}`);
+    }
+    return lines;
+  }
+
+  async jobHistoryMarkdown(job) {
+    const libraries = await this.loadLibraries().catch(() => ({}));
     const lines = [
       `# Job History: ${job.jobNumber || job.id}`,
       "",
@@ -1332,6 +1407,8 @@ class ERPBackend {
       lines.push(`- Description: ${part.description || "-"}`);
       lines.push(`- Quantity: ${part.quantity || "-"}`);
       lines.push(`- Material Spec: ${part.materialSpec || "-"}`);
+      lines.push(`- Material Lots: ${part.requiredMaterialLots.join(", ") || "-"}`);
+      lines.push(`- Other Material: ${part.customMaterialText || "-"}`);
       lines.push(`- Revision: ${part.revision?.number || "-"}`);
       lines.push(`- Part Documents: ${part.documents?.length || 0}`);
       lines.push("");
@@ -1339,9 +1416,9 @@ class ERPBackend {
         lines.push(`### ${operation.sequence}. ${operation.title}`, "");
         lines.push(`- Type: ${operation.type || "-"}`);
         lines.push(`- Work Center: ${operation.workCenter || "-"}`);
-        lines.push(`- Material Lots: ${operation.requiredMaterialLots.join(", ") || "-"}`);
-        lines.push(`- Other Material: ${operation.customMaterialText || "-"}`);
         lines.push(`- Tools: ${operation.tools.map((tool) => tool.name || tool.fusionToolNumber || tool.id).join(", ") || "-"}`);
+        const librarySelections = this.formatOperationLibrarySelections(operation, libraries);
+        lines.push(`- Libraries: ${librarySelections.join(" | ") || "-"}`);
         lines.push(`- Instruments: ${operation.requiredInstruments.join(", ") || "-"}`);
         lines.push(`- Status: ${operation.status || "-"}`);
         lines.push("");
@@ -2082,21 +2159,21 @@ class ERPBackend {
       }
       jobs.push(job);
       for (const part of job.parts) {
-        for (const operation of part.operations) {
-          for (const materialId of operation.requiredMaterialLots || []) {
-            const material = materialsMap.get(materialId);
-            if (material) {
-              material.usageRefs.push({
-                jobId: job.id,
-                jobNumber: job.jobNumber,
-                partId: part.id,
-                partNumber: part.partNumber,
-                operationId: operation.id,
-                operationCode: operation.operationCode,
-                operationTitle: operation.title
-              });
-            }
+        for (const materialId of part.requiredMaterialLots || []) {
+          const material = materialsMap.get(materialId);
+          if (material) {
+            material.usageRefs.push({
+              jobId: job.id,
+              jobNumber: job.jobNumber,
+              partId: part.id,
+              partNumber: part.partNumber,
+              operationId: "",
+              operationCode: "",
+              operationTitle: ""
+            });
           }
+        }
+        for (const operation of part.operations) {
           for (const instrumentId of operation.requiredInstruments || []) {
             const bundle = instrumentsMap.get(instrumentId);
             if (bundle) {
@@ -2282,6 +2359,66 @@ class ERPBackend {
 
   deriveSubtractPartNumber(partName, index) {
     const base = safeFileName(String(partName || "").toUpperCase().replace(/\s+/g, "-"), "");
+    return base || `PART-${String(index + 1).padStart(3, "0")}`;
+  }
+
+  buildXometryPurchaseOrderNotes(purchaseOrder) {
+    return [
+      "Imported from Xometry purchase order.",
+      "",
+      `PO Number: ${purchaseOrder.purchase_order || "-"}`,
+      `Issue Date: ${purchaseOrder.issue_date || "-"}`,
+      `Ship Date: ${purchaseOrder.ship_date || "-"}`,
+      `Expedited: ${purchaseOrder.expedited ? "Yes" : "No"}`,
+      `Shipping Method: ${purchaseOrder.shipping_method || "-"}`,
+      `Partner Quote ID: ${purchaseOrder.partner_quote_id || "-"}`,
+      `Vendor: ${purchaseOrder.vendor_name || "-"}`,
+      `Vendor Address: ${(purchaseOrder.vendor_address || []).join(", ") || "-"}`,
+      `Ship To: ${purchaseOrder.ship_to_name || "-"}`,
+      `Ship To Address: ${(purchaseOrder.ship_to_address || []).join(", ") || "-"}`,
+      `Process: ${purchaseOrder.summary?.process || "-"}`,
+      `Preferred Subprocess: ${purchaseOrder.summary?.preferred_subprocess || "-"}`,
+      `Material: ${purchaseOrder.summary?.material || "-"}`,
+      `Color: ${purchaseOrder.summary?.color || "-"}`,
+      `Finish: ${purchaseOrder.summary?.finish || "-"}`,
+      `Threads / Tapped Holes: ${purchaseOrder.summary?.threads || "-"}`,
+      `Inserts: ${purchaseOrder.summary?.inserts || "-"}`,
+      `Precision Tolerance: ${purchaseOrder.summary?.precision_tolerance || "-"}`,
+      `Surface Roughness: ${purchaseOrder.summary?.surface_roughness || "-"}`,
+      `Inspection: ${purchaseOrder.summary?.inspection || "-"}`,
+      `Certificates / Supplier Qualifications: ${purchaseOrder.summary?.certificates || "-"}`,
+      `Requirements Notes: ${purchaseOrder.summary?.notes || "-"}`,
+      `Total Amount: ${purchaseOrder.total_amount ? `$${purchaseOrder.total_amount}` : "-"}`
+    ].join("\n");
+  }
+
+  buildXometryPurchaseOrderPartNotes(partRow, purchaseOrder) {
+    return [
+      "Imported from Xometry purchase order part row.",
+      "",
+      `Item Number: ${partRow.item_number || "-"}`,
+      `Item Code: ${partRow.item_code || "-"}`,
+      `Part ID: ${partRow.part_id || "-"}`,
+      `Order ID: ${partRow.order_id || "-"}`,
+      `Description: ${partRow.description || "-"}`,
+      `Process: ${partRow.process || purchaseOrder.summary?.process || "-"}`,
+      `Preferred Subprocess: ${partRow.preferred_subprocess || purchaseOrder.summary?.preferred_subprocess || "-"}`,
+      `Material: ${partRow.material || purchaseOrder.summary?.material || "-"}`,
+      `Color: ${partRow.color || purchaseOrder.summary?.color || "-"}`,
+      `Finish: ${partRow.finish || purchaseOrder.summary?.finish || "-"}`,
+      `Threads / Tapped Holes: ${partRow.threads || purchaseOrder.summary?.threads || "-"}`,
+      `Inserts: ${partRow.inserts || purchaseOrder.summary?.inserts || "-"}`,
+      `Precision Tolerance: ${partRow.precision_tolerance || purchaseOrder.summary?.precision_tolerance || "-"}`,
+      `Surface Roughness: ${partRow.surface_roughness || purchaseOrder.summary?.surface_roughness || "-"}`,
+      `Inspection: ${partRow.inspection || purchaseOrder.summary?.inspection || "-"}`,
+      `Certificates / Supplier Qualifications: ${partRow.certificates || purchaseOrder.summary?.certificates || "-"}`,
+      `Requirements Notes: ${partRow.notes || purchaseOrder.summary?.notes || "-"}`
+    ].join("\n");
+  }
+
+  deriveXometryPurchaseOrderPartNumber(partRow, index) {
+    const candidate = String(partRow.part_id || "").trim() || String(partRow.description || "").trim();
+    const base = safeFileName(candidate.toUpperCase().replace(/\s+/g, "-"), "");
     return base || `PART-${String(index + 1).padStart(3, "0")}`;
   }
 
@@ -2495,6 +2632,122 @@ class ERPBackend {
 
     if (jobs.length) {
       await this.appendAudit("subtract_purchase_orders_imported", jobs[0].id, `Imported ${jobs.length} Subtract purchase order job${jobs.length === 1 ? "" : "s"}.`);
+    }
+
+    return { jobs, warnings, errors };
+  }
+
+  async importXometryPurchaseOrders(filePaths = null, mainWindow = null) {
+    let selectedPaths = Array.isArray(filePaths) ? filePaths : null;
+    if (!selectedPaths?.length) {
+      const result = await dialog.showOpenDialog(mainWindow || null, {
+        title: "Import Xometry Purchase Orders",
+        properties: ["openFile", "multiSelections"],
+        filters: [
+          { name: "PDF", extensions: ["pdf"] },
+          { name: "All files", extensions: ["*"] }
+        ]
+      });
+      if (result.canceled || !result.filePaths.length) {
+        return null;
+      }
+      selectedPaths = result.filePaths;
+    }
+
+    const uniqueFilePaths = [...new Map(
+      selectedPaths.map((filePath) => {
+        const resolved = path.resolve(filePath);
+        return [resolved.toLowerCase(), resolved];
+      })
+    ).values()];
+    if (!uniqueFilePaths.length) {
+      return { jobs: [], warnings: [], errors: [] };
+    }
+
+    const parserScript = path.join(this.app.getAppPath(), "scripts", "parse_xometry_purchase_orders.py");
+    const payload = await this.runPythonJson(parserScript, uniqueFilePaths);
+    const existingJobs = await this.listJobSummaries();
+    const usedJobNumbers = new Set(existingJobs.map((job) => normalizeText(job.jobNumber)));
+    const warnings = [];
+    const errors = [];
+    const jobs = [];
+
+    const xometryCustomer = await this.upsertNamedCustomer({
+      name: "Xometry",
+      shippingAddress1: "7951 Cessna Avenue",
+      city: "Gaithersburg",
+      state: "MD",
+      postalCode: "20879",
+      contactName: "Xometry",
+      phone: "240-252-1138",
+      notes: "Auto-created from Xometry purchase order imports."
+    });
+
+    for (const purchaseOrder of payload.purchase_orders || []) {
+      const sourcePath = String(purchaseOrder.source_path || "").trim();
+      const sourceLabel = purchaseOrder.source_filename || path.basename(sourcePath || "purchase-order.pdf");
+      if (purchaseOrder.error) {
+        errors.push({ sourcePath, message: purchaseOrder.error });
+        continue;
+      }
+      const jobNumber = String(purchaseOrder.purchase_order || "").trim();
+      if (!jobNumber) {
+        errors.push({ sourcePath, message: `Missing P.O. No. in ${sourceLabel}.` });
+        continue;
+      }
+      const normalizedJobNumber = normalizeText(jobNumber);
+      if (usedJobNumbers.has(normalizedJobNumber)) {
+        errors.push({ sourcePath, message: `Job number ${jobNumber} already exists.` });
+        continue;
+      }
+
+      const jobId = randomId("job");
+      const documents = [];
+      try {
+        documents.push(await this.copyJobDocument(jobId, sourcePath, "PO / Customer", "Imported Xometry purchase order"));
+      } catch (error) {
+        warnings.push({ sourcePath, message: `Imported job data but could not copy PO PDF: ${error.message}` });
+      }
+
+      const parts = (purchaseOrder.parts || []).map((partRow, index) => this.normalizePart({
+        id: randomId("part"),
+        partNumber: this.deriveXometryPurchaseOrderPartNumber(partRow, index),
+        partName: partRow.description || partRow.part_id || `Part ${index + 1}`,
+        description: "",
+        quantity: String(partRow.quantity || "").trim(),
+        materialSpec: partRow.material || purchaseOrder.summary?.material || "",
+        revision: {
+          number: "",
+          date: "",
+          notes: ""
+        },
+        notes: this.buildXometryPurchaseOrderPartNotes(partRow, purchaseOrder),
+        documents: [],
+        operations: []
+      }));
+
+      const savedJob = await this.saveJob({
+        id: jobId,
+        jobNumber,
+        customerId: xometryCustomer.id,
+        customer: xometryCustomer.name,
+        status: "Open",
+        priority: purchaseOrder.expedited ? "High" : "Normal",
+        dueDate: purchaseOrder.ship_date_iso || "",
+        notes: this.buildXometryPurchaseOrderNotes(purchaseOrder),
+        documents,
+        parts
+      });
+      usedJobNumbers.add(normalizedJobNumber);
+      jobs.push(await this.buildJobSummaryFromHeader(savedJob));
+
+      for (const warning of purchaseOrder.warnings || []) {
+        warnings.push({ sourcePath, message: warning });
+      }
+    }
+
+    if (jobs.length) {
+      await this.appendAudit("xometry_purchase_orders_imported", jobs[0].id, `Imported ${jobs.length} Xometry purchase order job${jobs.length === 1 ? "" : "s"}.`);
     }
 
     return { jobs, warnings, errors };
