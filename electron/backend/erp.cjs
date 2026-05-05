@@ -8,6 +8,7 @@ const { spawn } = require("node:child_process");
 
 const {
   DEFAULT_LIBRARY_DEFINITIONS,
+  DOCUMENT_CATEGORIES,
   DEFAULT_TEMPLATES,
   MATERIAL_CONSTANTS
 } = require("./defaults.cjs");
@@ -76,6 +77,7 @@ class ERPBackend {
     const root = path.resolve(folder);
     const directories = [
       "config",
+      "customers",
       "jobs",
       "materials",
       "metrology/instruments",
@@ -190,10 +192,22 @@ class ERPBackend {
     const resultsColumns = Array.isArray(preferences?.resultsColumns) && preferences.resultsColumns.length
       ? preferences.resultsColumns.map((column) => String(column || "").trim()).filter(Boolean)
       : ["serialCode", "materialType", "supplier", "traceabilityLevel", "status"];
+    const listPreference = (value, fallback) => {
+      const items = Array.isArray(value) ? value : fallback;
+      return Array.from(new Set(items.map((item) => String(item || "").trim()).filter(Boolean)));
+    };
     return {
       dueSoonDays: Number.isFinite(Number(preferences?.dueSoonDays)) ? Number(preferences.dueSoonDays) : 14,
+      jobPrefix: String(preferences?.jobPrefix || "J03C").trim(),
+      startingJobNumber: Number.isFinite(Number(preferences?.startingJobNumber)) ? Number(preferences.startingJobNumber) : 600,
       resultsColumns: Array.from(new Set(resultsColumns)),
       materialFamilies: this.normalizeMaterialFamilies(sourceFamilies),
+      metrologyToolTypes: listPreference(preferences?.metrologyToolTypes, ["Micrometer", "Caliper", "Indicator", "Pin Gage", "Thread Plug Gage", "Height Gage"]),
+      metrologyManufacturers: listPreference(preferences?.metrologyManufacturers, ["Mitutoyo", "Starrett", "Mahr", "Fowler", "SPI"]),
+      metrologyResolutions: listPreference(preferences?.metrologyResolutions, ['0.0001"', '0.0005"', '0.001"', '0.01 mm']),
+      metrologyLocations: listPreference(preferences?.metrologyLocations, ["QC", "Inspection Bench", "Machine Shop", "Tool Crib"]),
+      metrologyDepartments: listPreference(preferences?.metrologyDepartments, ["Quality", "Machining", "Assembly"]),
+      metrologyStatuses: listPreference(preferences?.metrologyStatuses, ["In service", "Due for calibration", "Overdue", "Retired"]),
       lastInitializedAt: String(preferences?.lastInitializedAt || nowIso()).trim() || nowIso()
     };
   }
@@ -346,6 +360,107 @@ class ERPBackend {
     return normalized;
   }
 
+  normalizeCustomer(customer) {
+    return {
+      id: customer?.id || randomId("customer"),
+      name: String(customer?.name || "").trim(),
+      shippingAddress1: String(customer?.shippingAddress1 || "").trim(),
+      shippingAddress2: String(customer?.shippingAddress2 || "").trim(),
+      city: String(customer?.city || "").trim(),
+      state: String(customer?.state || "").trim(),
+      postalCode: String(customer?.postalCode || "").trim(),
+      country: String(customer?.country || "").trim(),
+      contactName: String(customer?.contactName || "").trim(),
+      email: String(customer?.email || "").trim(),
+      phone: String(customer?.phone || "").trim(),
+      notes: String(customer?.notes || "").trim(),
+      active: customer?.active !== false,
+      createdAt: String(customer?.createdAt || nowIso()).trim() || nowIso(),
+      updatedAt: String(customer?.updatedAt || nowIso()).trim() || nowIso()
+    };
+  }
+
+  async listCustomers() {
+    const dataRoot = await this.requireDataFolder();
+    const customerDir = path.join(dataRoot, "customers");
+    const entries = await fs.readdir(customerDir, { withFileTypes: true });
+    const customers = [];
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith(".json")) {
+        continue;
+      }
+      const customer = await readJson(path.join(customerDir, entry.name), null);
+      if (!customer?.id) {
+        continue;
+      }
+      customers.push(this.normalizeCustomer(customer));
+    }
+
+    const jobsRoot = path.join(dataRoot, "jobs");
+    const jobEntries = (await pathExists(jobsRoot)) ? await fs.readdir(jobsRoot, { withFileTypes: true }) : [];
+    const jobRefsByCustomerId = new Map();
+    for (const entry of jobEntries) {
+      if (!entry.isDirectory()) {
+        continue;
+      }
+      const header = await readJson(path.join(jobsRoot, entry.name, "job.json"), null);
+      if (!header?.id) {
+        continue;
+      }
+      const customerId = String(header.customerId || "").trim();
+      if (!customerId) {
+        continue;
+      }
+      if (!jobRefsByCustomerId.has(customerId)) {
+        jobRefsByCustomerId.set(customerId, []);
+      }
+      jobRefsByCustomerId.get(customerId).push({
+        jobId: header.id,
+        jobNumber: header.jobNumber || "",
+        status: header.status || "Open",
+        updatedAt: header.updatedAt || header.createdAt || ""
+      });
+    }
+
+    return customers
+      .map((customer) => ({
+        ...customer,
+        jobRefs: (jobRefsByCustomerId.get(customer.id) || [])
+          .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)))
+      }))
+      .sort((a, b) => String(a.name).localeCompare(String(b.name)));
+  }
+
+  async saveCustomer(customer) {
+    const dataRoot = await this.requireDataFolder();
+    const existing = customer?.id ? await readJson(this.getCustomerRoot(dataRoot, customer.id), null) : null;
+    const timestamp = nowIso();
+    const normalized = this.normalizeCustomer({
+      ...existing,
+      ...(customer || {}),
+      createdAt: existing?.createdAt || customer?.createdAt || timestamp,
+      updatedAt: timestamp
+    });
+    if (!normalized.name) {
+      throw new Error("Customer name is required.");
+    }
+    await writeJson(this.getCustomerRoot(dataRoot, normalized.id), normalized);
+    await this.appendAudit("customer_saved", normalized.id, `Saved customer ${normalized.name}.`);
+    const customers = await this.listCustomers();
+    return customers.find((item) => item.id === normalized.id) || { ...normalized, jobRefs: [] };
+  }
+
+  async upsertNamedCustomer(seed) {
+    const customers = await this.listCustomers();
+    const targetName = normalizeText(seed?.name || "");
+    const existing = customers.find((customer) => normalizeText(customer.name) === targetName) || null;
+    return this.saveCustomer({
+      ...(existing || {}),
+      ...seed,
+      id: existing?.id || seed?.id || randomId("customer")
+    });
+  }
+
   async deleteTemplate(id) {
     const dataRoot = await this.requireDataFolder();
     await fs.rm(path.join(dataRoot, "templates", "operations", `${safeFileName(id)}.json`), { force: true });
@@ -371,10 +486,46 @@ class ERPBackend {
     return jobs.sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
   }
 
+  async generateNextJobNumber() {
+    const jobs = await this.listJobSummaries();
+    const preferences = await this.loadPreferences();
+    const configuredPrefix = String(preferences.jobPrefix || "").trim();
+    const startingNumber = Number.isFinite(Number(preferences.startingJobNumber)) ? Number(preferences.startingJobNumber) : 1;
+    const candidates = jobs
+      .map((job) => {
+        const value = String(job.jobNumber || "").trim();
+        const match = value.match(/^(.*?)(\d+)$/);
+        if (!match) {
+          return null;
+        }
+        return {
+          prefix: match[1],
+          digits: match[2],
+          number: Number(match[2]),
+          updatedAt: String(job.updatedAt || "")
+        };
+      })
+      .filter(Boolean)
+      .sort((a, b) => b.number - a.number || String(b.updatedAt).localeCompare(String(a.updatedAt)));
+
+    const preferredCandidates = configuredPrefix
+      ? candidates.filter((candidate) => candidate.prefix === configuredPrefix)
+      : candidates;
+
+    if (!preferredCandidates.length) {
+      const digits = Math.max(String(startingNumber).length, 4);
+      return `${configuredPrefix}${String(startingNumber).padStart(digits, "0")}`;
+    }
+
+    const next = preferredCandidates[0];
+    return `${next.prefix}${String(next.number + 1).padStart(next.digits.length, "0")}`;
+  }
+
   async buildJobSummaryFromHeader(header) {
     return {
       id: header.id,
       jobNumber: header.jobNumber || "",
+      customerId: header.customerId || "",
       customer: header.customer || "",
       status: header.status || "Open",
       priority: header.priority || "Normal",
@@ -398,6 +549,22 @@ class ERPBackend {
 
   getInstrumentRoot(dataRoot, instrumentId) {
     return path.join(dataRoot, "metrology", "instruments", safeFileName(instrumentId));
+  }
+
+  getCustomerRoot(dataRoot, customerId) {
+    return path.join(dataRoot, "customers", `${safeFileName(customerId)}.json`);
+  }
+
+  getPartRoot(dataRoot, jobId, partId) {
+    return path.join(this.getJobRoot(dataRoot, jobId), "parts", safeFileName(partId));
+  }
+
+  getJobDocumentsRoot(dataRoot, jobId) {
+    return path.join(this.getJobRoot(dataRoot, jobId), "documents");
+  }
+
+  getPartDocumentsRoot(dataRoot, jobId, partId) {
+    return path.join(this.getPartRoot(dataRoot, jobId, partId), "documents");
   }
 
   async loadJob(jobId, options = {}) {
@@ -450,6 +617,7 @@ class ERPBackend {
       operations.sort((a, b) => Number(a.sequence || 0) - Number(b.sequence || 0));
       parts.push({
         ...part,
+        documents: (Array.isArray(part.documents) ? part.documents : []).map((document) => this.normalizeDocument(document)),
         operations
       });
     }
@@ -471,8 +639,41 @@ class ERPBackend {
     }
     return {
       ...header,
+      documents: (Array.isArray(header.documents) ? header.documents : []).map((document) => this.normalizeDocument(document)),
       tools: undefined,
       parts
+    };
+  }
+
+  normalizeDocument(document, categoryFallback = "Other") {
+    const originalFilename = String(document?.originalFilename || document?.storedFilename || document?.displayName || "Document").trim();
+    const storedFilename = String(document?.storedFilename || originalFilename).trim();
+    const fileType = String(document?.fileType || path.extname(storedFilename).slice(1)).trim().toUpperCase();
+    return {
+      id: document?.id || randomId("document"),
+      originalFilename,
+      storedFilename,
+      storedPath: String(document?.storedPath || "").replaceAll("\\", "/"),
+      originalPath: String(document?.originalPath || "").trim(),
+      fileType,
+      category: String(document?.category || categoryFallback || "Other").trim() || "Other",
+      description: String(document?.description || "").trim(),
+      displayName: String(document?.displayName || originalFilename).trim() || originalFilename,
+      attachedAt: String(document?.attachedAt || nowIso()).trim() || nowIso(),
+      active: document?.active !== false,
+      archivedAt: String(document?.archivedAt || "").trim(),
+      revisedAt: String(document?.revisedAt || "").trim(),
+      revisionNumber: Number(document?.revisionNumber || 1) || 1,
+      revisions: (Array.isArray(document?.revisions) ? document.revisions : []).map((revision) => ({
+        originalFilename: String(revision?.originalFilename || "").trim(),
+        storedFilename: String(revision?.storedFilename || "").trim(),
+        storedPath: String(revision?.storedPath || "").replaceAll("\\", "/"),
+        originalPath: String(revision?.originalPath || "").trim(),
+        fileType: String(revision?.fileType || "").trim().toUpperCase(),
+        attachedAt: String(revision?.attachedAt || "").trim(),
+        revisedAt: String(revision?.revisedAt || "").trim(),
+        revisionNumber: Number(revision?.revisionNumber || 1) || 1
+      }))
     };
   }
 
@@ -553,6 +754,7 @@ class ERPBackend {
       },
       notes: String(part?.notes || "").trim(),
       active: part?.active !== false,
+      documents: (Array.isArray(part?.documents) ? part.documents : []).map((document) => this.normalizeDocument(document)),
       operations
     };
   }
@@ -573,6 +775,7 @@ class ERPBackend {
     const normalized = {
       id: job?.id || randomId("job"),
       jobNumber: String(job?.jobNumber || "").trim(),
+      customerId: String(job?.customerId || "").trim(),
       customer: String(job?.customer || "").trim(),
       status: String(job?.status || "Open").trim(),
       priority: String(job?.priority || "Normal").trim(),
@@ -585,14 +788,11 @@ class ERPBackend {
         notes: String(job?.revision?.notes || "").trim()
       },
       active: job?.active !== false,
+      documents: (Array.isArray(job?.documents) ? job.documents : []).map((document) => this.normalizeDocument(document)),
       parts,
       createdAt: job?.createdAt || timestamp,
       updatedAt: timestamp
     };
-    if (!normalized.jobNumber && !normalized.customer) {
-      throw new Error("A job number or customer is required.");
-    }
-
     const summary = this.summarizeJob(normalized);
     const jobRoot = this.getJobRoot(dataRoot, normalized.id);
     await ensureDir(path.join(jobRoot, "parts"));
@@ -611,6 +811,7 @@ class ERPBackend {
       const partRoot = path.join(jobRoot, "parts", safeFileName(part.id));
       const existingPart = await readJson(path.join(partRoot, "part.json"), null);
       await ensureDir(path.join(partRoot, "operations"));
+      await ensureDir(path.join(partRoot, "documents"));
       await writeJson(path.join(partRoot, "part.json"), {
         ...part,
         operations: undefined,
@@ -666,6 +867,36 @@ class ERPBackend {
     return saved;
   }
 
+  async unarchiveJob(jobId) {
+    const job = await this.loadJob(jobId);
+    if (!job) {
+      throw new Error(`Job not found: ${jobId}`);
+    }
+    job.active = true;
+    if (String(job.status || "").trim() === "Archived") {
+      job.status = "Open";
+    }
+    const saved = await this.saveJob(job);
+    await this.appendAudit("job_unarchived", jobId, `Unarchived job ${job.jobNumber || jobId}.`);
+    return saved;
+  }
+
+  async deleteJob(jobId) {
+    const dataRoot = await this.requireDataFolder();
+    const job = await this.loadJob(jobId);
+    if (!job) {
+      throw new Error(`Job not found: ${jobId}`);
+    }
+    if (job.active !== false) {
+      throw new Error("Only archived jobs can be deleted.");
+    }
+    await this.releaseLock("job", jobId).catch(() => {});
+    await fs.rm(this.getJobRoot(dataRoot, jobId), { recursive: true, force: true });
+    await this.appendAudit("job_deleted", jobId, `Deleted archived job ${job.jobNumber || jobId}.`);
+    await this.rebuildCrossReferences();
+    return true;
+  }
+
   async chooseOperationImages(jobId, partId, operationId, mainWindow) {
     const result = await dialog.showOpenDialog(mainWindow || null, {
       title: "Choose Operation Images",
@@ -703,6 +934,381 @@ class ERPBackend {
     };
   }
 
+  async chooseJobDocuments(jobId, mainWindow) {
+    const result = await dialog.showOpenDialog(mainWindow || null, {
+      title: "Choose Job Documents",
+      properties: ["openFile", "multiSelections"]
+    });
+    if (result.canceled) {
+      return [];
+    }
+    const copied = [];
+    for (const sourcePath of result.filePaths) {
+      copied.push(await this.copyJobDocument(jobId, sourcePath));
+    }
+    return copied;
+  }
+
+  async choosePartDocuments(jobId, partId, mainWindow) {
+    const result = await dialog.showOpenDialog(mainWindow || null, {
+      title: "Choose Part Documents",
+      properties: ["openFile", "multiSelections"]
+    });
+    if (result.canceled) {
+      return [];
+    }
+    const copied = [];
+    for (const sourcePath of result.filePaths) {
+      copied.push(await this.copyPartDocument(jobId, partId, sourcePath));
+    }
+    return copied;
+  }
+
+  async copyJobDocument(jobId, sourcePath, category = "Other", description = "") {
+    const dataRoot = await this.requireDataFolder();
+    const destination = await copyFileUnique(sourcePath, this.getJobDocumentsRoot(dataRoot, jobId), "");
+    return this.normalizeDocument({
+      originalFilename: path.basename(sourcePath),
+      storedFilename: path.basename(destination),
+      storedPath: path.relative(dataRoot, destination),
+      originalPath: sourcePath,
+      fileType: path.extname(sourcePath).slice(1).toUpperCase(),
+      category,
+      description,
+      displayName: path.basename(sourcePath)
+    }, category);
+  }
+
+  async copyPartDocument(jobId, partId, sourcePath, category = "Other", description = "") {
+    const dataRoot = await this.requireDataFolder();
+    const destination = await copyFileUnique(sourcePath, this.getPartDocumentsRoot(dataRoot, jobId, partId), "");
+    return this.normalizeDocument({
+      originalFilename: path.basename(sourcePath),
+      storedFilename: path.basename(destination),
+      storedPath: path.relative(dataRoot, destination),
+      originalPath: sourcePath,
+      fileType: path.extname(sourcePath).slice(1).toUpperCase(),
+      category,
+      description,
+      displayName: path.basename(sourcePath)
+    }, category);
+  }
+
+  async openDocumentByStoredPath(targetPath) {
+    if (!targetPath || !(await pathExists(targetPath))) {
+      throw new Error("Document file could not be found.");
+    }
+    const openError = await shell.openPath(targetPath);
+    if (openError) {
+      throw new Error(openError);
+    }
+    return true;
+  }
+
+  async openJobDocument(jobId, documentId) {
+    const dataRoot = await this.requireDataFolder();
+    const job = await this.loadJob(jobId);
+    if (!job) {
+      throw new Error(`Job not found: ${jobId}`);
+    }
+    const document = (job.documents || []).find((item) => item.id === documentId);
+    if (!document) {
+      throw new Error("Document not found.");
+    }
+    const targetPath = document.storedPath
+      ? path.join(dataRoot, document.storedPath)
+      : document.originalPath;
+    return this.openDocumentByStoredPath(targetPath);
+  }
+
+  async openPartDocument(jobId, partId, documentId) {
+    const dataRoot = await this.requireDataFolder();
+    const job = await this.loadJob(jobId);
+    const part = job?.parts?.find((item) => item.id === partId);
+    if (!part) {
+      throw new Error("Part not found.");
+    }
+    const document = (part.documents || []).find((item) => item.id === documentId);
+    if (!document) {
+      throw new Error("Document not found.");
+    }
+    const targetPath = document.storedPath
+      ? path.join(dataRoot, document.storedPath)
+      : document.originalPath;
+    return this.openDocumentByStoredPath(targetPath);
+  }
+
+  async openJobDocumentRevision(jobId, documentId, revisionIndex) {
+    const dataRoot = await this.requireDataFolder();
+    const job = await this.loadJob(jobId);
+    if (!job) {
+      throw new Error(`Job not found: ${jobId}`);
+    }
+    const document = (job.documents || []).find((item) => item.id === documentId);
+    if (!document) {
+      throw new Error("Document not found.");
+    }
+    const revisions = Array.isArray(document.revisions) ? document.revisions : [];
+    const revision = revisions[Number(revisionIndex)];
+    if (!revision) {
+      throw new Error("Document revision not found.");
+    }
+    const targetPath = revision.storedPath
+      ? path.join(dataRoot, revision.storedPath)
+      : revision.originalPath;
+    return this.openDocumentByStoredPath(targetPath);
+  }
+
+  async openPartDocumentRevision(jobId, partId, documentId, revisionIndex) {
+    const dataRoot = await this.requireDataFolder();
+    const job = await this.loadJob(jobId);
+    const part = job?.parts?.find((item) => item.id === partId);
+    if (!part) {
+      throw new Error("Part not found.");
+    }
+    const document = (part.documents || []).find((item) => item.id === documentId);
+    if (!document) {
+      throw new Error("Document not found.");
+    }
+    const revisions = Array.isArray(document.revisions) ? document.revisions : [];
+    const revision = revisions[Number(revisionIndex)];
+    if (!revision) {
+      throw new Error("Document revision not found.");
+    }
+    const targetPath = revision.storedPath
+      ? path.join(dataRoot, revision.storedPath)
+      : revision.originalPath;
+    return this.openDocumentByStoredPath(targetPath);
+  }
+
+  async archiveJobDocument(jobId, documentId) {
+    const job = await this.loadJob(jobId);
+    if (!job) {
+      throw new Error(`Job not found: ${jobId}`);
+    }
+    const document = (job.documents || []).find((item) => item.id === documentId);
+    if (!document) {
+      throw new Error("Document not found.");
+    }
+    document.active = false;
+    document.archivedAt = nowIso();
+    const saved = await this.saveJob(job);
+    await this.appendAudit("job_document_archived", jobId, `Archived job attachment ${document.originalFilename}.`);
+    return saved;
+  }
+
+  async archivePartDocument(jobId, partId, documentId) {
+    const job = await this.loadJob(jobId);
+    const part = job?.parts?.find((item) => item.id === partId);
+    if (!part) {
+      throw new Error("Part not found.");
+    }
+    const document = (part.documents || []).find((item) => item.id === documentId);
+    if (!document) {
+      throw new Error("Document not found.");
+    }
+    document.active = false;
+    document.archivedAt = nowIso();
+    const saved = await this.saveJob(job);
+    await this.appendAudit("part_document_archived", partId, `Archived part attachment ${document.originalFilename}.`);
+    return saved;
+  }
+
+  async unarchiveJobDocument(jobId, documentId) {
+    const job = await this.loadJob(jobId);
+    if (!job) {
+      throw new Error(`Job not found: ${jobId}`);
+    }
+    const document = (job.documents || []).find((item) => item.id === documentId);
+    if (!document) {
+      throw new Error("Document not found.");
+    }
+    document.active = true;
+    document.archivedAt = "";
+    const saved = await this.saveJob(job);
+    await this.appendAudit("job_document_unarchived", jobId, `Unarchived job attachment ${document.originalFilename}.`);
+    return saved;
+  }
+
+  async unarchivePartDocument(jobId, partId, documentId) {
+    const job = await this.loadJob(jobId);
+    const part = job?.parts?.find((item) => item.id === partId);
+    if (!part) {
+      throw new Error("Part not found.");
+    }
+    const document = (part.documents || []).find((item) => item.id === documentId);
+    if (!document) {
+      throw new Error("Document not found.");
+    }
+    document.active = true;
+    document.archivedAt = "";
+    const saved = await this.saveJob(job);
+    await this.appendAudit("part_document_unarchived", partId, `Unarchived part attachment ${document.originalFilename}.`);
+    return saved;
+  }
+
+  async reviseJobDocument(jobId, documentId, mainWindow) {
+    const result = await dialog.showOpenDialog(mainWindow || null, {
+      title: "Choose New Job Attachment Revision",
+      properties: ["openFile"]
+    });
+    if (result.canceled || !result.filePaths?.[0]) {
+      return null;
+    }
+    return this.replaceJobDocument(jobId, documentId, result.filePaths[0]);
+  }
+
+  async revisePartDocument(jobId, partId, documentId, mainWindow) {
+    const result = await dialog.showOpenDialog(mainWindow || null, {
+      title: "Choose New Part Attachment Revision",
+      properties: ["openFile"]
+    });
+    if (result.canceled || !result.filePaths?.[0]) {
+      return null;
+    }
+    return this.replacePartDocument(jobId, partId, documentId, result.filePaths[0]);
+  }
+
+  async replaceJobDocument(jobId, documentId, sourcePath) {
+    const dataRoot = await this.requireDataFolder();
+    const job = await this.loadJob(jobId);
+    if (!job) {
+      throw new Error(`Job not found: ${jobId}`);
+    }
+    const document = (job.documents || []).find((item) => item.id === documentId);
+    if (!document) {
+      throw new Error("Document not found.");
+    }
+    const destination = await copyFileUnique(sourcePath, this.getJobDocumentsRoot(dataRoot, jobId), "");
+    const revisionTimestamp = nowIso();
+    document.revisions = [
+      ...(document.revisions || []),
+      {
+        originalFilename: document.originalFilename,
+        storedFilename: document.storedFilename,
+        storedPath: document.storedPath,
+        originalPath: document.originalPath,
+        fileType: document.fileType,
+        attachedAt: document.attachedAt,
+        revisedAt: revisionTimestamp,
+        revisionNumber: document.revisionNumber || 1
+      }
+    ];
+    document.originalFilename = path.basename(sourcePath);
+    document.storedFilename = path.basename(destination);
+    document.storedPath = path.relative(dataRoot, destination).replaceAll("\\", "/");
+    document.originalPath = sourcePath;
+    document.fileType = path.extname(sourcePath).slice(1).toUpperCase();
+    document.displayName = document.originalFilename;
+    document.active = true;
+    document.archivedAt = "";
+    document.revisedAt = revisionTimestamp;
+    document.revisionNumber = Number(document.revisionNumber || 1) + 1;
+    const saved = await this.saveJob(job);
+    await this.appendAudit("job_document_revised", jobId, `Revised job attachment ${document.originalFilename}.`);
+    return saved;
+  }
+
+  async replacePartDocument(jobId, partId, documentId, sourcePath) {
+    const dataRoot = await this.requireDataFolder();
+    const job = await this.loadJob(jobId);
+    const part = job?.parts?.find((item) => item.id === partId);
+    if (!part) {
+      throw new Error("Part not found.");
+    }
+    const document = (part.documents || []).find((item) => item.id === documentId);
+    if (!document) {
+      throw new Error("Document not found.");
+    }
+    const destination = await copyFileUnique(sourcePath, this.getPartDocumentsRoot(dataRoot, jobId, partId), "");
+    const revisionTimestamp = nowIso();
+    document.revisions = [
+      ...(document.revisions || []),
+      {
+        originalFilename: document.originalFilename,
+        storedFilename: document.storedFilename,
+        storedPath: document.storedPath,
+        originalPath: document.originalPath,
+        fileType: document.fileType,
+        attachedAt: document.attachedAt,
+        revisedAt: revisionTimestamp,
+        revisionNumber: document.revisionNumber || 1
+      }
+    ];
+    document.originalFilename = path.basename(sourcePath);
+    document.storedFilename = path.basename(destination);
+    document.storedPath = path.relative(dataRoot, destination).replaceAll("\\", "/");
+    document.originalPath = sourcePath;
+    document.fileType = path.extname(sourcePath).slice(1).toUpperCase();
+    document.displayName = document.originalFilename;
+    document.active = true;
+    document.archivedAt = "";
+    document.revisedAt = revisionTimestamp;
+    document.revisionNumber = Number(document.revisionNumber || 1) + 1;
+    const saved = await this.saveJob(job);
+    await this.appendAudit("part_document_revised", partId, `Revised part attachment ${document.originalFilename}.`);
+    return saved;
+  }
+
+  async deleteJobDocument(jobId, documentId) {
+    const dataRoot = await this.requireDataFolder();
+    const job = await this.loadJob(jobId);
+    if (!job) {
+      throw new Error(`Job not found: ${jobId}`);
+    }
+    const documents = Array.isArray(job.documents) ? job.documents : [];
+    const documentIndex = documents.findIndex((item) => item.id === documentId);
+    if (documentIndex < 0) {
+      throw new Error("Document not found.");
+    }
+    const document = documents[documentIndex];
+    if (document.active !== false) {
+      throw new Error("Only archived attachments can be deleted.");
+    }
+    await this.deleteDocumentFiles(dataRoot, document);
+    documents.splice(documentIndex, 1);
+    job.documents = documents;
+    const saved = await this.saveJob(job);
+    await this.appendAudit("job_document_deleted", jobId, `Deleted archived job attachment ${document.originalFilename}.`);
+    return saved;
+  }
+
+  async deletePartDocument(jobId, partId, documentId) {
+    const dataRoot = await this.requireDataFolder();
+    const job = await this.loadJob(jobId);
+    const part = job?.parts?.find((item) => item.id === partId);
+    if (!part) {
+      throw new Error("Part not found.");
+    }
+    const documents = Array.isArray(part.documents) ? part.documents : [];
+    const documentIndex = documents.findIndex((item) => item.id === documentId);
+    if (documentIndex < 0) {
+      throw new Error("Document not found.");
+    }
+    const document = documents[documentIndex];
+    if (document.active !== false) {
+      throw new Error("Only archived attachments can be deleted.");
+    }
+    await this.deleteDocumentFiles(dataRoot, document);
+    documents.splice(documentIndex, 1);
+    part.documents = documents;
+    const saved = await this.saveJob(job);
+    await this.appendAudit("part_document_deleted", partId, `Deleted archived part attachment ${document.originalFilename}.`);
+    return saved;
+  }
+
+  async deleteDocumentFiles(dataRoot, document) {
+    const pathsToRemove = [
+      document?.storedPath ? path.join(dataRoot, document.storedPath) : "",
+      ...((document?.revisions || []).map((revision) => revision?.storedPath ? path.join(dataRoot, revision.storedPath) : ""))
+    ].filter(Boolean);
+    for (const targetPath of pathsToRemove) {
+      if (await pathExists(targetPath)) {
+        await fs.rm(targetPath, { force: true });
+      }
+    }
+  }
+
   jobHistoryMarkdown(job) {
     const lines = [
       `# Job History: ${job.jobNumber || job.id}`,
@@ -714,6 +1320,7 @@ class ERPBackend {
       `- Priority: ${job.priority || "-"}`,
       `- Due Date: ${job.dueDate || "-"}`,
       `- Revision: ${job.revision?.number || "-"}`,
+      `- Job Documents: ${job.documents?.length || 0}`,
       "",
       "## Notes",
       "",
@@ -726,6 +1333,7 @@ class ERPBackend {
       lines.push(`- Quantity: ${part.quantity || "-"}`);
       lines.push(`- Material Spec: ${part.materialSpec || "-"}`);
       lines.push(`- Revision: ${part.revision?.number || "-"}`);
+      lines.push(`- Part Documents: ${part.documents?.length || 0}`);
       lines.push("");
       for (const operation of part.operations) {
         lines.push(`### ${operation.sequence}. ${operation.title}`, "");
@@ -847,12 +1455,26 @@ class ERPBackend {
       storageLocation: String(material?.storageLocation || "").trim(),
       status: String(material?.status || "active").trim(),
       notes: String(material?.notes || "").trim(),
-      attachments: Array.isArray(material?.attachments) ? material.attachments : [],
+      attachments: (Array.isArray(material?.attachments) ? material.attachments : []).map((attachment) => this.normalizeMaterialAttachment(attachment)),
       jobs: Array.isArray(material?.jobs) ? material.jobs : [],
       changeLog: Array.isArray(material?.changeLog) ? material.changeLog : [],
       usageRefs: Array.isArray(material?.usageRefs) ? material.usageRefs : [],
       createdAt: String(material?.createdAt || "").trim(),
       updatedAt: String(material?.updatedAt || "").trim()
+    };
+  }
+
+  normalizeMaterialAttachment(attachment) {
+    const normalized = this.normalizeDocument({
+      ...attachment,
+      id: attachment?.id || randomId("attachment"),
+      category: attachment?.attachmentCategory || attachment?.category || "Other",
+      description: attachment?.description || ""
+    }, "Other");
+    return {
+      ...normalized,
+      attachmentCategory: attachment?.attachmentCategory || normalized.category || "Other",
+      description: attachment?.description || normalized.description || ""
     };
   }
 
@@ -924,7 +1546,7 @@ class ERPBackend {
     lines.push("", "## Attachments", "");
     if (material.attachments?.length) {
       for (const attachment of material.attachments) {
-        lines.push(`- ${attachment.originalFilename} (${attachment.attachmentCategory || "Other"})`);
+        lines.push(`- ${attachment.originalFilename}`);
       }
     } else {
       lines.push("No attachments.");
@@ -979,12 +1601,33 @@ class ERPBackend {
     return true;
   }
 
+  async openMaterialAttachmentRevision(materialId, attachmentId, revisionIndex) {
+    const dataRoot = await this.requireDataFolder();
+    const material = await this.loadMaterial(materialId);
+    if (!material) {
+      throw new Error(`Material not found: ${materialId}`);
+    }
+    const attachment = (material.attachments || []).find((item) => item.id === attachmentId);
+    if (!attachment) {
+      throw new Error("Attachment not found.");
+    }
+    const revisions = Array.isArray(attachment.revisions) ? attachment.revisions : [];
+    const revision = revisions[Number(revisionIndex)];
+    if (!revision) {
+      throw new Error("Attachment revision not found.");
+    }
+    const targetPath = revision.storedPath
+      ? path.join(dataRoot, revision.storedPath)
+      : revision.originalPath;
+    return this.openDocumentByStoredPath(targetPath);
+  }
+
   async copyMaterialAttachment(materialId, sourcePath) {
     const dataRoot = await this.requireDataFolder();
     const root = this.getMaterialRoot(dataRoot, materialId);
     await ensureDir(path.join(root, "attachments"));
     const destination = await copyFileUnique(sourcePath, path.join(root, "attachments"), "");
-    return {
+    return this.normalizeMaterialAttachment({
       id: randomId("attachment"),
       originalFilename: path.basename(sourcePath),
       storedFilename: path.basename(destination),
@@ -994,7 +1637,112 @@ class ERPBackend {
       attachmentCategory: "Other",
       description: "",
       attachedAt: nowIso()
-    };
+    });
+  }
+
+  async archiveMaterialAttachment(materialId, attachmentId) {
+    const material = await this.loadMaterial(materialId);
+    if (!material) {
+      throw new Error(`Material not found: ${materialId}`);
+    }
+    const attachment = (material.attachments || []).find((item) => item.id === attachmentId);
+    if (!attachment) {
+      throw new Error("Attachment not found.");
+    }
+    attachment.active = false;
+    attachment.archivedAt = nowIso();
+    const saved = await this.saveMaterial(material);
+    await this.appendAudit("material_attachment_archived", materialId, `Archived material attachment ${attachment.originalFilename}.`);
+    return saved;
+  }
+
+  async unarchiveMaterialAttachment(materialId, attachmentId) {
+    const material = await this.loadMaterial(materialId);
+    if (!material) {
+      throw new Error(`Material not found: ${materialId}`);
+    }
+    const attachment = (material.attachments || []).find((item) => item.id === attachmentId);
+    if (!attachment) {
+      throw new Error("Attachment not found.");
+    }
+    attachment.active = true;
+    attachment.archivedAt = "";
+    const saved = await this.saveMaterial(material);
+    await this.appendAudit("material_attachment_unarchived", materialId, `Unarchived material attachment ${attachment.originalFilename}.`);
+    return saved;
+  }
+
+  async reviseMaterialAttachment(materialId, attachmentId, mainWindow) {
+    const result = await dialog.showOpenDialog(mainWindow || null, {
+      title: "Choose New Material Attachment Revision",
+      properties: ["openFile"]
+    });
+    if (result.canceled || !result.filePaths?.[0]) {
+      return null;
+    }
+    return this.replaceMaterialAttachment(materialId, attachmentId, result.filePaths[0]);
+  }
+
+  async replaceMaterialAttachment(materialId, attachmentId, sourcePath) {
+    const dataRoot = await this.requireDataFolder();
+    const material = await this.loadMaterial(materialId);
+    if (!material) {
+      throw new Error(`Material not found: ${materialId}`);
+    }
+    const attachment = (material.attachments || []).find((item) => item.id === attachmentId);
+    if (!attachment) {
+      throw new Error("Attachment not found.");
+    }
+    const destination = await copyFileUnique(sourcePath, path.join(this.getMaterialRoot(dataRoot, materialId), "attachments"), "");
+    const revisionTimestamp = nowIso();
+    attachment.revisions = [
+      ...(attachment.revisions || []),
+      {
+        originalFilename: attachment.originalFilename,
+        storedFilename: attachment.storedFilename,
+        storedPath: attachment.storedPath,
+        originalPath: attachment.originalPath,
+        fileType: attachment.fileType,
+        attachedAt: attachment.attachedAt,
+        revisedAt: revisionTimestamp,
+        revisionNumber: attachment.revisionNumber || 1
+      }
+    ];
+    attachment.originalFilename = path.basename(sourcePath);
+    attachment.storedFilename = path.basename(destination);
+    attachment.storedPath = path.relative(dataRoot, destination).replaceAll("\\", "/");
+    attachment.originalPath = sourcePath;
+    attachment.fileType = path.extname(sourcePath).slice(1).toUpperCase();
+    attachment.active = true;
+    attachment.archivedAt = "";
+    attachment.revisedAt = revisionTimestamp;
+    attachment.revisionNumber = Number(attachment.revisionNumber || 1) + 1;
+    const saved = await this.saveMaterial(material);
+    await this.appendAudit("material_attachment_revised", materialId, `Revised material attachment ${attachment.originalFilename}.`);
+    return saved;
+  }
+
+  async deleteMaterialAttachment(materialId, attachmentId) {
+    const dataRoot = await this.requireDataFolder();
+    const material = await this.loadMaterial(materialId);
+    if (!material) {
+      throw new Error(`Material not found: ${materialId}`);
+    }
+    const attachments = Array.isArray(material.attachments) ? material.attachments : [];
+    const attachmentIndex = attachments.findIndex((item) => item.id === attachmentId);
+    if (attachmentIndex < 0) {
+      throw new Error("Attachment not found.");
+    }
+    const attachment = attachments[attachmentIndex];
+    if (attachment.active !== false) {
+      throw new Error("Only archived attachments can be deleted.");
+    }
+    await this.deleteDocumentFiles(dataRoot, attachment);
+    attachments.splice(attachmentIndex, 1);
+    material.attachments = attachments;
+    const saved = await this.saveMaterial(material);
+    await this.appendAudit("material_attachment_deleted", materialId, `Deleted archived material attachment ${attachment.originalFilename}.`);
+    return saved;
   }
 
   async listStandards() {
@@ -1432,9 +2180,10 @@ class ERPBackend {
 
   async loadWorkspace() {
     const dataFolder = await this.requireDataFolder();
-    const [dashboard, jobs, materials, instruments, templates, libraries, standards, preferences] = await Promise.all([
+    const [dashboard, jobs, customers, materials, instruments, templates, libraries, standards, preferences] = await Promise.all([
       this.getDashboardState(),
       this.listJobSummaries(),
+      this.listCustomers(),
       this.listMaterials(),
       this.listInstruments(),
       this.loadTemplates(),
@@ -1446,6 +2195,7 @@ class ERPBackend {
       dataFolder,
       dashboard,
       jobs,
+      customers,
       materials,
       instruments,
       templates,
@@ -1454,11 +2204,300 @@ class ERPBackend {
       preferences,
       constants: {
         material: MATERIAL_CONSTANTS,
+        documentCategories: DOCUMENT_CATEGORIES,
         jobStatuses: ["Open", "In Process", "On Hold", "Complete", "Archived"],
         priorities: ["Low", "Normal", "High", "Hot"],
         instrumentStatuses: ["In service", "Due for calibration", "Overdue", "Retired"]
       }
     };
+  }
+
+  buildXometryTravelerNotes(traveler) {
+    const lines = [
+      "Imported from Xometry traveler.",
+      "",
+      `Dimensions: ${traveler.dimensions || "-"}`,
+      `Process: ${traveler.process || "-"}`,
+      `Preferred Subprocess: ${traveler.preferred_subprocess || "-"}`,
+      `Material: ${traveler.material || "-"}`,
+      `Finish: ${traveler.finish || "-"}`,
+      `Threads / Tapped Holes: ${traveler.threads || "-"}`,
+      `Inserts: ${traveler.inserts || "-"}`,
+      `Precision Tolerance: ${traveler.precision_tolerance || "-"}`,
+      `Surface Roughness: ${traveler.surface_roughness || "-"}`,
+      `Inspection: ${traveler.inspection || "-"}`,
+      `Certificates / Supplier Qualifications: ${traveler.certificates || "-"}`,
+      `Purchase Order: ${traveler.purchase_order || "-"}`,
+      `Due Date: ${traveler.due_date || "-"}`,
+      `Expedited: ${traveler.expedited ? "Yes" : "No"}`,
+      `Contact: ${traveler.contact || "-"}`,
+      `Traveler Job ID: ${traveler.traveler_job_id || "-"}`,
+      `Last Revised: ${traveler.last_revised || "-"}`,
+      `Report Generated: ${traveler.report_generated || "-"}`,
+      `Traveler Notes: ${traveler.notes || "-"}`
+    ];
+    if (Array.isArray(traveler.additional_notes) && traveler.additional_notes.length) {
+      lines.push(`Additional Requirements: ${traveler.additional_notes.join(" ")}`);
+    }
+    if (Array.isArray(traveler.warnings) && traveler.warnings.length) {
+      lines.push("");
+      lines.push("Import Warnings:");
+      for (const warning of traveler.warnings) {
+        lines.push(`- ${warning}`);
+      }
+    }
+    return `${lines.join("\n")}\n`;
+  }
+
+  buildSubtractPurchaseOrderNotes(purchaseOrder) {
+    return [
+      "Imported from Subtract purchase order.",
+      "",
+      `PO Number: ${purchaseOrder.purchase_order || "-"}`,
+      `Issue Date: ${purchaseOrder.issue_date || "-"}`,
+      `Ship Date: ${purchaseOrder.ship_date || "-"}`,
+      `Issuer: ${purchaseOrder.issuer_name || "-"}`,
+      `Issuer Contact: ${[purchaseOrder.issuer_email, purchaseOrder.issuer_phone].filter(Boolean).join(" | ") || "-"}`,
+      `Issuer Address: ${(purchaseOrder.issuer_address || []).join(", ") || "-"}`,
+      `Deliver To: ${purchaseOrder.deliver_to_name || "-"}`,
+      `Deliver To Contact: ${purchaseOrder.deliver_to_contact || "-"}`,
+      `Deliver To Email: ${purchaseOrder.deliver_to_email || "-"}`,
+      `Deliver To Phone: ${purchaseOrder.deliver_to_phone || "-"}`,
+      `Deliver To Address: ${(purchaseOrder.deliver_to_address || []).join(", ") || "-"}`,
+      `Total Amount: ${purchaseOrder.total_amount ? `$${purchaseOrder.total_amount}` : "-"}`,
+      `PO Notes: ${purchaseOrder.notes || "-"}`
+    ].join("\n");
+  }
+
+  buildSubtractPartNotes(partRow, purchaseOrder) {
+    return [
+      "Imported from Subtract purchase order part row.",
+      "",
+      `Tolerance: ${partRow.tolerance || "-"}`,
+      `Finishing: ${partRow.finishing || "-"}`,
+      `Print Required: ${partRow.print_required || "-"}`,
+      `PO Notes: ${purchaseOrder.notes || "-"}`
+    ].join("\n");
+  }
+
+  deriveSubtractPartNumber(partName, index) {
+    const base = safeFileName(String(partName || "").toUpperCase().replace(/\s+/g, "-"), "");
+    return base || `PART-${String(index + 1).padStart(3, "0")}`;
+  }
+
+  async importXometryTravelers(jobId, filePaths = null, mainWindow = null) {
+    const job = await this.loadJob(jobId);
+    if (!job) {
+      throw new Error("Open an existing job before importing Xometry travelers.");
+    }
+    let selectedPaths = Array.isArray(filePaths) ? filePaths : null;
+    if (!selectedPaths?.length) {
+      const result = await dialog.showOpenDialog(mainWindow || null, {
+        title: "Import Xometry Travelers",
+        properties: ["openFile", "multiSelections"],
+        filters: [
+          { name: "PDF", extensions: ["pdf"] },
+          { name: "All files", extensions: ["*"] }
+        ]
+      });
+      if (result.canceled || !result.filePaths.length) {
+        return null;
+      }
+      selectedPaths = result.filePaths;
+    }
+
+    const uniqueFilePaths = [...new Map(
+      selectedPaths.map((filePath) => {
+        const resolved = path.resolve(filePath);
+        return [resolved.toLowerCase(), resolved];
+      })
+    ).values()];
+    if (!uniqueFilePaths.length) {
+      return { parts: [], warnings: [], errors: [] };
+    }
+
+    const parserScript = path.join(this.app.getAppPath(), "scripts", "parse_xometry_travelers.py");
+    const payload = await this.runPythonJson(parserScript, uniqueFilePaths);
+    const parts = [];
+    const warnings = [];
+    const errors = [];
+    let suggestedJobNumber = "";
+
+    for (const traveler of payload.travelers || []) {
+      const sourcePath = String(traveler.source_path || "").trim();
+      const sourceLabel = traveler.source_filename || path.basename(sourcePath || "traveler.pdf");
+      if (traveler.error) {
+        errors.push({ sourcePath, message: traveler.error });
+        continue;
+      }
+      if (!suggestedJobNumber && traveler.purchase_order) {
+        suggestedJobNumber = String(traveler.purchase_order || "").trim();
+      }
+      if (!traveler.part_number) {
+        errors.push({ sourcePath, message: `Missing Customer Part ID in ${sourceLabel}.` });
+        continue;
+      }
+
+      const partId = randomId("part");
+      const documents = [];
+      try {
+        documents.push(await this.copyPartDocument(jobId, partId, sourcePath, "Traveler", "Imported Xometry traveler"));
+      } catch (error) {
+        warnings.push({ sourcePath, message: `Imported part data but could not copy traveler PDF: ${error.message}` });
+      }
+
+      parts.push(this.normalizePart({
+        id: partId,
+        partNumber: traveler.part_number,
+        partName: traveler.part_name || traveler.part_number,
+        description: "",
+        quantity: String(traveler.quantity || "").trim(),
+        materialSpec: traveler.material || "",
+        revision: {
+          number: String(traveler.revision || "").trim(),
+          date: traveler.last_revised_iso || todayIso(),
+          notes: ""
+        },
+        notes: this.buildXometryTravelerNotes(traveler),
+        documents,
+        operations: []
+      }));
+
+      if (Array.isArray(traveler.warnings)) {
+        for (const warning of traveler.warnings) {
+          warnings.push({ sourcePath, message: warning });
+        }
+      }
+      if (Number(traveler.part_total || 0) > 1) {
+        warnings.push({
+          sourcePath,
+          message: `${sourceLabel} references Part ${traveler.part_index || "?"} of ${traveler.part_total}; only the parsed part was imported.`
+        });
+      }
+    }
+
+    if (parts.length) {
+      await this.appendAudit("xometry_travelers_prepared", jobId, `Prepared ${parts.length} Xometry traveler import${parts.length === 1 ? "" : "s"} for job ${job.jobNumber || job.id}.`);
+    }
+
+    return { parts, warnings, errors, suggestedJobNumber, suggestedCustomerName: "Xometry" };
+  }
+
+  async importSubtractPurchaseOrders(filePaths = null, mainWindow = null) {
+    let selectedPaths = Array.isArray(filePaths) ? filePaths : null;
+    if (!selectedPaths?.length) {
+      const result = await dialog.showOpenDialog(mainWindow || null, {
+        title: "Import Subtract Purchase Orders",
+        properties: ["openFile", "multiSelections"],
+        filters: [
+          { name: "PDF", extensions: ["pdf"] },
+          { name: "All files", extensions: ["*"] }
+        ]
+      });
+      if (result.canceled || !result.filePaths.length) {
+        return null;
+      }
+      selectedPaths = result.filePaths;
+    }
+
+    const uniqueFilePaths = [...new Map(
+      selectedPaths.map((filePath) => {
+        const resolved = path.resolve(filePath);
+        return [resolved.toLowerCase(), resolved];
+      })
+    ).values()];
+    if (!uniqueFilePaths.length) {
+      return { jobs: [], warnings: [], errors: [] };
+    }
+
+    const parserScript = path.join(this.app.getAppPath(), "scripts", "parse_subtract_purchase_orders.py");
+    const payload = await this.runPythonJson(parserScript, uniqueFilePaths);
+    const existingJobs = await this.listJobSummaries();
+    const usedJobNumbers = new Set(existingJobs.map((job) => normalizeText(job.jobNumber)));
+    const warnings = [];
+    const errors = [];
+    const jobs = [];
+
+    const subtractCustomer = await this.upsertNamedCustomer({
+      name: "Subtract Manufacturing",
+      shippingAddress1: "7301 S County Road 400W",
+      city: "Muncie",
+      state: "IN",
+      postalCode: "47302",
+      contactName: "Subtract Manufacturing",
+      email: "contact@subtractmanufacturing.com",
+      phone: "+1 (317) 224-4251",
+      notes: "Auto-created from Subtract purchase order imports."
+    });
+
+    for (const purchaseOrder of payload.purchase_orders || []) {
+      const sourcePath = String(purchaseOrder.source_path || "").trim();
+      const sourceLabel = purchaseOrder.source_filename || path.basename(sourcePath || "purchase-order.pdf");
+      if (purchaseOrder.error) {
+        errors.push({ sourcePath, message: purchaseOrder.error });
+        continue;
+      }
+      const jobNumber = String(purchaseOrder.purchase_order || "").trim();
+      if (!jobNumber) {
+        errors.push({ sourcePath, message: `Missing PO NUMBER in ${sourceLabel}.` });
+        continue;
+      }
+      const normalizedJobNumber = normalizeText(jobNumber);
+      if (usedJobNumbers.has(normalizedJobNumber)) {
+        errors.push({ sourcePath, message: `Job number ${jobNumber} already exists.` });
+        continue;
+      }
+
+      const jobId = randomId("job");
+      const documents = [];
+      try {
+        documents.push(await this.copyJobDocument(jobId, sourcePath, "PO / Customer", "Imported Subtract purchase order"));
+      } catch (error) {
+        warnings.push({ sourcePath, message: `Imported job data but could not copy PO PDF: ${error.message}` });
+      }
+
+      const parts = (purchaseOrder.parts || []).map((partRow, index) => this.normalizePart({
+        id: randomId("part"),
+        partNumber: this.deriveSubtractPartNumber(partRow.part_name, index),
+        partName: partRow.part_name || `Part ${index + 1}`,
+        description: "",
+        quantity: String(partRow.quantity || "").trim(),
+        materialSpec: partRow.material || "",
+        revision: {
+          number: "",
+          date: "",
+          notes: ""
+        },
+        notes: this.buildSubtractPartNotes(partRow, purchaseOrder),
+        documents: [],
+        operations: []
+      }));
+
+      const savedJob = await this.saveJob({
+        id: jobId,
+        jobNumber,
+        customerId: subtractCustomer.id,
+        customer: subtractCustomer.name,
+        status: "Open",
+        priority: "Normal",
+        dueDate: purchaseOrder.ship_date_iso || "",
+        notes: this.buildSubtractPurchaseOrderNotes(purchaseOrder),
+        documents,
+        parts
+      });
+      usedJobNumbers.add(normalizedJobNumber);
+      jobs.push(await this.buildJobSummaryFromHeader(savedJob));
+
+      for (const warning of purchaseOrder.warnings || []) {
+        warnings.push({ sourcePath, message: warning });
+      }
+    }
+
+    if (jobs.length) {
+      await this.appendAudit("subtract_purchase_orders_imported", jobs[0].id, `Imported ${jobs.length} Subtract purchase order job${jobs.length === 1 ? "" : "s"}.`);
+    }
+
+    return { jobs, warnings, errors };
   }
 
   async createJobFromFusionImport(mainWindow) {

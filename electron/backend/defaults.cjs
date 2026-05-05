@@ -118,8 +118,20 @@ const MATERIAL_CONSTANTS = {
   ]
 };
 
+const DOCUMENT_CATEGORIES = [
+  "Model",
+  "Drawing",
+  "Traveler",
+  "PO / Customer",
+  "Inspection",
+  "Certification",
+  "Packing Slip",
+  "Other"
+];
+
 module.exports = {
   DEFAULT_LIBRARY_DEFINITIONS,
   DEFAULT_TEMPLATES,
+  DOCUMENT_CATEGORIES,
   MATERIAL_CONSTANTS
 };

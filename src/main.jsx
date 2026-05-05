@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   Archive,
+  ArchiveRestore,
   ClipboardList,
   Database,
   FileDown,
@@ -13,6 +14,7 @@ import {
   Package,
   Plus,
   Settings,
+  Trash2,
   X
 } from "lucide-react";
 import "./styles.css";
@@ -26,6 +28,7 @@ const uid = (prefix) => `${prefix}-${crypto.randomUUID()}`;
 const blankJob = () => ({
   id: uid("job"),
   jobNumber: "",
+  customerId: "",
   customer: "",
   status: "Open",
   priority: "Normal",
@@ -37,7 +40,7 @@ const blankJob = () => ({
     author: "",
     notes: ""
   },
-  tools: [],
+  documents: [],
   parts: [],
   createdAt: nowIso(),
   updatedAt: nowIso()
@@ -68,6 +71,7 @@ const blankPart = () => ({
     notes: ""
   },
   notes: "",
+  documents: [],
   operations: []
 });
 
@@ -101,6 +105,8 @@ const blankOperation = (sequence = 1) => ({
 });
 
 const blankParameter = () => ({ id: uid("parameter"), label: "", value: "" });
+const OPERATION_TYPE_OPTIONS = ["General", "Machining", "Inspection", "Cutoff", "Finishing", "Deburr", "Assembly"];
+const OPERATION_STATUS_OPTIONS = ["Ready", "In Process", "Complete", "Hold"];
 const blankOperationTool = () => ({
   id: uid("tool"),
   name: "",
@@ -192,6 +198,33 @@ const blankMaterialFamily = () => ({
   name: "",
   alloys: [""]
 });
+
+const blankCustomer = (name = "") => ({
+  id: uid("customer"),
+  name,
+  shippingAddress1: "",
+  shippingAddress2: "",
+  city: "",
+  state: "",
+  postalCode: "",
+  country: "",
+  contactName: "",
+  email: "",
+  phone: "",
+  notes: "",
+  active: true
+});
+
+const formatDateTime = (value) => {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  return date.toLocaleString();
+};
+
+const customerDisplayName = (customer) => customer?.name || "Unnamed Customer";
 
 const MATERIAL_RESULT_COLUMNS = [
   { key: "serialCode", label: "Serial Code" },
@@ -424,7 +457,8 @@ function useAutoSave({
   isReady = () => true,
   save,
   onSaved,
-  onError
+  onError,
+  onStateChange
 }) {
   const timerRef = useRef(null);
   const lastSavedRef = useRef(JSON.stringify(value ?? null));
@@ -434,6 +468,7 @@ function useAutoSave({
   const saveRef = useRef(save);
   const onSavedRef = useRef(onSaved);
   const onErrorRef = useRef(onError);
+  const onStateChangeRef = useRef(onStateChange);
   const isReadyRef = useRef(isReady);
   const enabledRef = useRef(enabled);
   const delayRef = useRef(delay);
@@ -442,6 +477,7 @@ function useAutoSave({
   saveRef.current = save;
   onSavedRef.current = onSaved;
   onErrorRef.current = onError;
+  onStateChangeRef.current = onStateChange;
   isReadyRef.current = isReady;
   enabledRef.current = enabled;
   delayRef.current = delay;
@@ -466,6 +502,7 @@ function useAutoSave({
       return;
     }
     inFlightRef.current = true;
+    onStateChangeRef.current?.("saving");
     const generation = generationRef.current;
     try {
       const savedValue = await saveRef.current(currentValue);
@@ -476,8 +513,10 @@ function useAutoSave({
       lastSavedRef.current = savedHash;
       latestValueRef.current = savedValue ?? currentValue;
       await onSavedRef.current?.(savedValue ?? currentValue);
+      onStateChangeRef.current?.("saved");
     } catch (error) {
       if (generation === generationRef.current) {
+        onStateChangeRef.current?.("error");
         onErrorRef.current?.(error);
       }
     } finally {
@@ -513,6 +552,7 @@ function useAutoSave({
       return;
     }
     clearTimer();
+    onStateChangeRef.current?.("saving");
     timerRef.current = window.setTimeout(() => {
       void runSave();
     }, delay);
@@ -567,10 +607,12 @@ class RenderBoundary extends React.Component {
 
 function Workspace() {
   const [workspace, setWorkspace] = useState(null);
-  const [view, setView] = useState("dashboard");
+  const [view, setView] = useState("jobs");
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("");
   const [startupError, setStartupError] = useState("");
+  const [confirmDeleteJobOpen, setConfirmDeleteJobOpen] = useState(false);
+  const [saveState, setSaveState] = useState("saved");
   const fusionImportInFlight = useRef(false);
   const refreshWorkspaceRef = useRef(null);
 
@@ -586,6 +628,7 @@ function Workspace() {
 
   const [selectedInstrumentId, setSelectedInstrumentId] = useState(null);
   const [instrumentPayload, setInstrumentPayload] = useState(null);
+  const [metrologyScreen, setMetrologyScreen] = useState("list");
 
   const [selectedTemplateId, setSelectedTemplateId] = useState(null);
   const [lastIndexMaintenance, setLastIndexMaintenance] = useState(0);
@@ -616,6 +659,8 @@ function Workspace() {
         setMaterial(null);
         setMaterialScreen("list");
         setSelectedInstrumentId(null);
+        setInstrumentPayload(null);
+        setMetrologyScreen("list");
       }
       setMaterial((current) => current ? syncMaterialClassification(current, next.preferences) : current);
       if (!selectedTemplateId && next.templates?.[0]) {
@@ -664,6 +709,16 @@ function Workspace() {
     return () => window.clearInterval(timer);
   }, [workspace?.dataFolder]);
 
+  useEffect(() => {
+    if ((view === "jobs" && jobScreen === "list")
+      || (view === "materials" && materialScreen === "list")
+      || (view === "metrology" && metrologyScreen === "list")
+      || view === "templates"
+      || view === "settings") {
+      setSaveState("saved");
+    }
+  }, [view, jobScreen, materialScreen, metrologyScreen]);
+
   const openJob = async (jobId) => {
     setBusy(true);
     try {
@@ -677,6 +732,7 @@ function Workspace() {
       setSelectedOperationId(null);
       setJobScreen("job");
       setView("jobs");
+      setSaveState("saved");
     } catch (error) {
       showStatus(error.message || String(error));
     } finally {
@@ -695,6 +751,7 @@ function Workspace() {
       setMaterial(syncMaterialClassification(loaded, workspace?.preferences));
       setMaterialScreen("detail");
       setView("materials");
+      setSaveState("saved");
     } catch (error) {
       showStatus(error.message || String(error));
     } finally {
@@ -711,7 +768,9 @@ function Workspace() {
       const loaded = await api.loadInstrument(instrumentId, { acquireLock: true });
       setSelectedInstrumentId(instrumentId);
       setInstrumentPayload(loaded);
+      setMetrologyScreen("detail");
       setView("metrology");
+      setSaveState("saved");
     } catch (error) {
       showStatus(error.message || String(error));
     } finally {
@@ -727,6 +786,7 @@ function Workspace() {
     setSelectedOperationId(null);
     setJobScreen("job");
     setView("jobs");
+    setSaveState("saved");
   };
 
   const showJobList = () => {
@@ -734,29 +794,34 @@ function Workspace() {
     setJobScreen("list");
     setSelectedPartId(null);
     setSelectedOperationId(null);
+    setSaveState("saved");
   };
 
   const openPart = (partId) => {
     setSelectedPartId(partId);
     setSelectedOperationId(null);
     setJobScreen("part");
+    setSaveState("saved");
   };
 
   const openOperation = (partId, operationId) => {
     setSelectedPartId(partId);
     setSelectedOperationId(operationId);
     setJobScreen("operation");
+    setSaveState("saved");
   };
 
   const backToJob = () => {
     setSelectedPartId(null);
     setSelectedOperationId(null);
     setJobScreen("job");
+    setSaveState("saved");
   };
 
   const backToPart = () => {
     setSelectedOperationId(null);
     setJobScreen("part");
+    setSaveState("saved");
   };
 
   const importFusionIntoPart = async (partId) => {
@@ -778,6 +843,80 @@ function Workspace() {
       showStatus(error.message || String(error));
     } finally {
       fusionImportInFlight.current = false;
+      setBusy(false);
+    }
+  };
+
+  const importXometryIntoJob = async () => {
+    if (!job) {
+      return;
+    }
+    setBusy(true);
+    try {
+      const savedJob = await api.saveJob(job);
+      await applySavedJob(savedJob);
+      const imported = await api.importXometryTravelers(savedJob.id);
+      if (!imported) return;
+      const importedParts = imported.parts || [];
+      if (!importedParts.length) {
+        const firstError = imported.errors?.[0]?.message;
+        showStatus(firstError || "No Xometry travelers were imported.");
+        return;
+      }
+      setJob((current) => current ? ({
+        ...current,
+        jobNumber: current.jobNumber || imported.suggestedJobNumber || "",
+        customerId: current.customerId || ((workspace?.customers || []).find((customer) => customer.name === (imported.suggestedCustomerName || ""))?.id || ""),
+        customer: current.customer || imported.suggestedCustomerName || "",
+        parts: [...current.parts, ...importedParts]
+      }) : current);
+      setSelectedPartId(importedParts[0].id);
+      setSelectedOperationId(null);
+      setJobScreen("part");
+      const messageParts = [`Imported ${importedParts.length} Xometry traveler part${importedParts.length === 1 ? "" : "s"}.`];
+      if (imported.warnings?.length) {
+        const warningLines = [...new Set(imported.warnings.map((warning) => warning.message).filter(Boolean))];
+        messageParts.push(`Warnings:\n- ${warningLines.join("\n- ")}`);
+      }
+      if (imported.errors?.length) {
+        const errorLines = [...new Set(imported.errors.map((item) => item.message).filter(Boolean))];
+        messageParts.push(`Skipped:\n- ${errorLines.join("\n- ")}`);
+      }
+      showStatus(messageParts.join("\n"));
+    } catch (error) {
+      showStatus(error.message || String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const importSubtractPurchaseOrders = async () => {
+    setBusy(true);
+    try {
+      const imported = await api.importSubtractPurchaseOrders();
+      if (!imported) return;
+      const importedJobs = imported.jobs || [];
+      if (!importedJobs.length) {
+        const firstError = imported.errors?.[0]?.message;
+        showStatus(firstError || "No Subtract purchase orders were imported.");
+        await refreshWorkspace();
+        return;
+      }
+      await refreshWorkspace();
+      await openJob(importedJobs[0].id);
+      const messageParts = [`Imported ${importedJobs.length} Subtract purchase order job${importedJobs.length === 1 ? "" : "s"}.`];
+      if (imported.warnings?.length) {
+        const warningLines = [...new Set(imported.warnings.map((warning) => warning.message).filter(Boolean))];
+        messageParts.push(`Warnings:\n- ${warningLines.join("\n- ")}`);
+      }
+      if (imported.errors?.length) {
+        const errorLines = [...new Set(imported.errors.map((item) => item.message).filter(Boolean))];
+        messageParts.push(`Skipped:\n- ${errorLines.join("\n- ")}`);
+      }
+      showStatus(messageParts.join("\n"));
+    } catch (error) {
+      showStatus(error.message || String(error));
+    } finally {
       setBusy(false);
     }
   };
@@ -822,6 +961,213 @@ function Workspace() {
     }));
   };
 
+  const addJobDocuments = async () => {
+    if (!job?.id) {
+      showStatus("Open or create a job before adding documents.");
+      return;
+    }
+    setBusy(true);
+    try {
+      const documents = await api.chooseJobDocuments(job.id);
+      if (!documents.length) {
+        return;
+      }
+      setJob((current) => ({
+        ...current,
+        documents: [...(current.documents || []), ...documents]
+      }));
+      showStatus(`Added ${documents.length} job attachment${documents.length === 1 ? "" : "s"}.`);
+    } catch (error) {
+      showStatus(error.message || String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const addPartDocuments = async (partId) => {
+    if (!job?.id) {
+      showStatus("Save the job header before adding part documents.");
+      return;
+    }
+    setBusy(true);
+    try {
+      const documents = await api.choosePartDocuments(job.id, partId);
+      if (!documents.length) {
+        return;
+      }
+      setJob((current) => ({
+        ...current,
+        parts: current.parts.map((part) => part.id === partId
+          ? { ...part, documents: [...(part.documents || []), ...documents] }
+          : part)
+      }));
+      showStatus(`Added ${documents.length} part attachment${documents.length === 1 ? "" : "s"}.`);
+    } catch (error) {
+      showStatus(error.message || String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const openJobDocument = async (jobId, documentId) => {
+    try {
+      await api.openJobDocument(jobId, documentId);
+    } catch (error) {
+      showStatus(error.message || String(error));
+    }
+  };
+
+  const openPartDocument = async (jobId, partId, documentId) => {
+    try {
+      await api.openPartDocument(jobId, partId, documentId);
+    } catch (error) {
+      showStatus(error.message || String(error));
+    }
+  };
+
+  const openJobDocumentRevision = async (jobId, documentId, revisionIndex) => {
+    try {
+      await api.openJobDocumentRevision(jobId, documentId, revisionIndex);
+    } catch (error) {
+      showStatus(error.message || String(error));
+    }
+  };
+
+  const openPartDocumentRevision = async (jobId, partId, documentId, revisionIndex) => {
+    try {
+      await api.openPartDocumentRevision(jobId, partId, documentId, revisionIndex);
+    } catch (error) {
+      showStatus(error.message || String(error));
+    }
+  };
+
+  const archiveJobDocument = async (documentId) => {
+    if (!job?.id || !documentId) return;
+    setBusy(true);
+    try {
+      const saved = await api.archiveJobDocument(job.id, documentId);
+      await applySavedJob(saved);
+      showStatus("Job attachment archived.");
+    } catch (error) {
+      showStatus(error.message || String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const archivePartDocument = async (partId, documentId) => {
+    if (!job?.id || !partId || !documentId) return;
+    setBusy(true);
+    try {
+      const saved = await api.archivePartDocument(job.id, partId, documentId);
+      await applySavedJob(saved);
+      showStatus("Part attachment archived.");
+    } catch (error) {
+      showStatus(error.message || String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const unarchiveJobDocument = async (documentId) => {
+    if (!job?.id || !documentId) return;
+    setBusy(true);
+    try {
+      const saved = await api.unarchiveJobDocument(job.id, documentId);
+      await applySavedJob(saved);
+      showStatus("Job attachment unarchived.");
+    } catch (error) {
+      showStatus(error.message || String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const unarchivePartDocument = async (partId, documentId) => {
+    if (!job?.id || !partId || !documentId) return;
+    setBusy(true);
+    try {
+      const saved = await api.unarchivePartDocument(job.id, partId, documentId);
+      await applySavedJob(saved);
+      showStatus("Part attachment unarchived.");
+    } catch (error) {
+      showStatus(error.message || String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const reviseJobDocument = async (documentId) => {
+    if (!job?.id || !documentId) return;
+    setBusy(true);
+    try {
+      const saved = await api.reviseJobDocument(job.id, documentId);
+      if (!saved) return;
+      await applySavedJob(saved);
+      showStatus("Job attachment revised.");
+    } catch (error) {
+      showStatus(error.message || String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const revisePartDocument = async (partId, documentId) => {
+    if (!job?.id || !partId || !documentId) return;
+    setBusy(true);
+    try {
+      const saved = await api.revisePartDocument(job.id, partId, documentId);
+      if (!saved) return;
+      await applySavedJob(saved);
+      showStatus("Part attachment revised.");
+    } catch (error) {
+      showStatus(error.message || String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const deleteJobDocument = async (documentId) => {
+    if (!job?.id || !documentId) return;
+    setBusy(true);
+    try {
+      const saved = await api.deleteJobDocument(job.id, documentId);
+      await applySavedJob(saved);
+      showStatus("Archived job attachment deleted.");
+    } catch (error) {
+      showStatus(error.message || String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const deletePartDocument = async (partId, documentId) => {
+    if (!job?.id || !partId || !documentId) return;
+    setBusy(true);
+    try {
+      const saved = await api.deletePartDocument(job.id, partId, documentId);
+      await applySavedJob(saved);
+      showStatus("Archived part attachment deleted.");
+    } catch (error) {
+      showStatus(error.message || String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const assignNextJobNumber = async () => {
+    try {
+      const next = await api.generateNextJobNumber();
+      if (!next) {
+        return;
+      }
+      setJob((current) => current ? { ...current, jobNumber: next } : current);
+      showStatus(`Assigned job number ${next}.`);
+    } catch (error) {
+      showStatus(error.message || String(error));
+    }
+  };
+
   const applySavedJob = async (saved) => {
     setJob(saved);
     setSelectedJobId(saved.id);
@@ -860,6 +1206,49 @@ function Workspace() {
     }
   };
 
+  const unarchiveCurrentJob = async () => {
+    if (!selectedJobId) return;
+    setBusy(true);
+    try {
+      const saved = await api.unarchiveJob(selectedJobId);
+      setJob(saved);
+      await refreshWorkspace();
+      showStatus("Job unarchived.");
+    } catch (error) {
+      showStatus(error.message || String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const deleteCurrentJob = async () => {
+    if (!selectedJobId) return;
+    setBusy(true);
+    try {
+      await api.deleteJob(selectedJobId);
+      await api.releaseLock("job", selectedJobId).catch(() => {});
+      setSelectedJobId(null);
+      setJob(null);
+      setSelectedPartId(null);
+      setSelectedOperationId(null);
+      setJobScreen("list");
+      setView("jobs");
+      await refreshWorkspace();
+      showStatus("Archived job deleted.");
+    } catch (error) {
+      showStatus(error.message || String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const openDeleteJobConfirm = () => {
+    if (!selectedJobId || busy) {
+      return;
+    }
+    setConfirmDeleteJobOpen(true);
+  };
+
   const createNewMaterial = async () => {
     if (selectedMaterialId) api.releaseLock("material", selectedMaterialId).catch(() => {});
     const serial = await api.generateMaterialSerial().catch(() => "");
@@ -870,6 +1259,7 @@ function Workspace() {
     ));
     setMaterialScreen("detail");
     setView("materials");
+    setSaveState("saved");
   };
 
   const applySavedMaterial = async (saved) => {
@@ -898,6 +1288,81 @@ function Workspace() {
     }
   };
 
+  const openMaterialAttachment = async (attachmentId) => {
+    if (!material?.id || !attachmentId) return;
+    try {
+      await api.openMaterialAttachment(material.id, attachmentId);
+    } catch (error) {
+      showStatus(error.message || String(error));
+    }
+  };
+
+  const openMaterialAttachmentRevision = async (attachmentId, revisionIndex) => {
+    if (!material?.id || !attachmentId) return;
+    try {
+      await api.openMaterialAttachmentRevision(material.id, attachmentId, revisionIndex);
+    } catch (error) {
+      showStatus(error.message || String(error));
+    }
+  };
+
+  const archiveMaterialAttachment = async (attachmentId) => {
+    if (!material?.id || !attachmentId) return;
+    setBusy(true);
+    try {
+      const saved = await api.archiveMaterialAttachment(material.id, attachmentId);
+      await applySavedMaterial(saved);
+      showStatus("Material attachment archived.");
+    } catch (error) {
+      showStatus(error.message || String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const unarchiveMaterialAttachment = async (attachmentId) => {
+    if (!material?.id || !attachmentId) return;
+    setBusy(true);
+    try {
+      const saved = await api.unarchiveMaterialAttachment(material.id, attachmentId);
+      await applySavedMaterial(saved);
+      showStatus("Material attachment unarchived.");
+    } catch (error) {
+      showStatus(error.message || String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const reviseMaterialAttachment = async (attachmentId) => {
+    if (!material?.id || !attachmentId) return;
+    setBusy(true);
+    try {
+      const saved = await api.reviseMaterialAttachment(material.id, attachmentId);
+      if (!saved) return;
+      await applySavedMaterial(saved);
+      showStatus("Material attachment revised.");
+    } catch (error) {
+      showStatus(error.message || String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const deleteMaterialAttachment = async (attachmentId) => {
+    if (!material?.id || !attachmentId) return;
+    setBusy(true);
+    try {
+      const saved = await api.deleteMaterialAttachment(material.id, attachmentId);
+      await applySavedMaterial(saved);
+      showStatus("Archived material attachment deleted.");
+    } catch (error) {
+      showStatus(error.message || String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const archiveCurrentMaterial = async () => {
     if (!selectedMaterialId) return;
     setBusy(true);
@@ -916,8 +1381,17 @@ function Workspace() {
   const createNewInstrument = () => {
     if (selectedInstrumentId) api.releaseLock("instrument", selectedInstrumentId).catch(() => {});
     setSelectedInstrumentId(null);
-    setInstrumentPayload(blankInstrumentPayload());
+    const draft = blankInstrumentPayload();
+    draft.instrument.tool_type = workspace?.preferences?.metrologyToolTypes?.[0] || "";
+    draft.instrument.manufacturer = workspace?.preferences?.metrologyManufacturers?.[0] || "";
+    draft.instrument.resolution = workspace?.preferences?.metrologyResolutions?.[0] || "";
+    draft.instrument.location = workspace?.preferences?.metrologyLocations?.[0] || "";
+    draft.instrument.owner_department = workspace?.preferences?.metrologyDepartments?.[0] || "";
+    draft.instrument.status = workspace?.preferences?.metrologyStatuses?.[0] || draft.instrument.status;
+    setInstrumentPayload(draft);
+    setMetrologyScreen("detail");
     setView("metrology");
+    setSaveState("saved");
   };
 
   const applySavedInstrument = async (saved) => {
@@ -961,14 +1435,6 @@ function Workspace() {
     }
   };
 
-  if (!workspace) {
-    if (startupError) {
-      return <Fatal title="Workspace Load Failed" message={startupError} />;
-    }
-    return <LoadingScreen message="Loading AMERP workspace..." />;
-  }
-
-  const selectedTemplate = workspace.templates.find((item) => item.id === selectedTemplateId) || workspace.templates[0] || null;
   const createInlineMaterial = async (draft) => {
     const saved = await api.saveMaterial(draft);
     await refreshWorkspace();
@@ -978,6 +1444,19 @@ function Workspace() {
   const showMaterialsList = () => {
     setView("materials");
     setMaterialScreen("list");
+    setSaveState("saved");
+  };
+
+  const showMetrologyList = () => {
+    setView("metrology");
+    setMetrologyScreen("list");
+    setSaveState("saved");
+  };
+
+  const saveCustomer = async (customer) => {
+    const saved = await api.saveCustomer(customer);
+    await refreshWorkspace();
+    return saved;
   };
 
   const savePreferences = async (preferences, { silent = false } = {}) => {
@@ -996,6 +1475,42 @@ function Workspace() {
     }
   };
 
+  const addMaterialFamilyOption = async (name) => {
+    const trimmed = String(name || "").trim();
+    if (!trimmed) {
+      throw new Error("Enter a material name.");
+    }
+    const existing = workspace?.preferences?.materialFamilies || [];
+    if (existing.some((family) => String(family.name || "").toLowerCase() === trimmed.toLowerCase())) {
+      return trimmed;
+    }
+    await savePreferences({
+      materialFamilies: [...existing, { id: uid("material-family"), name: trimmed, alloys: [] }]
+    }, { silent: true });
+    return trimmed;
+  };
+
+  const addMaterialAlloyOption = async (familyName, alloyName) => {
+    const nextFamily = String(familyName || "").trim();
+    const nextAlloy = String(alloyName || "").trim();
+    if (!nextFamily) {
+      throw new Error("Choose a material before adding an alloy.");
+    }
+    if (!nextAlloy) {
+      throw new Error("Enter an alloy name.");
+    }
+    const existing = workspace?.preferences?.materialFamilies || [];
+    const updated = existing.map((family) => {
+      if (String(family.name || "") !== nextFamily) {
+        return family;
+      }
+      const alloys = Array.from(new Set([...(family.alloys || []), nextAlloy]));
+      return { ...family, alloys };
+    });
+    await savePreferences({ materialFamilies: updated }, { silent: true });
+    return nextAlloy;
+  };
+
   useAutoSave({
     value: job,
     resetKey: `job:${job?.id || "none"}`,
@@ -1003,7 +1518,12 @@ function Workspace() {
     isReady: (current) => Boolean(current?.jobNumber || current?.customer),
     save: (current) => api.saveJob(current),
     onSaved: applySavedJob,
-    onError: (error) => showStatus(error.message || String(error))
+    onError: (error) => showStatus(error.message || String(error)),
+    onStateChange: (next) => {
+      if (view === "jobs" && jobScreen !== "list") {
+        setSaveState(next);
+      }
+    }
   });
 
   useAutoSave({
@@ -1013,7 +1533,12 @@ function Workspace() {
     isReady: (current) => Boolean(current?.supplier && materialDisplayType(current)),
     save: (current) => api.saveMaterial(current),
     onSaved: applySavedMaterial,
-    onError: (error) => showStatus(error.message || String(error))
+    onError: (error) => showStatus(error.message || String(error)),
+    onStateChange: (next) => {
+      if (view === "materials" && materialScreen === "detail") {
+        setSaveState(next);
+      }
+    }
   });
 
   useAutoSave({
@@ -1023,8 +1548,122 @@ function Workspace() {
     isReady: (current) => Boolean(current?.instrument?.tool_name),
     save: (current) => api.saveInstrument(current),
     onSaved: applySavedInstrument,
-    onError: (error) => showStatus(error.message || String(error))
+    onError: (error) => showStatus(error.message || String(error)),
+    onStateChange: (next) => {
+      if (view === "metrology" && metrologyScreen === "detail") {
+        setSaveState(next);
+      }
+    }
   });
+
+  if (!workspace) {
+    if (startupError) {
+      return <Fatal title="Workspace Load Failed" message={startupError} />;
+    }
+    return <LoadingScreen message="Loading AMERP workspace..." />;
+  }
+
+  const selectedTemplate = workspace.templates.find((item) => item.id === selectedTemplateId) || workspace.templates[0] || null;
+  const selectedPart = job?.parts.find((item) => item.id === selectedPartId) || null;
+  const selectedOperation = selectedPart?.operations.find((item) => item.id === selectedOperationId) || null;
+  const topbarMeta = (() => {
+    if (view === "jobs") {
+      const crumbs = [{ label: "Jobs", onClick: showJobList, active: jobScreen === "list" }];
+      if (jobScreen !== "list" && job) {
+        crumbs.push({ label: job.jobNumber || "New Job", onClick: backToJob, active: jobScreen === "job" });
+      }
+      if (jobScreen === "part" || jobScreen === "operation") {
+        crumbs.push({ label: selectedPart?.partNumber || selectedPart?.partName || "Part", onClick: backToPart, active: jobScreen === "part" });
+      }
+      if (jobScreen === "operation") {
+        crumbs.push({ label: selectedOperation?.title || `Operation ${selectedOperation?.sequence || ""}`.trim(), onClick: null, active: true });
+      }
+      return {
+        breadcrumbs: crumbs,
+        title: jobScreen === "list"
+          ? "Jobs"
+          : jobScreen === "job"
+            ? (job?.jobNumber || "New Job")
+            : jobScreen === "part"
+              ? (selectedPart?.partNumber || selectedPart?.partName || "Part")
+              : (selectedOperation?.title || "Operation"),
+        subtitle: jobScreen === "list"
+          ? "Build and run jobs from part to operation."
+          : jobScreen === "job"
+            ? `${job?.parts?.length || 0} parts`
+            : jobScreen === "part"
+              ? `${selectedPart?.operations?.length || 0} operations`
+              : `${job?.jobNumber || ""}${selectedPart ? ` / ${selectedPart.partNumber || selectedPart.partName || "Part"}` : ""}`,
+        primaryActions: [
+          jobScreen === "list" ? <button key="new-job" onClick={createNewJob}><Plus size={15} /> New Job</button> : null,
+          jobScreen !== "list" ? <button key="pdf" onClick={exportCurrentJobPdf} disabled={!job || busy}><FileDown size={16} /> PDF</button> : null
+        ].filter(Boolean),
+        dangerActions: [
+          jobScreen !== "list" && job?.active !== false
+            ? <button key="archive-job" className="danger" onClick={archiveCurrentJob} disabled={!selectedJobId || busy}><Archive size={16} /> Archive</button>
+            : null,
+          jobScreen !== "list" && job?.active === false
+            ? <button key="unarchive-job" onClick={unarchiveCurrentJob} disabled={!selectedJobId || busy}><ArchiveRestore size={16} /> Unarchive</button>
+            : null,
+          jobScreen !== "list" && job?.active === false
+            ? <button key="delete-job" className="danger" onClick={openDeleteJobConfirm} disabled={!selectedJobId || busy}><Trash2 size={16} /> Delete</button>
+            : null
+        ].filter(Boolean)
+      };
+    }
+    if (view === "materials") {
+      return {
+        breadcrumbs: [
+          { label: "Materials", onClick: showMaterialsList, active: materialScreen === "list" },
+          ...(materialScreen === "detail" && material ? [{ label: material.serialCode || "New Material", onClick: null, active: true }] : [])
+        ],
+        title: materialScreen === "detail" ? (material?.serialCode || "New Material") : "Materials",
+        subtitle: materialScreen === "detail"
+          ? [material?.materialFamily, materialDisplayType(material)].filter(Boolean).join(" / ")
+          : "Traceable material records with fast search and filters.",
+        primaryActions: [
+          materialScreen === "list" ? <button key="new-material" onClick={createNewMaterial}><Plus size={15} /> New Material</button> : null
+        ].filter(Boolean),
+        dangerActions: [
+          materialScreen === "detail" ? <button key="archive-material" className="danger" onClick={archiveCurrentMaterial} disabled={!selectedMaterialId || busy}><Archive size={16} /> Archive</button> : null
+        ].filter(Boolean)
+      };
+    }
+    if (view === "metrology") {
+      return {
+        breadcrumbs: [
+          { label: "Gages", onClick: showMetrologyList, active: metrologyScreen === "list" },
+          ...(metrologyScreen === "detail" && instrumentPayload ? [{ label: instrumentPayload.instrument?.tool_name || "New Gage", onClick: null, active: true }] : [])
+        ],
+        title: metrologyScreen === "detail" ? (instrumentPayload?.instrument?.tool_name || "New Gage") : "Gages",
+        subtitle: metrologyScreen === "detail"
+          ? (instrumentPayload?.instrument?.instrument_id || "")
+          : "Inspection equipment and calibration records.",
+        primaryActions: [
+          metrologyScreen === "list" ? <button key="new-gage" onClick={createNewInstrument}><Plus size={15} /> New Gage</button> : null
+        ].filter(Boolean),
+        dangerActions: [
+          metrologyScreen === "detail" ? <button key="archive-gage" className="danger" onClick={archiveCurrentInstrument} disabled={!selectedInstrumentId || busy}><Archive size={16} /> Archive</button> : null
+        ].filter(Boolean)
+      };
+    }
+    if (view === "templates") {
+      return {
+        breadcrumbs: [{ label: "Operation Templates", onClick: null, active: true }],
+        title: "Operation Templates",
+        subtitle: "Standardize starting operations, parameters, and steps.",
+        primaryActions: [],
+        dangerActions: []
+      };
+    }
+    return {
+      breadcrumbs: [{ label: "Settings", onClick: null, active: true }],
+      title: "Settings",
+      subtitle: "System configuration and controlled lists.",
+      primaryActions: [],
+      dangerActions: []
+    };
+  })();
 
   return (
     <div className="app-shell">
@@ -1033,54 +1672,46 @@ function Workspace() {
           <Hammer size={26} />
           <div>
             <h1>AMERP</h1>
-            <span>Jobshop ERP</span>
+            <span>Operator ERP</span>
           </div>
         </div>
 
         <nav className="nav-tabs">
-          <NavButton icon={ClipboardList} active={view === "dashboard"} label="Dashboard" onClick={() => setView("dashboard")} />
           <NavButton icon={Package} active={view === "jobs"} label="Jobs" onClick={showJobList} />
           <NavButton icon={Database} active={view === "materials"} label="Materials" onClick={showMaterialsList} />
-          <NavButton icon={Gauge} active={view === "metrology"} label="Gages" onClick={() => setView("metrology")} />
+          <NavButton icon={Gauge} active={view === "metrology"} label="Gages" onClick={showMetrologyList} />
+          <NavButton icon={Library} active={view === "templates"} label="Operation Templates" onClick={() => setView("templates")} />
           <NavButton icon={Settings} active={view === "settings"} label="Settings" onClick={() => setView("settings")} />
         </nav>
-
-        <div className="sidebar-section">
-          <div className="sidebar-heading">Quick Actions</div>
-          <button className="sidebar-action" onClick={createNewJob}><Plus size={15} /> New Job</button>
-          <button className="sidebar-action" onClick={createNewMaterial}><Plus size={15} /> New Material</button>
-        </div>
       </aside>
 
       <main className="workspace">
         <header className="topbar">
-          <div>
-            <h2>{titleForView(view)}</h2>
-            {subtitleForView(view) ? <p>{subtitleForView(view)}</p> : null}
+          <div className="topbar-main">
+            <div className="breadcrumb-row">
+              {topbarMeta.breadcrumbs.map((crumb, index) => (
+                <React.Fragment key={`${crumb.label}-${index}`}>
+                  <button className={`breadcrumb-button ${index === 0 ? "root-crumb" : ""} ${crumb.active ? "active" : ""}`} onClick={crumb.onClick} disabled={!crumb.onClick || crumb.active}>
+                    {crumb.label}
+                  </button>
+                  {index < topbarMeta.breadcrumbs.length - 1 && <span className="breadcrumb-separator">/</span>}
+                </React.Fragment>
+              ))}
+            </div>
+            {topbarMeta.subtitle ? <p className="topbar-subtitle">{topbarMeta.subtitle}</p> : null}
           </div>
-          <div className="toolbar">
-            {view === "jobs" && jobScreen !== "list" && (
-              <>
-                <button onClick={exportCurrentJobPdf} disabled={!job || busy}><FileDown size={16} /> PDF</button>
-                <button className="danger" onClick={archiveCurrentJob} disabled={!selectedJobId || busy}><Archive size={16} /> Archive</button>
-              </>
-            )}
-            {view === "materials" && materialScreen === "detail" && (
-              <>
-                <button className="danger" onClick={archiveCurrentMaterial} disabled={!selectedMaterialId || busy}><Archive size={16} /> Archive</button>
-              </>
-            )}
-            {view === "metrology" && (
-              <>
-                <button className="danger" onClick={archiveCurrentInstrument} disabled={!selectedInstrumentId || busy}><Archive size={16} /> Archive</button>
-              </>
-            )}
+          <div className="topbar-actions">
+            <SaveStatePill state={saveState} />
+            <div className="toolbar topbar-actions-main">
+              {topbarMeta.primaryActions}
+            </div>
+            <div className="toolbar topbar-actions-danger">
+              {topbarMeta.dangerActions}
+            </div>
           </div>
         </header>
 
         {status && <div className="status-banner">{status}</div>}
-
-        {view === "dashboard" && <DashboardView workspace={workspace} />}
         {view === "jobs" && (
           <JobsView
             busy={busy}
@@ -1097,9 +1728,29 @@ function Workspace() {
             onBackToJobList={showJobList}
             onBackToJob={backToJob}
             onBackToPart={backToPart}
+            onImportSubtractPurchaseOrders={importSubtractPurchaseOrders}
+            onImportXometryIntoJob={importXometryIntoJob}
+            onAssignNextJobNumber={assignNextJobNumber}
             onImportFusionToPart={importFusionIntoPart}
+        onAddJobDocuments={addJobDocuments}
+        onAddPartDocuments={addPartDocuments}
+        onOpenJobDocument={openJobDocument}
+        onOpenPartDocument={openPartDocument}
+        onOpenJobDocumentRevision={openJobDocumentRevision}
+        onOpenPartDocumentRevision={openPartDocumentRevision}
+        onArchiveJobDocument={archiveJobDocument}
+        onArchivePartDocument={archivePartDocument}
+        onUnarchiveJobDocument={unarchiveJobDocument}
+        onUnarchivePartDocument={unarchivePartDocument}
+        onReviseJobDocument={reviseJobDocument}
+        onRevisePartDocument={revisePartDocument}
+        onDeleteJobDocument={deleteJobDocument}
+        onDeletePartDocument={deletePartDocument}
+        onSaveCustomer={saveCustomer}
             onChooseOperationImages={async (jobId, partId, operationId) => api.chooseOperationImages(jobId, partId, operationId)}
             onCreateInlineMaterial={createInlineMaterial}
+            onAddMaterialFamily={addMaterialFamilyOption}
+            onAddMaterialAlloy={addMaterialAlloyOption}
           />
         )}
         {view === "materials" && (
@@ -1113,15 +1764,25 @@ function Workspace() {
             onCreateNew={createNewMaterial}
             onAddAttachments={addMaterialAttachments}
             canAddAttachments={Boolean(selectedMaterialId)}
+            onOpenAttachment={openMaterialAttachment}
+            onOpenAttachmentRevision={openMaterialAttachmentRevision}
+            onArchiveAttachment={archiveMaterialAttachment}
+            onUnarchiveAttachment={unarchiveMaterialAttachment}
+            onReviseAttachment={reviseMaterialAttachment}
+            onDeleteAttachment={deleteMaterialAttachment}
+            onAddMaterialFamily={addMaterialFamilyOption}
+            onAddMaterialAlloy={addMaterialAlloyOption}
           />
         )}
         {view === "metrology" && (
           <MetrologyView
             workspace={workspace}
+            screen={metrologyScreen}
             payload={instrumentPayload}
             setPayload={setInstrumentPayload}
             onOpenInstrument={openInstrument}
             onCreateNew={createNewInstrument}
+            onShowList={showMetrologyList}
           />
         )}
         {view === "templates" && (
@@ -1142,6 +1803,18 @@ function Workspace() {
           />
         )}
       </main>
+
+      <ConfirmDialog
+        open={confirmDeleteJobOpen}
+        title="Delete Archived Job?"
+        message={`Delete ${job?.jobNumber || "this archived job"}? This cannot be undone.`}
+        confirmLabel="Delete Job"
+        onCancel={() => setConfirmDeleteJobOpen(false)}
+        onConfirm={async () => {
+          setConfirmDeleteJobOpen(false);
+          await deleteCurrentJob();
+        }}
+      />
     </div>
   );
 }
@@ -1457,6 +2130,183 @@ function OperationEditor({ operation, materials, instruments, jobTools, onUpdate
   );
 }
 
+function DocumentsPanel({
+  title,
+  documents,
+  onAddDocuments,
+  onOpenDocument,
+  onOpenRevision,
+  onArchiveDocument,
+  onDeleteDocument,
+  onReviseDocument,
+  emptyText
+}) {
+  const [showArchived, setShowArchived] = useState(false);
+  const [expandedDocumentId, setExpandedDocumentId] = useState("");
+  const activeDocuments = (documents || []).filter((document) => document.active !== false);
+  const archivedDocuments = (documents || []).filter((document) => document.active === false);
+  const visibleDocuments = showArchived ? [...activeDocuments, ...archivedDocuments] : activeDocuments;
+
+  return (
+    <section className="panel">
+      <div className="panel-heading inline">
+        <div>
+          <h3>{title}</h3>
+          <span>
+            {activeDocuments.length} current file{activeDocuments.length === 1 ? "" : "s"}
+            {archivedDocuments.length ? ` | ${archivedDocuments.length} archived` : ""}
+          </span>
+        </div>
+        <div className="toolbar">
+          {archivedDocuments.length ? (
+            <button onClick={() => setShowArchived((current) => !current)}>
+              {showArchived ? "Hide Archived" : `Show Archived (${archivedDocuments.length})`}
+            </button>
+          ) : null}
+          <button onClick={onAddDocuments}><FolderOpen size={14} /> Add Attachment</button>
+        </div>
+      </div>
+      <div className="document-list">
+        {visibleDocuments.map((document) => {
+          const revisions = [...(document.revisions || [])].reverse();
+          const historyOpen = expandedDocumentId === document.id;
+          const currentTimestamp = document.revisedAt || document.attachedAt;
+          return (
+          <div
+            key={document.id}
+            className={`document-card${document.active === false ? " archived" : ""}`}
+          >
+            <div className="document-card-header">
+              <div>
+                <strong>{document.originalFilename || "Document"}</strong>
+                <span>
+                  {[
+                    document.fileType || "File",
+                    `Rev ${document.revisionNumber || 1}`,
+                    currentTimestamp ? formatDateTime(currentTimestamp) : "",
+                    document.active === false ? "Archived" : ""
+                  ].filter(Boolean).join(" | ")}
+                </span>
+              </div>
+              <div className="tiny-toolbar">
+                <button onClick={() => onOpenDocument(document.id)}>Open</button>
+                <button onClick={() => onReviseDocument(document.id)} disabled={document.active === false}>New Revision</button>
+                <button
+                  className={document.active === false ? "" : "danger"}
+                  onClick={() => onArchiveDocument(document.id, document.originalFilename, document.active === false)}
+                >
+                  {document.active === false ? "Unarchive" : "Archive"}
+                </button>
+                {document.active === false ? (
+                  <button className="danger" onClick={() => onDeleteDocument(document.id, document.originalFilename)}>Delete</button>
+                ) : null}
+              </div>
+            </div>
+            {revisions.length ? (
+              <div className="document-history">
+                <button
+                  className="history-toggle"
+                  onClick={() => setExpandedDocumentId((current) => current === document.id ? "" : document.id)}
+                >
+                  {historyOpen ? "Hide Revision History" : `Revision History (${revisions.length})`}
+                </button>
+                {historyOpen ? (
+                  <div className="document-history-list">
+                    {revisions.map((revision, revisionOffset) => {
+                      const revisionIndex = (document.revisions || []).length - 1 - revisionOffset;
+                      const revisionTimestamp = revision.revisedAt || revision.attachedAt;
+                      return (
+                        <div key={`${document.id}-revision-${revisionIndex}`} className="document-history-row">
+                          <div>
+                            <strong>{revision.originalFilename || revision.storedFilename || "Revision"}</strong>
+                            <span>
+                              {[
+                                revision.fileType || document.fileType || "File",
+                                `Rev ${revision.revisionNumber || revisionOffset + 1}`,
+                                revisionTimestamp ? formatDateTime(revisionTimestamp) : ""
+                              ].filter(Boolean).join(" | ")}
+                            </span>
+                          </div>
+                          <button onClick={() => onOpenRevision(document.id, revisionIndex)}>Open</button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+          </div>
+        );
+        })}
+        {!visibleDocuments.length && <div className="empty-inline">{showArchived ? "No attachments matched the current filter." : emptyText}</div>}
+      </div>
+    </section>
+  );
+}
+function CustomerDialog({ open, customer, onChange, onClose, onSaveCustomer, onLinked }) {
+  useAutoSave({
+    value: open ? customer : null,
+    resetKey: `customer-dialog:${open ? customer?.id || "new" : "closed"}`,
+    enabled: Boolean(open && customer),
+    isReady: (current) => Boolean(current?.name),
+    save: onSaveCustomer,
+    onSaved: (saved) => {
+      if (saved) {
+        onChange(saved);
+        onLinked(saved);
+      }
+    }
+  });
+
+  if (!open || !customer) {
+    return null;
+  }
+
+  return (
+    <div className="dialog-backdrop">
+      <div className="dialog-panel">
+        <div className="panel-heading inline">
+          <div>
+            <h3>{customer.name || "New Customer"}</h3>
+            <span>{customer.jobRefs?.length || 0} linked jobs</span>
+          </div>
+          <button onClick={onClose}><X size={14} /> Done</button>
+        </div>
+        <div className="form-grid">
+          <TextField label="Customer Name" value={customer.name || ""} onChange={(value) => onChange({ ...customer, name: value })} />
+          <TextField label="Contact Name" value={customer.contactName || ""} onChange={(value) => onChange({ ...customer, contactName: value })} />
+          <TextField label="Email" value={customer.email || ""} onChange={(value) => onChange({ ...customer, email: value })} />
+          <TextField label="Phone" value={customer.phone || ""} onChange={(value) => onChange({ ...customer, phone: value })} />
+          <TextField label="Shipping Address 1" value={customer.shippingAddress1 || ""} onChange={(value) => onChange({ ...customer, shippingAddress1: value })} />
+          <TextField label="Shipping Address 2" value={customer.shippingAddress2 || ""} onChange={(value) => onChange({ ...customer, shippingAddress2: value })} />
+          <TextField label="City" value={customer.city || ""} onChange={(value) => onChange({ ...customer, city: value })} />
+          <TextField label="State" value={customer.state || ""} onChange={(value) => onChange({ ...customer, state: value })} />
+          <TextField label="Postal Code" value={customer.postalCode || ""} onChange={(value) => onChange({ ...customer, postalCode: value })} />
+          <TextField label="Country" value={customer.country || ""} onChange={(value) => onChange({ ...customer, country: value })} />
+        </div>
+        <TextArea label="Notes" value={customer.notes || ""} onChange={(value) => onChange({ ...customer, notes: value })} rows={3} />
+        <div className="subpanel top-gap">
+          <div className="subpanel-header">
+            <div>
+              <h4>Linked Jobs</h4>
+            </div>
+          </div>
+          <div className="record-list">
+            {(customer.jobRefs || []).map((jobRef) => (
+              <div key={jobRef.jobId} className="inline-card">
+                <strong>{jobRef.jobNumber || jobRef.jobId}</strong>
+                <span>{jobRef.status || "Open"}</span>
+                <small>{formatDateTime(jobRef.updatedAt)}</small>
+              </div>
+            ))}
+            {!customer.jobRefs?.length && <div className="empty-inline">No linked jobs yet.</div>}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function JobsView({
   busy,
   jobScreen,
@@ -1472,18 +2322,38 @@ function JobsView({
   onBackToJobList,
   onBackToJob,
   onBackToPart,
+  onImportSubtractPurchaseOrders,
+  onImportXometryIntoJob,
+  onAssignNextJobNumber,
   onChooseOperationImages,
   onImportFusionToPart,
-  onCreateInlineMaterial
+  onAddJobDocuments,
+  onAddPartDocuments,
+  onOpenJobDocument,
+  onOpenPartDocument,
+  onOpenJobDocumentRevision,
+  onOpenPartDocumentRevision,
+  onArchiveJobDocument,
+  onArchivePartDocument,
+  onUnarchiveJobDocument,
+  onUnarchivePartDocument,
+  onReviseJobDocument,
+  onRevisePartDocument,
+  onDeleteJobDocument,
+  onDeletePartDocument,
+  onSaveCustomer,
+  onCreateInlineMaterial,
+  onAddMaterialFamily,
+  onAddMaterialAlloy
 }) {
   const materials = workspace.materials || [];
   const instruments = workspace.instruments || [];
   const templates = workspace.templates || [];
+  const customers = workspace.customers || [];
   const selectedPart = job?.parts?.find((part) => part.id === selectedPartId) || null;
   const selectedOperation = selectedPart?.operations?.find((operation) => operation.id === selectedOperationId) || null;
 
   const updateJob = (patch) => setJob((current) => ({ ...current, ...patch }));
-  const updateRevision = (patch) => setJob((current) => ({ ...current, revision: { ...current.revision, ...patch } }));
   const updatePart = (partId, updater) => setJob((current) => ({
     ...current,
     parts: current.parts.map((part) => part.id === partId ? (typeof updater === "function" ? updater(part) : { ...part, ...updater }) : part)
@@ -1517,7 +2387,7 @@ function JobsView({
   }));
 
   if (jobScreen === "list") {
-    return <JobListScreen jobs={workspace.jobs} onOpenJob={onOpenJob} onCreateJob={onCreateJob} />;
+    return <JobListScreen jobs={workspace.jobs} onOpenJob={onOpenJob} onCreateJob={onCreateJob} onImportSubtractPurchaseOrders={onImportSubtractPurchaseOrders} />;
   }
 
   if (!job) {
@@ -1534,7 +2404,6 @@ function JobsView({
         instruments={instruments}
         constants={workspace.constants}
         preferences={workspace.preferences}
-        onBack={onBackToPart}
         onUpdate={(updater) => updateOperation(selectedPart.id, selectedOperation.id, updater)}
         onRemove={() => {
           removeOperation(selectedPart.id, selectedOperation.id);
@@ -1545,6 +2414,8 @@ function JobsView({
           updateOperation(selectedPart.id, selectedOperation.id, (current) => ({ ...current, stepImages: [...current.stepImages, ...images] }));
         }}
         onCreateInlineMaterial={onCreateInlineMaterial}
+        onAddMaterialFamily={onAddMaterialFamily}
+        onAddMaterialAlloy={onAddMaterialAlloy}
       />
     );
   }
@@ -1555,12 +2426,27 @@ function JobsView({
         busy={busy}
         part={selectedPart}
         templates={templates}
-        onBack={onBackToJob}
         onUpdate={(updater) => updatePart(selectedPart.id, updater)}
         onRemove={() => {
           removePart(selectedPart.id);
           onBackToJob();
         }}
+        onAddDocuments={() => onAddPartDocuments(selectedPart.id)}
+        onOpenDocument={(documentId) => onOpenPartDocument(job.id, selectedPart.id, documentId)}
+        onOpenRevision={(documentId, revisionIndex) => onOpenPartDocumentRevision(job.id, selectedPart.id, documentId, revisionIndex)}
+        onArchiveDocument={(documentId, filename, archived) => {
+          if (archived) {
+            void onUnarchivePartDocument(selectedPart.id, documentId);
+            return;
+          }
+          void onArchivePartDocument(selectedPart.id, documentId);
+        }}
+        onDeleteDocument={(documentId, filename) => {
+          if (window.confirm(`Delete archived attachment ${filename}? This cannot be undone.`)) {
+            void onDeletePartDocument(selectedPart.id, documentId);
+          }
+        }}
+        onReviseDocument={(documentId) => onRevisePartDocument(selectedPart.id, documentId)}
         onAddOperation={addOperation}
         onImportFusion={onImportFusionToPart}
         onOpenOperation={(operationId) => onOpenOperation(selectedPart.id, operationId)}
@@ -1569,21 +2455,44 @@ function JobsView({
   }
 
   return (
-    <JobDetailScreen
-      job={job}
-      constants={workspace.constants}
-      updateJob={updateJob}
-      updateRevision={updateRevision}
-      onBack={onBackToJobList}
-      onAddPart={addPart}
+      <JobDetailScreen
+        busy={busy}
+        job={job}
+        constants={workspace.constants}
+        customers={customers}
+        updateJob={updateJob}
+        onAddPart={addPart}
       onOpenPart={onOpenPart}
-    />
+        onImportXometry={onImportXometryIntoJob}
+        onAssignNextJobNumber={onAssignNextJobNumber}
+        onAddDocuments={onAddJobDocuments}
+        onOpenDocument={(documentId) => onOpenJobDocument(job.id, documentId)}
+        onOpenRevision={(documentId, revisionIndex) => onOpenJobDocumentRevision(job.id, documentId, revisionIndex)}
+        onArchiveDocument={(documentId, filename, archived) => {
+          if (archived) {
+            void onUnarchiveJobDocument(documentId);
+            return;
+          }
+          void onArchiveJobDocument(documentId);
+        }}
+        onDeleteDocument={(documentId, filename) => {
+          if (window.confirm(`Delete archived attachment ${filename}? This cannot be undone.`)) {
+            void onDeleteJobDocument(documentId);
+          }
+        }}
+        onReviseDocument={onReviseJobDocument}
+        onSaveCustomer={onSaveCustomer}
+      />
   );
 }
 
-function JobListScreen({ jobs, onOpenJob, onCreateJob }) {
+function JobListScreen({ jobs, onOpenJob, onCreateJob, onImportSubtractPurchaseOrders }) {
   const [query, setQuery] = useState("");
+  const [showArchived, setShowArchived] = useState(false);
   const filteredJobs = jobs.filter((item) => {
+    if (!showArchived && item.active === false) {
+      return false;
+    }
     const haystack = [item.jobNumber, item.customer, item.routeSummary, item.id].join(" ").toLowerCase();
     return haystack.includes(query.trim().toLowerCase());
   });
@@ -1593,17 +2502,30 @@ function JobListScreen({ jobs, onOpenJob, onCreateJob }) {
       <div className="panel-heading inline">
         <div>
           <h3>Jobs</h3>
-          <span>{filteredJobs.length} records</span>
+          <span>{filteredJobs.length} visible records</span>
         </div>
-        <button onClick={onCreateJob}><Plus size={15} /> New Job</button>
+        <div className="toolbar">
+          <button onClick={() => setShowArchived((current) => !current)}>
+            {showArchived ? "Hide Archived" : "Show Archived"}
+          </button>
+          <button onClick={onImportSubtractPurchaseOrders}><Import size={15} /> Import Subtract PO</button>
+          <button onClick={onCreateJob}><Plus size={15} /> New Job</button>
+        </div>
       </div>
       <TextField label="Search Jobs" value={query} onChange={setQuery} placeholder="Job number, customer, route..." />
       <div className="record-list top-gap">
         {filteredJobs.map((item) => (
-          <button key={item.id} className="record-list-item" onClick={() => onOpenJob(item.id)}>
-            <strong>{item.jobNumber || item.id}</strong>
-            <span>{item.customer || "No customer"}</span>
-            <small>{item.partCount} parts / {item.operationCount} ops</small>
+          <button key={item.id} className="record-list-item record-list-row" onClick={() => onOpenJob(item.id)}>
+            <div className="record-row-primary">
+              <strong>{item.jobNumber || item.id}</strong>
+              <span>{item.customer || "No customer"}</span>
+            </div>
+            <div className="record-row-meta">
+              <small>{item.dueDate || "No due date"}</small>
+              <small>{item.status || "Open"}</small>
+              <small>{item.partCount} parts</small>
+              <small>{item.operationCount} ops</small>
+            </div>
           </button>
         ))}
         {!filteredJobs.length && <div className="empty-inline">No jobs matched the current search.</div>}
@@ -1612,60 +2534,189 @@ function JobListScreen({ jobs, onOpenJob, onCreateJob }) {
   );
 }
 
-function JobDetailScreen({ job, constants, updateJob, updateRevision, onBack, onAddPart, onOpenPart }) {
+function JobDetailScreen({
+  busy,
+  job,
+  constants,
+  customers,
+  updateJob,
+  onAddPart,
+  onOpenPart,
+  onImportXometry,
+  onAssignNextJobNumber,
+  onAddDocuments,
+  onOpenDocument,
+  onOpenRevision,
+  onArchiveDocument,
+  onDeleteDocument,
+  onReviseDocument,
+  onSaveCustomer
+}) {
+  const [customerDialogOpen, setCustomerDialogOpen] = useState(false);
+  const [customerDraft, setCustomerDraft] = useState(null);
+  const customerOptions = Array.from(new Set(["", job.customer || "", ...customers.map((customer) => customer.name)]));
+  const linkedCustomer = customers.find((customer) => customer.id === job.customerId)
+    || customers.find((customer) => customer.name === job.customer)
+    || null;
+  useEffect(() => {
+    if (!customerDialogOpen) {
+      return;
+    }
+    if (!customerDraft?.id) {
+      setCustomerDialogOpen(false);
+      return;
+    }
+    const latest = customers.find((customer) => customer.id === customerDraft.id);
+    if (latest) {
+      setCustomerDraft(latest);
+    }
+  }, [customers, customerDialogOpen, customerDraft?.id]);
+  const linkCustomer = (customer) => {
+    updateJob({
+      customerId: customer?.id || "",
+      customer: customer?.name || ""
+    });
+  };
+  const openNewCustomer = () => {
+    const draft = blankCustomer(job.customer || "");
+    setCustomerDraft(draft);
+    setCustomerDialogOpen(true);
+  };
+  const openExistingCustomer = () => {
+    if (!linkedCustomer) {
+      return;
+    }
+    setCustomerDraft(linkedCustomer);
+    setCustomerDialogOpen(true);
+  };
   return (
-    <div className="workspace-columns">
-      <section className="panel">
-        <div className="panel-heading inline">
-          <div>
-            <h3>Job Header</h3>
-            <span>{job.parts.length} parts</span>
+    <>
+      <div className="workflow-stack">
+        <section className="panel">
+          <div className="panel-heading inline">
+            <div>
+              <h3>Job Header</h3>
+              <span>{job.parts.length} parts</span>
+            </div>
           </div>
-          <button onClick={onBack}>Back To Jobs</button>
-        </div>
-        <div className="form-grid">
-          <TextField label="Job Number" value={job.jobNumber} onChange={(value) => updateJob({ jobNumber: value })} />
-          <TextField label="Customer" value={job.customer} onChange={(value) => updateJob({ customer: value })} />
-          <SelectField label="Status" value={job.status} options={constants.jobStatuses} onChange={(value) => updateJob({ status: value })} />
-          <SelectField label="Priority" value={job.priority} options={constants.priorities} onChange={(value) => updateJob({ priority: value })} />
-          <TextField label="Due Date" type="date" value={job.dueDate} onChange={(value) => updateJob({ dueDate: value })} />
-          <TextField label="Revision" value={job.revision?.number || ""} onChange={(value) => updateRevision({ number: value })} />
-          <TextField label="Revision Date" type="date" value={job.revision?.date || ""} onChange={(value) => updateRevision({ date: value })} />
-          <TextField label="Author" value={job.revision?.author || ""} onChange={(value) => updateRevision({ author: value })} />
-        </div>
-        <TextArea label="Revision Notes" value={job.revision?.notes || ""} onChange={(value) => updateRevision({ notes: value })} rows={3} />
-        <TextArea label="Job Notes" value={job.notes || ""} onChange={(value) => updateJob({ notes: value })} rows={4} />
-      </section>
-
-      <section className="panel">
-        <div className="panel-heading inline">
-          <div>
-            <h3>Parts</h3>
-            <span>{job.parts.length} total</span>
+          <div className="form-grid job-header-grid">
+            <label className="field">
+              <span>Job Number</span>
+              <div className="field-action-row">
+                <input value={job.jobNumber || ""} onChange={(event) => updateJob({ jobNumber: event.target.value })} />
+                <button
+                  className="primary-button inline-action-button"
+                  onClick={onAssignNextJobNumber}
+                  disabled={Boolean(job.jobNumber?.trim())}
+                >
+                  Assign Number
+                </button>
+              </div>
+            </label>
+            <label className="field">
+              <span>Customer</span>
+              <div className="field-action-row">
+                <select
+                  value={job.customer || ""}
+                  onChange={(event) => {
+                    const value = event.target.value;
+                    const selected = customers.find((customer) => customer.name === value) || null;
+                    updateJob({
+                      customerId: selected?.id || "",
+                      customer: value
+                    });
+                  }}
+                >
+                  {customerOptions.map((option) => (
+                    <option key={`customer-${option || "empty"}`} value={option}>
+                      {option || "No customer"}
+                    </option>
+                  ))}
+                </select>
+                <div className="tiny-toolbar">
+                  <button className="inline-action-button" onClick={openNewCustomer}><Plus size={13} /> New</button>
+                  <button className="inline-action-button" onClick={openExistingCustomer} disabled={!linkedCustomer}>Edit</button>
+                </div>
+              </div>
+            </label>
+            <SelectField label="Status" value={job.status} options={constants.jobStatuses} onChange={(value) => updateJob({ status: value })} />
+            <TextField label="Due Date" type="date" value={job.dueDate} onChange={(value) => updateJob({ dueDate: value })} />
+            <SelectField label="Priority" value={job.priority} options={constants.priorities} onChange={(value) => updateJob({ priority: value })} />
+            <label className="field">
+              <span>Last Changed</span>
+              <div className="static-field">{formatDateTime(job.updatedAt)}</div>
+            </label>
           </div>
-          <button onClick={onAddPart}><Plus size={15} /> Part</button>
+          <TextArea label="Job Notes" value={job.notes || ""} onChange={(value) => updateJob({ notes: value })} rows={3} />
+        </section>
+        <div className="record-grid job-detail-columns">
+          <section className="panel">
+            <div className="panel-heading inline">
+              <div>
+                <h3>Parts</h3>
+                <span>{job.parts.length} total</span>
+              </div>
+              <div className="toolbar">
+                <button onClick={onImportXometry} disabled={busy || !job.id}><Import size={14} /> Import Xometry Traveler</button>
+                <button onClick={onAddPart}><Plus size={15} /> Part</button>
+              </div>
+            </div>
+            <div className="record-list">
+              {job.parts.map((part) => (
+                <button key={part.id} className="record-list-item" onClick={() => onOpenPart(part.id)}>
+                  <strong>{part.partNumber || part.partName || "New Part"}</strong>
+                  <span>{part.materialSpec || part.description || "No part description"}</span>
+                  <small>{part.operations.length} operations</small>
+                </button>
+              ))}
+              {!job.parts.length && <div className="empty-inline">No parts yet. Add a part or import a traveler when you are ready.</div>}
+            </div>
+          </section>
+          <DocumentsPanel
+            title="Job Attachments"
+            documents={job.documents || []}
+            onAddDocuments={onAddDocuments}
+            onOpenDocument={onOpenDocument}
+            onOpenRevision={onOpenRevision}
+            onArchiveDocument={onArchiveDocument}
+            onDeleteDocument={onDeleteDocument}
+            onReviseDocument={onReviseDocument}
+            emptyText="No job attachments attached yet."
+          />
         </div>
-        <div className="record-list">
-          {job.parts.map((part) => (
-            <button key={part.id} className="record-list-item" onClick={() => onOpenPart(part.id)}>
-              <strong>{part.partNumber || part.partName || "New Part"}</strong>
-              <span>{part.materialSpec || part.description || "No part description"}</span>
-              <small>{part.operations.length} operations</small>
-            </button>
-          ))}
-          {!job.parts.length && <div className="empty-inline">No parts yet. Add a part when you are ready.</div>}
-        </div>
-      </section>
-    </div>
+      </div>
+      <CustomerDialog
+        open={customerDialogOpen}
+        customer={customerDraft}
+        onChange={setCustomerDraft}
+        onClose={() => setCustomerDialogOpen(false)}
+        onSaveCustomer={onSaveCustomer}
+        onLinked={linkCustomer}
+      />
+    </>
   );
 }
-
-function PartDetailScreen({ busy, part, templates, onBack, onUpdate, onRemove, onAddOperation, onImportFusion, onOpenOperation }) {
+function PartDetailScreen({
+  busy,
+  part,
+  templates,
+  onUpdate,
+  onRemove,
+  onAddDocuments,
+  onOpenDocument,
+  onOpenRevision,
+  onArchiveDocument,
+  onDeleteDocument,
+  onReviseDocument,
+  onAddOperation,
+  onImportFusion,
+  onOpenOperation
+}) {
   const updateField = (patch) => onUpdate((current) => ({ ...current, ...patch }));
   const updateRevision = (patch) => onUpdate((current) => ({ ...current, revision: { ...current.revision, ...patch } }));
 
   return (
-    <div className="workspace-columns">
+    <div className="workflow-stack">
       <section className="panel">
         <div className="panel-heading inline">
           <div>
@@ -1673,11 +2724,10 @@ function PartDetailScreen({ busy, part, templates, onBack, onUpdate, onRemove, o
             <span>{part.operations.length} operations</span>
           </div>
           <div className="toolbar">
-            <button onClick={onBack}>Back To Job</button>
             <button className="danger subtle" onClick={onRemove}><X size={14} /> Remove Part</button>
           </div>
         </div>
-        <div className="form-grid">
+        <div className="form-grid compact-4">
           <TextField label="Part Number" value={part.partNumber} onChange={(value) => updateField({ partNumber: value })} />
           <TextField label="Part Name" value={part.partName} onChange={(value) => updateField({ partName: value })} />
           <TextField label="Quantity" value={part.quantity} onChange={(value) => updateField({ quantity: value })} />
@@ -1685,8 +2735,8 @@ function PartDetailScreen({ busy, part, templates, onBack, onUpdate, onRemove, o
           <TextField label="Part Revision" value={part.revision?.number || ""} onChange={(value) => updateRevision({ number: value })} />
           <TextField label="Revision Date" type="date" value={part.revision?.date || ""} onChange={(value) => updateRevision({ date: value })} />
         </div>
-        <TextArea label="Description" value={part.description || ""} onChange={(value) => updateField({ description: value })} rows={3} />
-        <TextArea label="Part Notes" value={part.notes || ""} onChange={(value) => updateField({ notes: value })} rows={3} />
+        <TextArea label="Description" value={part.description || ""} onChange={(value) => updateField({ description: value })} rows={2} />
+        <TextArea label="Part Notes" value={part.notes || ""} onChange={(value) => updateField({ notes: value })} rows={2} />
       </section>
 
       <section className="panel">
@@ -1706,15 +2756,31 @@ function PartDetailScreen({ busy, part, templates, onBack, onUpdate, onRemove, o
         </div>
         <div className="record-list">
           {part.operations.map((operation) => (
-            <button key={operation.id} className="record-list-item" onClick={() => onOpenOperation(operation.id)}>
+            <button key={operation.id} className="record-list-item record-list-row" onClick={() => onOpenOperation(operation.id)}>
               <strong>{operation.sequence}. {operation.title || "Operation"}</strong>
-              <span>{operation.operationCode || "No code"} / {operation.type || "General"}</span>
-              <small>{operation.tools?.length || 0} tools / {(operation.requiredMaterialLots?.length || 0) + (operation.customMaterialText ? 1 : 0)} materials</small>
+              <div className="record-row-meta">
+                <small>{operation.operationCode || "No code"}</small>
+                <small>{operation.type || "General"}</small>
+                <small>{operation.tools?.length || 0} tools</small>
+                <small>{(operation.requiredMaterialLots?.length || 0) + (operation.customMaterialText ? 1 : 0)} materials</small>
+              </div>
             </button>
           ))}
           {!part.operations.length && <div className="empty-inline">No operations yet. Add one when you are ready.</div>}
         </div>
       </section>
+
+      <DocumentsPanel
+        title="Part Attachments"
+        documents={part.documents || []}
+        onAddDocuments={onAddDocuments}
+        onOpenDocument={onOpenDocument}
+        onOpenRevision={onOpenRevision}
+        onArchiveDocument={onArchiveDocument}
+        onDeleteDocument={onDeleteDocument}
+        onReviseDocument={onReviseDocument}
+        emptyText="No part attachments attached yet."
+      />
     </div>
   );
 }
@@ -1727,11 +2793,12 @@ function OperationDetailScreen({
   instruments,
   constants,
   preferences,
-  onBack,
   onUpdate,
   onRemove,
   onAddImages,
-  onCreateInlineMaterial
+  onCreateInlineMaterial,
+  onAddMaterialFamily,
+  onAddMaterialAlloy
 }) {
   const [showMaterialPicker, setShowMaterialPicker] = useState(false);
   const updateField = (patch) => onUpdate((current) => ({ ...current, ...patch }));
@@ -1755,7 +2822,7 @@ function OperationDetailScreen({
 
   return (
     <>
-      <div className="workspace-columns">
+      <div className="workflow-stack">
         <section className="panel">
           <div className="panel-heading inline">
             <div>
@@ -1763,58 +2830,29 @@ function OperationDetailScreen({
               <span>{job.jobNumber || job.id} / {part.partNumber || part.partName || part.id}</span>
             </div>
             <div className="toolbar">
-              <button onClick={onBack}>Back To Part</button>
               <button className="danger subtle" onClick={onRemove}><X size={14} /> Remove Operation</button>
             </div>
           </div>
 
-          <div className="form-grid">
+          <div className="form-grid compact-4">
             <TextField label="Sequence" value={String(operation.sequence || "")} onChange={(value) => updateField({ sequence: Number(value || 0) || 1 })} />
             <TextField label="Op Code" value={operation.operationCode || ""} onChange={(value) => updateField({ operationCode: value })} />
             <TextField label="Title" value={operation.title || ""} onChange={(value) => updateField({ title: value })} />
-            <TextField label="Type" value={operation.type || ""} onChange={(value) => updateField({ type: value })} />
+            <SelectField label="Type" value={operation.type || OPERATION_TYPE_OPTIONS[0]} options={OPERATION_TYPE_OPTIONS} onChange={(value) => updateField({ type: value })} />
             <TextField label="Work Center" value={operation.workCenter || ""} onChange={(value) => updateField({ workCenter: value })} />
-            <TextField label="Status" value={operation.status || ""} onChange={(value) => updateField({ status: value })} />
+            <SelectField label="Status" value={operation.status || OPERATION_STATUS_OPTIONS[0]} options={OPERATION_STATUS_OPTIONS} onChange={(value) => updateField({ status: value })} />
           </div>
-          <TextArea label="Setup Instructions" value={operation.setupInstructions || ""} onChange={(value) => updateField({ setupInstructions: value })} rows={3} />
-          <TextArea label="Work Instructions" value={operation.workInstructions || ""} onChange={(value) => updateField({ workInstructions: value })} rows={4} />
+        </section>
+
+        <section className="panel">
+          <div className="panel-heading">
+            <div>
+              <h3>Instructions</h3>
+            </div>
+          </div>
+          <TextArea label="Setup Instructions" value={operation.setupInstructions || ""} onChange={(value) => updateField({ setupInstructions: value })} rows={2} />
+          <TextArea label="Work Instructions" value={operation.workInstructions || ""} onChange={(value) => updateField({ workInstructions: value })} rows={3} />
           <TextArea label="Operation Notes" value={operation.notes || ""} onChange={(value) => updateField({ notes: value })} rows={2} />
-
-          <div className="subpanel top-gap">
-            <div className="subpanel-header">
-              <div>
-                <h4>Materials</h4>
-                <span>{selectedMaterials.length} linked / {operation.customMaterialText ? "Other set" : "No other material"}</span>
-              </div>
-              <button onClick={() => setShowMaterialPicker(true)}><Database size={14} /> Select Materials</button>
-            </div>
-            <div className="summary-lines">
-              {selectedMaterials.map((item) => (
-                <p key={item.id} className="summary-line"><strong>{item.serialCode}</strong><span>{[item.materialFamily, materialDisplayType(item)].filter(Boolean).join(" / ") || "-"}</span></p>
-              ))}
-              {!selectedMaterials.length && <div className="empty-inline">No linked material records.</div>}
-              {operation.customMaterialText && <p className="summary-line"><strong>Other</strong><span>{operation.customMaterialText}</span></p>}
-            </div>
-          </div>
-
-          <div className="subpanel top-gap">
-            <div className="subpanel-header">
-              <div>
-                <h4>Parameters</h4>
-              </div>
-              <button onClick={addParameter}><Plus size={14} /> Parameter</button>
-            </div>
-            <div className="parameter-list">
-              {operation.parameters.map((parameter) => (
-                <div className="parameter-row" key={parameter.id}>
-                  <input value={parameter.label} placeholder="Label" onChange={(event) => updateParameter(parameter.id, { label: event.target.value })} />
-                  <input value={parameter.value} placeholder="Value" onChange={(event) => updateParameter(parameter.id, { value: event.target.value })} />
-                  <button className="danger subtle square" onClick={() => removeParameter(parameter.id)}><X size={13} /></button>
-                </div>
-              ))}
-              {!operation.parameters.length && <div className="empty-inline">No parameters yet.</div>}
-            </div>
-          </div>
         </section>
 
         <section className="panel">
@@ -1834,7 +2872,7 @@ function OperationDetailScreen({
                   <TextField label="Stickout" value={tool.length || ""} onChange={(value) => updateTool(tool.id, { length: value })} />
                   <TextField label="Holder" value={tool.holder || ""} onChange={(value) => updateTool(tool.id, { holder: value })} />
                 </div>
-                <TextArea label="Details" value={tool.details || ""} onChange={(value) => updateTool(tool.id, { details: value })} rows={4} />
+                <TextArea label="Details" value={tool.details || ""} onChange={(value) => updateTool(tool.id, { details: value })} rows={3} />
                 <div className="tool-card-actions">
                   <button className="danger subtle" onClick={() => removeTool(tool.id)}><X size={14} /> Remove</button>
                 </div>
@@ -1842,33 +2880,69 @@ function OperationDetailScreen({
             ))}
             {!operation.tools?.length && <div className="empty-inline">No tools saved with this operation.</div>}
           </div>
+        </section>
 
-          <div className="subpanel top-gap">
-            <RecordChecklist
-              title="Inspection Instruments"
-              items={instruments.map((item) => ({ id: item.instrumentId, label: `${item.toolName} - ${item.dueState}` }))}
-              selected={operation.requiredInstruments || []}
-              onToggle={(id) => toggleRef("requiredInstruments", id)}
-            />
+        <section className="panel">
+          <div className="subpanel-header">
+            <div>
+              <h4>Materials</h4>
+              <span>{selectedMaterials.length} linked / {operation.customMaterialText ? "Other set" : "No other material"}</span>
+            </div>
+            <button onClick={() => setShowMaterialPicker(true)}><Database size={14} /> Select Materials</button>
           </div>
+          <div className="summary-lines">
+            {selectedMaterials.map((item) => (
+              <p key={item.id} className="summary-line"><strong>{item.serialCode}</strong><span>{[item.materialFamily, materialDisplayType(item)].filter(Boolean).join(" / ") || "-"}</span></p>
+            ))}
+            {!selectedMaterials.length && <div className="empty-inline">No linked material records.</div>}
+            {operation.customMaterialText && <p className="summary-line"><strong>Other</strong><span>{operation.customMaterialText}</span></p>}
+          </div>
+        </section>
 
-          <div className="subpanel top-gap">
-            <div className="subpanel-header">
-              <div>
-                <h4>Step Images</h4>
-                <span>{operation.stepImages?.length || 0} images</span>
+        <section className="panel">
+          <RecordChecklist
+            title="Inspection Instruments"
+            items={instruments.map((item) => ({ id: item.instrumentId, label: `${item.toolName} - ${item.dueState}` }))}
+            selected={operation.requiredInstruments || []}
+            onToggle={(id) => toggleRef("requiredInstruments", id)}
+          />
+        </section>
+
+        <section className="panel">
+          <div className="subpanel-header">
+            <div>
+              <h4>Parameters</h4>
+            </div>
+            <button onClick={addParameter}><Plus size={14} /> Parameter</button>
+          </div>
+          <div className="parameter-list">
+            {operation.parameters.map((parameter) => (
+              <div className="parameter-row" key={parameter.id}>
+                <input value={parameter.label} placeholder="Label" onChange={(event) => updateParameter(parameter.id, { label: event.target.value })} />
+                <input value={parameter.value} placeholder="Value" onChange={(event) => updateParameter(parameter.id, { value: event.target.value })} />
+                <button className="danger subtle square" onClick={() => removeParameter(parameter.id)}><X size={13} /></button>
               </div>
-              <button onClick={onAddImages}><FolderOpen size={14} /> Add Images</button>
+            ))}
+            {!operation.parameters.length && <div className="empty-inline">No parameters yet.</div>}
+          </div>
+        </section>
+
+        <section className="panel">
+          <div className="subpanel-header">
+            <div>
+              <h4>Step Images</h4>
+              <span>{operation.stepImages?.length || 0} images</span>
             </div>
-            <div className="image-strip">
-              {(operation.stepImages || []).map((image) => (
-                <figure key={image.id} className="image-chip">
-                  <img src={api.assetUrl(image.relativePath)} alt={image.name || "Operation image"} />
-                  <figcaption>{image.name}</figcaption>
-                </figure>
-              ))}
-              {!operation.stepImages?.length && <div className="empty-inline">No images attached.</div>}
-            </div>
+            <button onClick={onAddImages}><FolderOpen size={14} /> Add Images</button>
+          </div>
+          <div className="image-strip">
+            {(operation.stepImages || []).map((image) => (
+              <figure key={image.id} className="image-chip">
+                <img src={api.assetUrl(image.relativePath)} alt={image.name || "Operation image"} />
+                <figcaption>{image.name}</figcaption>
+              </figure>
+            ))}
+            {!operation.stepImages?.length && <div className="empty-inline">No images attached.</div>}
           </div>
         </section>
       </div>
@@ -1886,12 +2960,26 @@ function OperationDetailScreen({
           setShowMaterialPicker(false);
         }}
         onCreateInlineMaterial={onCreateInlineMaterial}
+        onAddMaterialFamily={onAddMaterialFamily}
+        onAddMaterialAlloy={onAddMaterialAlloy}
       />
     </>
   );
 }
 
-function MaterialPickerDialog({ open, materials, constants, preferences, selectedIds, customMaterialText, onClose, onApply, onCreateInlineMaterial }) {
+function MaterialPickerDialog({
+  open,
+  materials,
+  constants,
+  preferences,
+  selectedIds,
+  customMaterialText,
+  onClose,
+  onApply,
+  onCreateInlineMaterial,
+  onAddMaterialFamily,
+  onAddMaterialAlloy
+}) {
   const [query, setQuery] = useState("");
   const [materialFamily, setMaterialFamily] = useState("All");
   const [materialAlloy, setMaterialAlloy] = useState("All");
@@ -1920,24 +3008,6 @@ function MaterialPickerDialog({ open, materials, constants, preferences, selecte
     setCreating(false);
     setDraftMaterial(null);
   }, [open, selectedIds, customMaterialText]);
-
-  if (!open) {
-    return null;
-  }
-
-  const filteredMaterials = materials.filter((material) => materialMatchesFilters(material, {
-    query,
-    materialFamily,
-    materialAlloy,
-    supplier: "",
-    form,
-    status,
-    traceabilityLevel
-  }));
-  const pageSize = 100;
-  const totalPages = Math.max(1, Math.ceil(filteredMaterials.length / pageSize));
-  const currentPage = Math.min(page, totalPages - 1);
-  const pageItems = filteredMaterials.slice(currentPage * pageSize, (currentPage + 1) * pageSize);
 
   const toggleSelection = (materialId) => {
     setLocalSelectedIds((current) => current.includes(materialId) ? current.filter((item) => item !== materialId) : [...current, materialId]);
@@ -1973,6 +3043,24 @@ function MaterialPickerDialog({ open, materials, constants, preferences, selecte
       }
     }
   });
+
+  if (!open) {
+    return null;
+  }
+
+  const filteredMaterials = materials.filter((material) => materialMatchesFilters(material, {
+    query,
+    materialFamily,
+    materialAlloy,
+    supplier: "",
+    form,
+    status,
+    traceabilityLevel
+  }));
+  const pageSize = 100;
+  const totalPages = Math.max(1, Math.ceil(filteredMaterials.length / pageSize));
+  const currentPage = Math.min(page, totalPages - 1);
+  const pageItems = filteredMaterials.slice(currentPage * pageSize, (currentPage + 1) * pageSize);
 
   return (
     <div className="dialog-backdrop">
@@ -2077,22 +3165,12 @@ function MaterialPickerDialog({ open, materials, constants, preferences, selecte
             </div>
             <div className="form-grid">
               <TextField label="Serial Code" value={draftMaterial?.serialCode || ""} onChange={(value) => setDraftMaterial((current) => updateMaterialWithShape(current, { serialCode: value }))} />
-              <SelectField
-                label="Material"
-                value={draftMaterial?.materialFamily || ""}
-                options={["", ...materialFamilyOptions(preferences)]}
-                emptyLabel="Choose material"
-                onChange={(value) => setDraftMaterial((current) => updateMaterialRecord(current, {
-                  materialFamily: value,
-                  materialAlloy: materialAlloyOptions(preferences, value).includes(current?.materialAlloy) ? current.materialAlloy : ""
-                }, preferences))}
-              />
-              <SelectField
-                label="Alloy"
-                value={draftMaterial?.materialAlloy || ""}
-                options={["", ...materialAlloyOptions(preferences, draftMaterial?.materialFamily || "")]}
-                emptyLabel="Choose alloy"
-                onChange={(value) => setDraftMaterial((current) => updateMaterialRecord(current, { materialAlloy: value }, preferences))}
+              <MaterialClassificationFields
+                material={draftMaterial}
+                preferences={preferences}
+                onChange={(patch) => setDraftMaterial((current) => updateMaterialRecord(current, patch, preferences))}
+                onAddFamily={onAddMaterialFamily}
+                onAddAlloy={onAddMaterialAlloy}
               />
               <SelectField label="Shape" value={draftMaterial?.form || constants.material.forms[0]} options={constants.material.forms} onChange={(value) => setDraftMaterial((current) => updateMaterialWithShape(current, { form: value, shapeDimensions: {}, dimensions: "" }))} />
               <TextField label="Supplier" value={draftMaterial?.supplier || ""} onChange={(value) => setDraftMaterial((current) => updateMaterialWithShape(current, { supplier: value }))} />
@@ -2236,35 +3314,114 @@ function LegacyMaterialsView({ workspace, material, setMaterial, onOpenMaterial,
   );
 }
 
-function MaterialClassificationFields({ material, preferences, onChange }) {
+function MaterialClassificationFields({ material, preferences, onChange, onAddFamily, onAddAlloy }) {
   const familyOptions = materialFamilyOptions(preferences);
   const alloyOptions = materialAlloyOptions(preferences, material?.materialFamily || "");
+  const [newFamilyOpen, setNewFamilyOpen] = useState(false);
+  const [newAlloyOpen, setNewAlloyOpen] = useState(false);
+  const [newFamilyName, setNewFamilyName] = useState("");
+  const [newAlloyName, setNewAlloyName] = useState("");
+
+  const saveFamily = async () => {
+    if (!onAddFamily) return;
+    const saved = await onAddFamily(newFamilyName);
+    onChange({ materialFamily: saved, materialAlloy: "" });
+    setNewFamilyName("");
+    setNewFamilyOpen(false);
+  };
+
+  const saveAlloy = async () => {
+    if (!onAddAlloy) return;
+    const saved = await onAddAlloy(material?.materialFamily || "", newAlloyName);
+    onChange({ materialAlloy: saved });
+    setNewAlloyName("");
+    setNewAlloyOpen(false);
+  };
+
   return (
     <>
-      <SelectField
-        label="Material"
-        value={material?.materialFamily || ""}
-        options={["", ...familyOptions]}
-        emptyLabel="Choose material"
-        onChange={(value) => onChange({
-          materialFamily: value,
-          materialAlloy: alloyOptions.includes(material?.materialAlloy) && value === material?.materialFamily ? material.materialAlloy : ""
-        })}
-      />
-      <SelectField
-        label="Alloy"
-        value={material?.materialAlloy || ""}
-        options={["", ...alloyOptions]}
-        emptyLabel="Choose alloy"
-        onChange={(value) => onChange({ materialAlloy: value })}
-      />
+      <label className="field">
+        <span>Material</span>
+        <div className="field-action-row">
+          <select
+            value={material?.materialFamily || ""}
+            onChange={(event) => {
+              const value = event.target.value;
+              onChange({
+                materialFamily: value,
+                materialAlloy: alloyOptions.includes(material?.materialAlloy) && value === material?.materialFamily ? material.materialAlloy : ""
+              });
+            }}
+          >
+            {["", ...familyOptions].map((option) => (
+              <option key={`material-family-${option || "empty"}`} value={option}>
+                {option || "Choose material"}
+              </option>
+            ))}
+          </select>
+          {onAddFamily ? (
+            <button type="button" className="inline-action-button" onClick={() => setNewFamilyOpen((current) => !current)}>
+              <Plus size={13} /> New
+            </button>
+          ) : null}
+        </div>
+        {newFamilyOpen ? (
+          <div className="mini-inline-editor">
+            <input value={newFamilyName} placeholder="New material" onChange={(event) => setNewFamilyName(event.target.value)} />
+            <button type="button" className="inline-action-button" onClick={() => void saveFamily()}>Add</button>
+            <button type="button" className="inline-action-button" onClick={() => { setNewFamilyOpen(false); setNewFamilyName(""); }}>Cancel</button>
+          </div>
+        ) : null}
+      </label>
+      <label className="field">
+        <span>Alloy</span>
+        <div className="field-action-row">
+          <select
+            value={material?.materialAlloy || ""}
+            onChange={(event) => onChange({ materialAlloy: event.target.value })}
+          >
+            {["", ...alloyOptions].map((option) => (
+              <option key={`material-alloy-${option || "empty"}`} value={option}>
+                {option || "Choose alloy"}
+              </option>
+            ))}
+          </select>
+          {onAddAlloy ? (
+            <button type="button" className="inline-action-button" onClick={() => setNewAlloyOpen((current) => !current)} disabled={!material?.materialFamily}>
+              <Plus size={13} /> New
+            </button>
+          ) : null}
+        </div>
+        {newAlloyOpen ? (
+          <div className="mini-inline-editor">
+            <input value={newAlloyName} placeholder="New alloy" onChange={(event) => setNewAlloyName(event.target.value)} />
+            <button type="button" className="inline-action-button" onClick={() => void saveAlloy()} disabled={!material?.materialFamily}>Add</button>
+            <button type="button" className="inline-action-button" onClick={() => { setNewAlloyOpen(false); setNewAlloyName(""); }}>Cancel</button>
+          </div>
+        ) : null}
+      </label>
     </>
   );
 }
 
-function MaterialDetailScreen({ workspace, material, onBack, onChange, onAddAttachments, canAddAttachments }) {
+function MaterialDetailScreen({
+  workspace,
+  material,
+  onBack,
+  onChange,
+  onAddAttachments,
+  canAddAttachments,
+  onOpenAttachment,
+  onOpenAttachmentRevision,
+  onArchiveAttachment,
+  onUnarchiveAttachment,
+  onReviseAttachment,
+  onDeleteAttachment,
+  onAddMaterialFamily,
+  onAddMaterialAlloy
+}) {
   return (
-    <div className="materials-screen">
+    <div className="workflow-stack">
       <section className="panel">
         <div className="panel-heading inline">
           <div>
@@ -2272,109 +3429,127 @@ function MaterialDetailScreen({ workspace, material, onBack, onChange, onAddAtta
             <span>{[material.materialFamily, materialDisplayType(material)].filter(Boolean).join(" / ") || "Material detail"}</span>
           </div>
           <div className="toolbar">
-            <button onClick={onBack}>Back To List</button>
             <button onClick={onAddAttachments} disabled={!canAddAttachments}><FolderOpen size={14} /> Add Attachments</button>
           </div>
         </div>
 
-        <div className="form-grid">
+        <div className="form-grid compact-3 material-detail-grid">
           <TextField label="Serial Code" value={material.serialCode || ""} onChange={(value) => onChange({ serialCode: value })} />
-          <MaterialClassificationFields material={material} preferences={workspace.preferences} onChange={onChange} />
-          <SelectField
-            label="Shape"
-            value={material.form || workspace.constants.material.forms[0]}
-            options={workspace.constants.material.forms}
-            onChange={(value) => onChange({ form: value, shapeDimensions: {}, dimensions: "" })}
+          <MaterialClassificationFields
+            material={material}
+            preferences={workspace.preferences}
+            onChange={onChange}
+            onAddFamily={onAddMaterialFamily}
+            onAddAlloy={onAddMaterialAlloy}
           />
+          <SelectField label="Shape" value={material.form || workspace.constants.material.forms[0]} options={workspace.constants.material.forms} onChange={(value) => onChange({ form: value, shapeDimensions: {}, dimensions: "" })} />
           <TextField label="Supplier" value={material.supplier || ""} onChange={(value) => onChange({ supplier: value })} />
-          <TextField label="Date Received" type="date" value={material.dateReceived || ""} onChange={(value) => onChange({ dateReceived: value })} />
           <TextField label="Purchase Order" value={material.purchaseOrder || ""} onChange={(value) => onChange({ purchaseOrder: value })} />
-          <TextField label="Heat Number" value={material.heatNumber || ""} onChange={(value) => onChange({ heatNumber: value })} />
-          <TextField label="Lot Number" value={material.lotNumber || ""} onChange={(value) => onChange({ lotNumber: value })} />
-          <MaterialShapeFields material={material} onChange={(shapeDimensions) => onChange({ shapeDimensions })} />
           <SelectField
             label="Traceability"
             value={material.traceabilityLevel || workspace.constants.material.traceabilityLevels[0]}
             options={workspace.constants.material.traceabilityLevels}
             onChange={(value) => onChange({ traceabilityLevel: value })}
           />
-          <TextField label="Storage Location" value={material.storageLocation || ""} onChange={(value) => onChange({ storageLocation: value })} />
+          <TextField label="Date Received" type="date" value={material.dateReceived || ""} onChange={(value) => onChange({ dateReceived: value })} />
           <SelectField label="Status" value={material.status || "active"} options={["active", "archived"]} onChange={(value) => onChange({ status: value })} />
+          <TextField label="Lot Number" value={material.lotNumber || ""} onChange={(value) => onChange({ lotNumber: value })} />
+          <TextField label="Heat Number" value={material.heatNumber || ""} onChange={(value) => onChange({ heatNumber: value })} />
+          <TextField label="Storage Location" value={material.storageLocation || ""} onChange={(value) => onChange({ storageLocation: value })} />
         </div>
-        <div className="shape-summary-note">Saved dimensions: {materialDimensionsSummary(material.form, material.shapeDimensions, material.dimensions || "-") || "-"}</div>
-        <TextArea label="Notes" value={material.notes || ""} onChange={(value) => onChange({ notes: value })} rows={4} />
+        <TextArea label="Notes" value={material.notes || ""} onChange={(value) => onChange({ notes: value })} rows={3} />
       </section>
 
       <section className="panel">
         <div className="panel-heading">
-          <h3>Traceability</h3>
-          <span>Usage and attachments</span>
+          <h3>Shape and Dimensions</h3>
         </div>
-        <div className="materials-detail-grid">
-          <div className="subpanel">
-            <div className="subpanel-header">
-              <h4>Usage References</h4>
+        <div className="form-grid compact-3 material-shape-grid">
+          <div className="field">
+            <span>Shape</span>
+            <div className="static-field">{material.form || "-"}</div>
+          </div>
+          <MaterialShapeFields material={material} onChange={(shapeDimensions) => onChange({ shapeDimensions })} />
+        </div>
+        <div className="shape-summary-note">Saved dimensions: {materialDimensionsSummary(material.form, material.shapeDimensions, material.dimensions || "-") || "-"}</div>
+      </section>
+
+      <div className="record-grid job-detail-columns">
+        <section className="panel">
+          <div className="panel-heading">
+            <div>
+              <h3>Usage References</h3>
               <span>{material.usageRefs?.length || 0} links</span>
             </div>
-            <div className="table-wrap compact">
-              <table className="detail-table">
-                <thead>
-                  <tr>
-                    <th>Job</th>
-                    <th>Part</th>
-                    <th>Operation</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {(material.usageRefs || []).map((ref) => (
-                    <tr key={usageRefKey(ref)}>
-                      <td>{ref.jobNumber || ref.jobId || "-"}</td>
-                      <td>{ref.partNumber || ref.partId || "-"}</td>
-                      <td>{ref.operationCode || ref.operationId || "-"}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-              {!material.usageRefs?.length && <div className="empty-inline">No usage links.</div>}
-            </div>
           </div>
+          <div className="table-wrap compact">
+            <table className="detail-table">
+              <thead>
+                <tr>
+                  <th>Job</th>
+                  <th>Part</th>
+                  <th>Operation</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(material.usageRefs || []).map((ref) => (
+                  <tr key={usageRefKey(ref)}>
+                    <td>{ref.jobNumber || ref.jobId || "-"}</td>
+                    <td>{ref.partNumber || ref.partId || "-"}</td>
+                    <td>{ref.operationCode || ref.operationId || "-"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {!material.usageRefs?.length && <div className="empty-inline">No usage links.</div>}
+          </div>
+        </section>
 
-          <div className="subpanel">
-            <div className="subpanel-header">
-              <h4>Attachments</h4>
-              <span>{material.attachments?.length || 0} files</span>
-            </div>
-            <div className="table-wrap compact">
-              <table className="detail-table">
-                <thead>
-                  <tr>
-                    <th>File</th>
-                    <th>Category</th>
-                    <th></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {(material.attachments || []).map((attachment) => (
-                    <tr key={attachment.id}>
-                      <td>{attachment.originalFilename || attachment.filename || "-"}</td>
-                      <td>{attachment.attachmentCategory || "Other"}</td>
-                      <td className="action-cell">
-                        <button onClick={() => api.openMaterialAttachment(material.id, attachment.id)}>Open</button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-              {!material.attachments?.length && <div className="empty-inline">No attachments yet.</div>}
-            </div>
-          </div>
-        </div>
-      </section>
+        <DocumentsPanel
+          title="Material Attachments"
+          documents={material.attachments || []}
+          onAddDocuments={onAddAttachments}
+          onOpenDocument={onOpenAttachment}
+          onOpenRevision={onOpenAttachmentRevision}
+          onArchiveDocument={(attachmentId, _filename, archived) => {
+            if (archived) {
+              void onUnarchiveAttachment(attachmentId);
+              return;
+            }
+            void onArchiveAttachment(attachmentId);
+          }}
+          onDeleteDocument={(attachmentId, filename) => {
+            if (window.confirm(`Delete archived attachment ${filename}? This cannot be undone.`)) {
+              void onDeleteAttachment(attachmentId);
+            }
+          }}
+          onReviseDocument={onReviseAttachment}
+          emptyText="No material attachments attached yet."
+        />
+      </div>
     </div>
   );
 }
 
-function MaterialsView({ workspace, materialScreen, material, setMaterial, onOpenMaterial, onShowList, onCreateNew, onAddAttachments, canAddAttachments }) {
+function MaterialsView({
+  workspace,
+  materialScreen,
+  material,
+  setMaterial,
+  onOpenMaterial,
+  onShowList,
+  onCreateNew,
+  onAddAttachments,
+  canAddAttachments,
+  onOpenAttachment,
+  onOpenAttachmentRevision,
+  onArchiveAttachment,
+  onUnarchiveAttachment,
+  onReviseAttachment,
+  onDeleteAttachment,
+  onAddMaterialFamily,
+  onAddMaterialAlloy
+}) {
   const [filters, setFilters] = useState({
     query: "",
     materialFamily: "All",
@@ -2386,10 +3561,20 @@ function MaterialsView({ workspace, materialScreen, material, setMaterial, onOpe
   });
 
   const filteredMaterials = workspace.materials.filter((item) => materialMatchesFilters(item, filters));
-  const alloyFilterOptions = filters.materialFamily === "All"
-    ? Array.from(new Set(materialFamilyList(workspace.preferences).flatMap((family) => family.alloys || []))).sort((a, b) => a.localeCompare(b))
-    : materialAlloyOptions(workspace.preferences, filters.materialFamily);
+  const alloyFilterEnabled = filters.materialFamily !== "All" && Boolean(filters.materialFamily);
+  const alloyFilterOptions = alloyFilterEnabled
+    ? materialAlloyOptions(workspace.preferences, filters.materialFamily)
+    : [];
   const updateMaterial = (patch) => setMaterial((current) => updateMaterialRecord(current, patch, workspace.preferences));
+  const activeFilterChips = [
+    filters.query ? `Search: ${filters.query}` : "",
+    filters.materialFamily !== "All" ? `Material: ${filters.materialFamily}` : "",
+    filters.materialAlloy !== "All" ? `Alloy: ${filters.materialAlloy}` : "",
+    filters.form !== "All" ? `Shape: ${filters.form}` : "",
+    filters.supplier ? `Supplier: ${filters.supplier}` : "",
+    filters.traceabilityLevel !== "All" ? `Traceability: ${filters.traceabilityLevel}` : "",
+    filters.status !== "Active" ? `Status: ${filters.status}` : ""
+  ].filter(Boolean);
 
   if (materialScreen === "detail" && material) {
     return (
@@ -2400,122 +3585,130 @@ function MaterialsView({ workspace, materialScreen, material, setMaterial, onOpe
         onChange={updateMaterial}
         onAddAttachments={onAddAttachments}
         canAddAttachments={canAddAttachments}
+        onOpenAttachment={onOpenAttachment}
+        onOpenAttachmentRevision={onOpenAttachmentRevision}
+        onArchiveAttachment={onArchiveAttachment}
+        onUnarchiveAttachment={onUnarchiveAttachment}
+        onReviseAttachment={onReviseAttachment}
+        onDeleteAttachment={onDeleteAttachment}
+        onAddMaterialFamily={onAddMaterialFamily}
+        onAddMaterialAlloy={onAddMaterialAlloy}
       />
     );
   }
 
   return (
-    <div className="materials-screen">
-      <section className="panel materials-hero">
-        <div>
-          <h3>Materials Database</h3>
+    <div className="materials-screen workflow-stack">
+      <section className="panel">
+        <div className="panel-heading inline">
+          <div>
+            <h3>Material Records</h3>
+            <span>{filteredMaterials.length} matching records</span>
+          </div>
+          <div className="toolbar">
+            <button onClick={() => setFilters({
+              query: "",
+              materialFamily: "All",
+              materialAlloy: "All",
+              supplier: "",
+              form: "All",
+              status: "Active",
+              traceabilityLevel: "All"
+            })}>Clear Filters</button>
+          </div>
         </div>
-        <div className="materials-hero-stats">
-          <div className="materials-stat">
-            <strong>{workspace.materials.length}</strong>
-            <span>Total records</span>
-          </div>
-          <div className="materials-stat">
-            <strong>{workspace.materials.filter((item) => item.status !== "archived").length}</strong>
-            <span>Active records</span>
-          </div>
-          <div className="materials-stat">
-            <strong>{filteredMaterials.length}</strong>
-            <span>Search results</span>
-          </div>
+        <div className="search-grid materials-search-grid sticky-filters">
+          <TextField
+            label="Search"
+            value={filters.query}
+            onChange={(value) => setFilters((current) => ({ ...current, query: value }))}
+            placeholder="Serial, alloy, supplier, PO, heat, lot, notes..."
+          />
+          <SelectField
+            label="Material"
+            value={filters.materialFamily}
+            options={["All", ...materialFamilyOptions(workspace.preferences)]}
+            onChange={(value) => setFilters((current) => ({ ...current, materialFamily: value, materialAlloy: "All" }))}
+          />
+          <SelectField
+            label="Alloy"
+            value={filters.materialAlloy}
+            options={["All", ...alloyFilterOptions]}
+            onChange={(value) => setFilters((current) => ({ ...current, materialAlloy: value }))}
+            disabled={!alloyFilterEnabled}
+          />
+          <TextField
+            label="Supplier"
+            value={filters.supplier}
+            onChange={(value) => setFilters((current) => ({ ...current, supplier: value }))}
+            placeholder="Filter supplier..."
+          />
+          <SelectField
+            label="Shape"
+            value={filters.form}
+            options={["All", ...workspace.constants.material.forms]}
+            onChange={(value) => setFilters((current) => ({ ...current, form: value }))}
+          />
+          <SelectField
+            label="Status"
+            value={filters.status}
+            options={MATERIAL_STATUS_FILTERS}
+            onChange={(value) => setFilters((current) => ({ ...current, status: value }))}
+          />
+          <SelectField
+            label="Traceability"
+            value={filters.traceabilityLevel}
+            options={["All", ...workspace.constants.material.traceabilityLevels]}
+            onChange={(value) => setFilters((current) => ({ ...current, traceabilityLevel: value }))}
+          />
         </div>
-      </section>
 
-      <section className="panel materials-toolbar">
-        <button onClick={onCreateNew}><Plus size={14} /> New Record</button>
-      </section>
-
-      <section className="panel search-grid materials-search-grid">
-        <TextField
-          label="Search"
-          value={filters.query}
-          onChange={(value) => setFilters((current) => ({ ...current, query: value }))}
-          placeholder="Serial, alloy, supplier, PO, heat, lot, notes..."
-        />
-        <SelectField
-          label="Material"
-          value={filters.materialFamily}
-          options={["All", ...materialFamilyOptions(workspace.preferences)]}
-          onChange={(value) => setFilters((current) => ({ ...current, materialFamily: value, materialAlloy: "All" }))}
-        />
-        <SelectField
-          label="Alloy"
-          value={filters.materialAlloy}
-          options={["All", ...alloyFilterOptions]}
-          onChange={(value) => setFilters((current) => ({ ...current, materialAlloy: value }))}
-        />
-        <TextField
-          label="Supplier"
-          value={filters.supplier}
-          onChange={(value) => setFilters((current) => ({ ...current, supplier: value }))}
-          placeholder="Filter supplier..."
-        />
-        <SelectField
-          label="Shape"
-          value={filters.form}
-          options={["All", ...workspace.constants.material.forms]}
-          onChange={(value) => setFilters((current) => ({ ...current, form: value }))}
-        />
-        <SelectField
-          label="Status"
-          value={filters.status}
-          options={MATERIAL_STATUS_FILTERS}
-          onChange={(value) => setFilters((current) => ({ ...current, status: value }))}
-        />
-        <SelectField
-          label="Traceability"
-          value={filters.traceabilityLevel}
-          options={["All", ...workspace.constants.material.traceabilityLevels]}
-          onChange={(value) => setFilters((current) => ({ ...current, traceabilityLevel: value }))}
-        />
-      </section>
-
-      <div className="main-grid materials-workspace-grid">
-        <section className="panel results-panel">
-          <div className="panel-heading inline">
-            <div>
-              <h3>Results</h3>
-              <span>{filteredMaterials.length} matching material records</span>
-            </div>
+        {activeFilterChips.length ? (
+          <div className="inline-chip-list">
+            {activeFilterChips.map((chip) => <span key={chip} className="inline-chip">{chip}</span>)}
           </div>
-          <div className="table-wrap">
-            <table className="materials-table">
-              <thead>
-                <tr>
+        ) : null}
+
+        <div className="table-wrap">
+          <table className="materials-table">
+            <thead>
+              <tr>
+                {MATERIAL_RESULT_COLUMNS.map((column) => (
+                  <th key={column.key}>{column.label}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {filteredMaterials.map((item) => (
+                <tr key={item.id} className={material?.id === item.id ? "selected" : ""} onClick={() => onOpenMaterial(item.id)}>
                   {MATERIAL_RESULT_COLUMNS.map((column) => (
-                    <th key={column.key}>{column.label}</th>
+                    <td key={column.key}>
+                      {column.key === "status"
+                        ? <span className={`status-pill ${item.status || "active"}`}>{materialCellValue(item, column.key)}</span>
+                        : materialCellValue(item, column.key)}
+                    </td>
                   ))}
                 </tr>
-              </thead>
-              <tbody>
-                {filteredMaterials.map((item) => (
-                  <tr key={item.id} className={material?.id === item.id ? "selected" : ""} onClick={() => onOpenMaterial(item.id)}>
-                    {MATERIAL_RESULT_COLUMNS.map((column) => (
-                      <td key={column.key}>
-                        {column.key === "status"
-                          ? <span className={`status-pill ${item.status || "active"}`}>{materialCellValue(item, column.key)}</span>
-                          : materialCellValue(item, column.key)}
-                      </td>
-                    ))}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            {!filteredMaterials.length && <div className="empty-inline">No material records matched the current search.</div>}
-          </div>
-        </section>
-      </div>
+              ))}
+            </tbody>
+          </table>
+          {!filteredMaterials.length && <div className="empty-inline">No material records matched the current search.</div>}
+        </div>
+      </section>
     </div>
   );
 }
 
-function MetrologyView({ workspace, payload, setPayload, onOpenInstrument, onCreateNew }) {
+function MetrologyView({ workspace, screen, payload, setPayload, onOpenInstrument, onCreateNew, onShowList }) {
   const instrument = payload?.instrument;
+  const preferences = workspace.preferences || {};
+  const [filters, setFilters] = useState({
+    query: "",
+    toolType: "All",
+    status: "All",
+    location: "All",
+    dueState: "All"
+  });
   const updateInstrument = (patch) => setPayload((current) => ({ ...current, instrument: { ...current.instrument, ...patch } }));
   const updateCalibration = (calibrationId, patch) => setPayload((current) => ({
     ...current,
@@ -2523,50 +3716,185 @@ function MetrologyView({ workspace, payload, setPayload, onOpenInstrument, onCre
   }));
   const addCalibration = () => setPayload((current) => ({ ...current, calibrations: [...current.calibrations, blankCalibration()] }));
   const removeCalibration = (calibrationId) => setPayload((current) => ({ ...current, calibrations: current.calibrations.filter((item) => item.calibration_id !== calibrationId) }));
+  const filteredInstruments = workspace.instruments.filter((item) => {
+    const query = filters.query.trim().toLowerCase();
+    if (query) {
+      const haystack = [
+        item.instrumentId,
+        item.toolName,
+        item.toolType,
+        item.manufacturer,
+        item.location,
+        item.status,
+        item.dueState
+      ].join(" ").toLowerCase();
+      if (!haystack.includes(query)) {
+        return false;
+      }
+    }
+    if (filters.toolType !== "All" && item.toolType !== filters.toolType) {
+      return false;
+    }
+    if (filters.status !== "All" && item.status !== filters.status) {
+      return false;
+    }
+    if (filters.location !== "All" && item.location !== filters.location) {
+      return false;
+    }
+    if (filters.dueState !== "All" && item.dueState !== filters.dueState) {
+      return false;
+    }
+    return true;
+  });
+  const activeFilterChips = [
+    filters.query ? `Search: ${filters.query}` : "",
+    filters.toolType !== "All" ? `Tool Type: ${filters.toolType}` : "",
+    filters.status !== "All" ? `Status: ${filters.status}` : "",
+    filters.location !== "All" ? `Location: ${filters.location}` : "",
+    filters.dueState !== "All" ? `Due: ${filters.dueState}` : ""
+  ].filter(Boolean);
+  const metrologyDueStateOptions = Array.from(new Set(workspace.instruments.map((item) => item.dueState).filter(Boolean)));
+  const metrologyLocationOptions = Array.from(new Set(workspace.instruments.map((item) => item.location).filter(Boolean)));
+  const latestCalibration = [...(payload?.calibrations || [])]
+    .sort((a, b) => String(b.calibration_date || "").localeCompare(String(a.calibration_date || "")))[0] || null;
+  const nextDueCalibration = [...(payload?.calibrations || [])]
+    .filter((item) => item.next_due_date)
+    .sort((a, b) => String(a.next_due_date || "").localeCompare(String(b.next_due_date || "")))[0] || null;
+  const dueStateLabel = (() => {
+    const nextDue = nextDueCalibration?.next_due_date;
+    if (!nextDue) return "No due date";
+    const todayValue = today();
+    if (nextDue < todayValue) return "Overdue";
+    return "In service";
+  })();
+  const dueStateClass = dueStateLabel.toLowerCase().includes("over") ? "archived" : "active";
 
-  return (
-    <div className="workspace-columns">
-      <section className="panel thin">
+  if (screen === "list" || !payload) {
+    return (
+      <section className="panel">
         <div className="panel-heading inline">
           <div>
             <h3>Gages</h3>
-            <span>Inspection equipment</span>
+            <span>{filteredInstruments.length} matching records</span>
           </div>
-          <button onClick={onCreateNew}><Plus size={14} /> New</button>
+          <div className="toolbar">
+            <button onClick={() => setFilters({
+              query: "",
+              toolType: "All",
+              status: "All",
+              location: "All",
+              dueState: "All"
+            })}>Clear Filters</button>
+          </div>
         </div>
-        <div className="record-list">
-          {workspace.instruments.map((item) => (
-            <button key={item.instrumentId} className={`record-list-item ${payload?.instrument?.instrument_id === item.instrumentId ? "selected" : ""}`} onClick={() => onOpenInstrument(item.instrumentId)}>
-              <strong>{item.toolName}</strong>
-              <span>{item.instrumentId}</span>
-              <small>{item.dueState}</small>
-            </button>
-          ))}
+        <div className="search-grid metrology-search-grid sticky-filters">
+          <TextField
+            label="Search"
+            value={filters.query}
+            onChange={(value) => setFilters((current) => ({ ...current, query: value }))}
+            placeholder="ID, tool name, type, manufacturer, location..."
+          />
+          <SelectField
+            label="Tool Type"
+            value={filters.toolType}
+            options={["All", ...(preferences.metrologyToolTypes || [])]}
+            onChange={(value) => setFilters((current) => ({ ...current, toolType: value }))}
+          />
+          <SelectField
+            label="Status"
+            value={filters.status}
+            options={["All", ...(preferences.metrologyStatuses || [])]}
+            onChange={(value) => setFilters((current) => ({ ...current, status: value }))}
+          />
+          <SelectField
+            label="Location"
+            value={filters.location}
+            options={["All", ...metrologyLocationOptions]}
+            onChange={(value) => setFilters((current) => ({ ...current, location: value }))}
+          />
+          <SelectField
+            label="Due State"
+            value={filters.dueState}
+            options={["All", ...metrologyDueStateOptions]}
+            onChange={(value) => setFilters((current) => ({ ...current, dueState: value }))}
+          />
+        </div>
+        {activeFilterChips.length ? (
+          <div className="inline-chip-list">
+            {activeFilterChips.map((chip) => <span key={chip} className="inline-chip">{chip}</span>)}
+          </div>
+        ) : null}
+        <div className="table-wrap">
+          <table className="materials-table">
+            <thead>
+              <tr>
+                <th>Instrument ID</th>
+                <th>Tool Name</th>
+                <th>Tool Type</th>
+                <th>Manufacturer</th>
+                <th>Location</th>
+                <th>Status</th>
+                <th>Due State</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filteredInstruments.map((item) => (
+                <tr key={item.instrumentId} className={instrument?.instrument_id === item.instrumentId ? "selected" : ""} onClick={() => onOpenInstrument(item.instrumentId)}>
+                  <td>{item.instrumentId}</td>
+                  <td>{item.toolName || "-"}</td>
+                  <td>{item.toolType || "-"}</td>
+                  <td>{item.manufacturer || "-"}</td>
+                  <td>{item.location || "-"}</td>
+                  <td>{item.status || "-"}</td>
+                  <td><span className={`status-pill ${item.dueState?.toLowerCase().includes("over") ? "archived" : "active"}`}>{item.dueState || "No due state"}</span></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {!filteredInstruments.length && <div className="empty-inline">No gages matched the current search.</div>}
         </div>
       </section>
-      {!payload ? (
-        <EmptyState icon={Gauge} title="No gage selected" text="Pick a gage or create a new one." actionLabel="New Gage" onAction={onCreateNew} />
-      ) : (
-      <>
+    );
+  }
+
+  return (
+    <div className="workflow-stack">
       <section className="panel">
         <div className="panel-heading">
           <h3>Gage Record</h3>
         </div>
-        <div className="form-grid">
+        <div className="form-grid compact-3">
           <TextField label="Instrument ID" value={instrument.instrument_id || ""} onChange={(value) => updateInstrument({ instrument_id: value })} />
           <TextField label="Tool Name" value={instrument.tool_name || ""} onChange={(value) => updateInstrument({ tool_name: value })} />
-          <TextField label="Tool Type" value={instrument.tool_type || ""} onChange={(value) => updateInstrument({ tool_type: value })} />
-          <TextField label="Manufacturer" value={instrument.manufacturer || ""} onChange={(value) => updateInstrument({ manufacturer: value })} />
+          <SelectField label="Tool Type" value={instrument.tool_type || ""} options={preferences.metrologyToolTypes || []} emptyLabel="Choose type" onChange={(value) => updateInstrument({ tool_type: value })} />
+          <SelectField label="Manufacturer" value={instrument.manufacturer || ""} options={preferences.metrologyManufacturers || []} emptyLabel="Choose manufacturer" onChange={(value) => updateInstrument({ manufacturer: value })} />
           <TextField label="Model" value={instrument.model || ""} onChange={(value) => updateInstrument({ model: value })} />
           <TextField label="Serial Number" value={instrument.serial_number || ""} onChange={(value) => updateInstrument({ serial_number: value })} />
           <TextField label="Range" value={instrument.measuring_range || ""} onChange={(value) => updateInstrument({ measuring_range: value })} />
-          <TextField label="Resolution" value={instrument.resolution || ""} onChange={(value) => updateInstrument({ resolution: value })} />
+          <SelectField label="Resolution" value={instrument.resolution || ""} options={preferences.metrologyResolutions || []} emptyLabel="Choose resolution" onChange={(value) => updateInstrument({ resolution: value })} />
           <TextField label="Accuracy" value={instrument.accuracy || ""} onChange={(value) => updateInstrument({ accuracy: value })} />
-          <TextField label="Location" value={instrument.location || ""} onChange={(value) => updateInstrument({ location: value })} />
-          <TextField label="Department" value={instrument.owner_department || ""} onChange={(value) => updateInstrument({ owner_department: value })} />
-          <TextField label="Status" value={instrument.status || ""} onChange={(value) => updateInstrument({ status: value })} />
+          <SelectField label="Location" value={instrument.location || ""} options={preferences.metrologyLocations || []} emptyLabel="Choose location" onChange={(value) => updateInstrument({ location: value })} />
+          <SelectField label="Department" value={instrument.owner_department || ""} options={preferences.metrologyDepartments || []} emptyLabel="Choose department" onChange={(value) => updateInstrument({ owner_department: value })} />
+          <SelectField label="Status" value={instrument.status || ""} options={preferences.metrologyStatuses || []} emptyLabel="Choose status" onChange={(value) => updateInstrument({ status: value })} />
         </div>
-        <TextArea label="Notes" value={instrument.notes || ""} onChange={(value) => updateInstrument({ notes: value })} rows={4} />
+        <TextArea label="Notes" value={instrument.notes || ""} onChange={(value) => updateInstrument({ notes: value })} rows={3} />
+      </section>
+
+      <section className="panel">
+        <div className="panel-heading">
+          <h3>Calibration Status</h3>
+        </div>
+        <div className="form-grid compact-3">
+          <TextField label="Current Due State" value={dueStateLabel} onChange={() => {}} readOnly />
+          <TextField label="Last Calibration" value={latestCalibration?.calibration_date || ""} onChange={() => {}} type="date" readOnly />
+          <TextField label="Next Due" value={nextDueCalibration?.next_due_date || ""} onChange={() => {}} type="date" readOnly />
+          <TextField label="Last Result" value={latestCalibration?.result || ""} onChange={() => {}} readOnly />
+          <TextField label="Performed By" value={latestCalibration?.performed_by || ""} onChange={() => {}} readOnly />
+          <TextField label="Certificate Number" value={latestCalibration?.certificate_number || ""} onChange={() => {}} readOnly />
+        </div>
+        <div className="top-gap">
+          <span className={`status-pill ${dueStateClass}`}>{dueStateLabel}</span>
+        </div>
       </section>
 
       <section className="panel">
@@ -2587,13 +3915,15 @@ function MetrologyView({ workspace, payload, setPayload, onOpenInstrument, onCre
                 </div>
                 <button className="danger subtle" onClick={() => removeCalibration(calibration.calibration_id)}><X size={14} /> Remove</button>
               </div>
-              <div className="form-grid">
+              <div className="form-grid compact-3">
                 <TextField label="Calibration Date" type="date" value={calibration.calibration_date || ""} onChange={(value) => updateCalibration(calibration.calibration_id, { calibration_date: value })} />
                 <TextField label="Next Due" type="date" value={calibration.next_due_date || ""} onChange={(value) => updateCalibration(calibration.calibration_id, { next_due_date: value })} />
                 <TextField label="Performed By" value={calibration.performed_by || ""} onChange={(value) => updateCalibration(calibration.calibration_id, { performed_by: value })} />
                 <TextField label="Result" value={calibration.result || ""} onChange={(value) => updateCalibration(calibration.calibration_id, { result: value })} />
+                <TextField label="Vendor" value={calibration.calibration_vendor || ""} onChange={(value) => updateCalibration(calibration.calibration_id, { calibration_vendor: value })} />
                 <TextField label="Standard Name" value={calibration.standard_name || ""} onChange={(value) => updateCalibration(calibration.calibration_id, { standard_name: value })} />
                 <TextField label="Certificate Number" value={calibration.certificate_number || ""} onChange={(value) => updateCalibration(calibration.calibration_id, { certificate_number: value })} />
+                <TextField label="Traceability Ref" value={calibration.traceability_reference || ""} onChange={(value) => updateCalibration(calibration.calibration_id, { traceability_reference: value })} />
               </div>
               <TextArea label="Notes" value={calibration.notes || ""} onChange={(value) => updateCalibration(calibration.calibration_id, { notes: value })} rows={2} />
             </div>
@@ -2601,8 +3931,6 @@ function MetrologyView({ workspace, payload, setPayload, onOpenInstrument, onCre
           {!payload.calibrations?.length && <div className="empty-inline">No calibrations yet.</div>}
         </div>
       </section>
-      </>
-      )}
     </div>
   );
 }
@@ -2765,11 +4093,35 @@ function TemplatesView({ workspace, selectedTemplate, setSelectedTemplateId, onS
 function SettingsView({ onChooseDataFolder, onOpenTemplates, onSavePreferences, workspace }) {
   const [materialFamilies, setMaterialFamilies] = useState(workspace.preferences?.materialFamilies || []);
   const [selectedFamilyId, setSelectedFamilyId] = useState(workspace.preferences?.materialFamilies?.[0]?.id || null);
+  const [jobSettings, setJobSettings] = useState({
+    jobPrefix: workspace.preferences?.jobPrefix || "J03C",
+    startingJobNumber: String(workspace.preferences?.startingJobNumber ?? 600)
+  });
+  const [metrologyOptions, setMetrologyOptions] = useState({
+    metrologyToolTypes: workspace.preferences?.metrologyToolTypes || [],
+    metrologyManufacturers: workspace.preferences?.metrologyManufacturers || [],
+    metrologyResolutions: workspace.preferences?.metrologyResolutions || [],
+    metrologyLocations: workspace.preferences?.metrologyLocations || [],
+    metrologyDepartments: workspace.preferences?.metrologyDepartments || [],
+    metrologyStatuses: workspace.preferences?.metrologyStatuses || []
+  });
 
   useEffect(() => {
     const families = workspace.preferences?.materialFamilies || [];
     setMaterialFamilies(families);
     setSelectedFamilyId((current) => families.some((family) => family.id === current) ? current : families[0]?.id || null);
+    setJobSettings({
+      jobPrefix: workspace.preferences?.jobPrefix || "J03C",
+      startingJobNumber: String(workspace.preferences?.startingJobNumber ?? 600)
+    });
+    setMetrologyOptions({
+      metrologyToolTypes: workspace.preferences?.metrologyToolTypes || [],
+      metrologyManufacturers: workspace.preferences?.metrologyManufacturers || [],
+      metrologyResolutions: workspace.preferences?.metrologyResolutions || [],
+      metrologyLocations: workspace.preferences?.metrologyLocations || [],
+      metrologyDepartments: workspace.preferences?.metrologyDepartments || [],
+      metrologyStatuses: workspace.preferences?.metrologyStatuses || []
+    });
   }, [workspace.preferences]);
 
   const selectedFamily = materialFamilies.find((family) => family.id === selectedFamilyId) || null;
@@ -2804,6 +4156,15 @@ function SettingsView({ onChooseDataFolder, onOpenTemplates, onSavePreferences, 
       alloys: (selectedFamily.alloys || []).filter((_, alloyIndex) => alloyIndex !== index)
     });
   };
+  const updateMetrologyList = (key, updater) => {
+    setMetrologyOptions((current) => ({
+      ...current,
+      [key]: typeof updater === "function" ? updater(current[key] || []) : updater
+    }));
+  };
+  const addMetrologyOption = (key) => updateMetrologyList(key, (current) => [...current, ""]);
+  const updateMetrologyOption = (key, index, value) => updateMetrologyList(key, (current) => current.map((item, itemIndex) => itemIndex === index ? value : item));
+  const removeMetrologyOption = (key, index) => updateMetrologyList(key, (current) => current.filter((_item, itemIndex) => itemIndex !== index));
 
   useAutoSave({
     value: materialFamilies,
@@ -2821,6 +4182,49 @@ function SettingsView({ onChooseDataFolder, onOpenTemplates, onSavePreferences, 
       return current;
     }
   });
+
+  useAutoSave({
+    value: jobSettings,
+    resetKey: `job-settings:${workspace.dataFolder}:${workspace.preferences?.jobPrefix || ""}:${workspace.preferences?.startingJobNumber ?? ""}`,
+    enabled: true,
+    isReady: (current) => Boolean(current),
+    save: async (current) => {
+      await onSavePreferences({
+        jobPrefix: String(current.jobPrefix || "").trim(),
+        startingJobNumber: Number(current.startingJobNumber || 0) || 1
+      }, { silent: true });
+      return current;
+    }
+  });
+
+  useAutoSave({
+    value: metrologyOptions,
+    resetKey: `metrology-settings:${workspace.dataFolder}:${JSON.stringify({
+      metrologyToolTypes: workspace.preferences?.metrologyToolTypes || [],
+      metrologyManufacturers: workspace.preferences?.metrologyManufacturers || [],
+      metrologyResolutions: workspace.preferences?.metrologyResolutions || [],
+      metrologyLocations: workspace.preferences?.metrologyLocations || [],
+      metrologyDepartments: workspace.preferences?.metrologyDepartments || [],
+      metrologyStatuses: workspace.preferences?.metrologyStatuses || []
+    })}`,
+    enabled: true,
+    isReady: (current) => Boolean(current),
+    save: async (current) => {
+      await onSavePreferences(Object.fromEntries(
+        Object.entries(current).map(([key, values]) => [key, (values || []).map((value) => String(value || "").trim()).filter(Boolean)])
+      ), { silent: true });
+      return current;
+    }
+  });
+
+  const metrologySections = [
+    ["metrologyToolTypes", "Tool Types"],
+    ["metrologyManufacturers", "Manufacturers"],
+    ["metrologyResolutions", "Resolutions"],
+    ["metrologyLocations", "Locations"],
+    ["metrologyDepartments", "Departments"],
+    ["metrologyStatuses", "Statuses"]
+  ];
 
   return (
     <div className="workspace-columns settings-grid">
@@ -2923,6 +4327,50 @@ function SettingsView({ onChooseDataFolder, onOpenTemplates, onSavePreferences, 
               </div>
             </div>
           )}
+        </div>
+      </section>
+
+      <section className="panel">
+        <div className="panel-heading inline">
+          <div>
+            <h3>Job Numbering</h3>
+            <span>Defaults for the Next Job Number button.</span>
+          </div>
+        </div>
+        <div className="form-grid">
+          <TextField label="Job Prefix" value={jobSettings.jobPrefix} onChange={(value) => setJobSettings((current) => ({ ...current, jobPrefix: value }))} />
+          <TextField label="Starting Job Number" value={jobSettings.startingJobNumber} onChange={(value) => setJobSettings((current) => ({ ...current, startingJobNumber: value }))} />
+        </div>
+      </section>
+
+      <section className="panel">
+        <div className="panel-heading inline">
+          <div>
+            <h3>Metrology Options</h3>
+            <span>Dropdown lists used in gage records.</span>
+          </div>
+        </div>
+        <div className="stack-list">
+          {metrologySections.map(([key, label]) => (
+            <div key={key} className="subpanel">
+              <div className="subpanel-header">
+                <div>
+                  <h4>{label}</h4>
+                  <span>{metrologyOptions[key]?.length || 0} options</span>
+                </div>
+                <button onClick={() => addMetrologyOption(key)}><Plus size={14} /> Option</button>
+              </div>
+              <div className="parameter-list">
+                {(metrologyOptions[key] || []).map((value, index) => (
+                  <div className="parameter-row catalog-alloy-row" key={`${key}-${index}`}>
+                    <input value={value || ""} placeholder={`${label.slice(0, -1)} option`} onChange={(event) => updateMetrologyOption(key, index, event.target.value)} />
+                    <button className="danger subtle square" onClick={() => removeMetrologyOption(key, index)}><X size={13} /></button>
+                  </div>
+                ))}
+                {!metrologyOptions[key]?.length && <div className="empty-inline">No options configured yet.</div>}
+              </div>
+            </div>
+          ))}
         </div>
       </section>
     </div>
@@ -3048,20 +4496,20 @@ function PrintPacket({ jobId }) {
   );
 }
 
-function TextField({ label, value, onChange, type = "text", placeholder = "" }) {
+function TextField({ label, value, onChange, type = "text", placeholder = "", readOnly = false, disabled = false }) {
   return (
     <label className="field">
       <span>{label}</span>
-      <input type={type} value={value || ""} placeholder={placeholder} onChange={(event) => onChange(event.target.value)} />
+      <input type={type} value={value || ""} placeholder={placeholder} onChange={(event) => onChange(event.target.value)} readOnly={readOnly} disabled={disabled} />
     </label>
   );
 }
 
-function SelectField({ label, value, options, onChange, emptyLabel = "" }) {
+function SelectField({ label, value, options, onChange, emptyLabel = "", disabled = false }) {
   return (
     <label className="field">
       <span>{label}</span>
-      <select value={value || ""} onChange={(event) => onChange(event.target.value)}>
+      <select value={value || ""} onChange={(event) => onChange(event.target.value)} disabled={disabled}>
         {options.map((option) => (
           <option key={`${label}-${option || "empty"}`} value={option}>
             {option || emptyLabel}
@@ -3092,6 +4540,33 @@ function EmptyState({ icon: Icon, title, text, actionLabel, onAction }) {
   );
 }
 
+function ConfirmDialog({ open, title, message, confirmLabel = "Confirm", onCancel, onConfirm }) {
+  if (!open) return null;
+  return (
+    <div className="dialog-backdrop">
+      <div className="dialog-panel narrow">
+        <div className="panel-heading">
+          <h3>{title}</h3>
+        </div>
+        <p>{message}</p>
+        <div className="dialog-actions">
+          <button onClick={onCancel}>Cancel</button>
+          <button className="danger" onClick={onConfirm}>{confirmLabel}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SaveStatePill({ state }) {
+  const labels = {
+    saving: "Saving...",
+    saved: "Saved",
+    error: "Save error"
+  };
+  return <div className={`save-state-pill ${state || "saved"}`}>{labels[state] || labels.saved}</div>;
+}
+
 function LoadingScreen({ message }) {
   return <div className="setup-screen"><div className="setup-panel"><h1>{message}</h1></div></div>;
 }
@@ -3120,7 +4595,6 @@ function PrintField({ label, value, compact = false }) {
 
 function titleForView(view) {
   return {
-    dashboard: "Dashboard",
     jobs: "Jobs",
     materials: "Materials",
     metrology: "Gages",
@@ -3131,7 +4605,6 @@ function titleForView(view) {
 
 function subtitleForView(view) {
   return {
-    dashboard: "",
     jobs: "",
     materials: "",
     metrology: "",
@@ -3141,3 +4614,4 @@ function subtitleForView(view) {
 }
 
 createRoot(document.getElementById("root")).render(<App />);
+
