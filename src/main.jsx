@@ -713,7 +713,6 @@ function Workspace() {
     if ((view === "jobs" && jobScreen === "list")
       || (view === "materials" && materialScreen === "list")
       || (view === "metrology" && metrologyScreen === "list")
-      || view === "templates"
       || view === "settings") {
       setSaveState("saved");
     }
@@ -1647,19 +1646,10 @@ function Workspace() {
         ].filter(Boolean)
       };
     }
-    if (view === "templates") {
-      return {
-        breadcrumbs: [{ label: "Operation Templates", onClick: null, active: true }],
-        title: "Operation Templates",
-        subtitle: "Standardize starting operations, parameters, and steps.",
-        primaryActions: [],
-        dangerActions: []
-      };
-    }
     return {
       breadcrumbs: [{ label: "Settings", onClick: null, active: true }],
       title: "Settings",
-      subtitle: "System configuration and controlled lists.",
+      subtitle: "System configuration, controlled lists, and reusable templates.",
       primaryActions: [],
       dangerActions: []
     };
@@ -1680,7 +1670,6 @@ function Workspace() {
           <NavButton icon={Package} active={view === "jobs"} label="Jobs" onClick={showJobList} />
           <NavButton icon={Database} active={view === "materials"} label="Materials" onClick={showMaterialsList} />
           <NavButton icon={Gauge} active={view === "metrology"} label="Gages" onClick={showMetrologyList} />
-          <NavButton icon={Library} active={view === "templates"} label="Operation Templates" onClick={() => setView("templates")} />
           <NavButton icon={Settings} active={view === "settings"} label="Settings" onClick={() => setView("settings")} />
         </nav>
       </aside>
@@ -1785,21 +1774,15 @@ function Workspace() {
             onShowList={showMetrologyList}
           />
         )}
-        {view === "templates" && (
-          <TemplatesView
+        {view === "settings" && (
+          <SettingsView
+            onChooseDataFolder={() => api.selectDataFolder().then(() => refreshWorkspace(false))}
+            onSavePreferences={savePreferences}
             workspace={workspace}
             selectedTemplate={selectedTemplate}
             setSelectedTemplateId={setSelectedTemplateId}
             onStatus={showStatus}
             onRefresh={refreshWorkspace}
-          />
-        )}
-        {view === "settings" && (
-          <SettingsView
-            onChooseDataFolder={() => api.selectDataFolder().then(() => refreshWorkspace(false))}
-            onOpenTemplates={() => setView("templates")}
-            onSavePreferences={savePreferences}
-            workspace={workspace}
           />
         )}
       </main>
@@ -3935,7 +3918,7 @@ function MetrologyView({ workspace, screen, payload, setPayload, onOpenInstrumen
   );
 }
 
-function TemplatesView({ workspace, selectedTemplate, setSelectedTemplateId, onStatus, onRefresh }) {
+function TemplateSettingsSection({ workspace, selectedTemplate, setSelectedTemplateId, onStatus, onRefresh }) {
   const [template, setTemplate] = useState(selectedTemplate || blankTemplate());
   const libraries = Object.keys(workspace.libraries || {});
 
@@ -3999,40 +3982,30 @@ function TemplatesView({ workspace, selectedTemplate, setSelectedTemplateId, onS
     onError: (error) => onStatus(error.message || String(error))
   });
 
-  if (!selectedTemplate) {
-    return <EmptyState icon={Library} title="No operation template selected" text="Pick a template or create a new one." />;
-  }
-
   return (
-    <div className="workspace-columns">
-      <section className="panel thin">
-        <div className="panel-heading inline">
+    <div className="catalog-layout settings-template-layout">
+      <div className="catalog-list">
+        <button className="sidebar-action" onClick={() => setTemplate(blankTemplate())}><Plus size={14} /> New Template</button>
+        {workspace.templates.map((item) => (
+          <button key={item.id} className={`record-list-item ${template.id === item.id ? "selected" : ""}`} onClick={() => setSelectedTemplateId(item.id)}>
+            <strong>{item.name}</strong>
+            <span>{item.category}</span>
+          </button>
+        ))}
+        {!workspace.templates.length && <div className="empty-inline">No templates saved yet.</div>}
+      </div>
+
+      <div className="subpanel">
+        <div className="subpanel-header">
           <div>
-            <h3>Operation Templates</h3>
-            <span>Default fields and starting steps</span>
-          </div>
-          <button onClick={() => setTemplate(blankTemplate())}><Plus size={14} /> New Template</button>
-        </div>
-        <div className="record-list">
-          {workspace.templates.map((item) => (
-            <button key={item.id} className={`record-list-item ${template.id === item.id ? "selected" : ""}`} onClick={() => setSelectedTemplateId(item.id)}>
-              <strong>{item.name}</strong>
-              <span>{item.category}</span>
-            </button>
-          ))}
-        </div>
-      </section>
-      <section className="panel">
-        <div className="panel-heading inline">
-          <div>
-            <h3>{template.name || "New Template"}</h3>
+            <h4>{template.name || "New Template"}</h4>
             <span>{template.category || "General"}</span>
           </div>
           <div className="toolbar">
             {template.id && <button className="danger subtle" onClick={deleteTemplate}><X size={14} /> Delete</button>}
           </div>
         </div>
-        <div className="form-grid">
+        <div className="form-grid compact-3">
           <TextField label="Template Name" value={template.name || ""} onChange={(value) => setTemplate((current) => ({ ...current, name: value }))} />
           <TextField label="Category" value={template.category || ""} onChange={(value) => setTemplate((current) => ({ ...current, category: value }))} />
         </div>
@@ -4085,12 +4058,12 @@ function TemplatesView({ workspace, selectedTemplate, setSelectedTemplateId, onS
             {!template.defaultSteps?.length && <div className="empty-inline">No default steps yet.</div>}
           </div>
         </div>
-      </section>
+      </div>
     </div>
   );
 }
 
-function SettingsView({ onChooseDataFolder, onOpenTemplates, onSavePreferences, workspace }) {
+function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, selectedTemplate, setSelectedTemplateId, onStatus, onRefresh }) {
   const [materialFamilies, setMaterialFamilies] = useState(workspace.preferences?.materialFamilies || []);
   const [selectedFamilyId, setSelectedFamilyId] = useState(workspace.preferences?.materialFamilies?.[0]?.id || null);
   const [jobSettings, setJobSettings] = useState({
@@ -4227,38 +4200,49 @@ function SettingsView({ onChooseDataFolder, onOpenTemplates, onSavePreferences, 
   ];
 
   return (
-    <div className="workspace-columns settings-grid">
+    <div className="workflow-stack settings-stack">
       <section className="panel">
-        <div className="panel-heading">
-          <h3>Settings</h3>
+        <div className="panel-heading inline">
+          <div>
+            <h3>Data</h3>
+            <span>Workspace location and numbering defaults.</span>
+          </div>
         </div>
-        <div className="stack-list">
+        <div className="settings-admin-grid">
           <button className="import-card" onClick={onChooseDataFolder}>
             <FolderOpen size={20} />
             <strong>Change Data Folder</strong>
             <span>{workspace.dataFolder}</span>
           </button>
-          <button className="import-card" onClick={onOpenTemplates}>
-            <Library size={20} />
-            <strong>Operation Templates</strong>
-            <span>{workspace.templates.length} saved templates</span>
-          </button>
           <div className="subpanel">
             <div className="subpanel-header">
-              <h4>Recent Activity</h4>
+              <div>
+                <h4>Job Numbering</h4>
+                <span>Defaults for Assign Number.</span>
+              </div>
             </div>
-            <div className="stack-list">
-              {(workspace.dashboard?.recentAudit || []).map((item, index) => (
-                <div className="inline-card" key={`${item.timestamp}-${index}`}>
-                  <strong>{item.eventType}</strong>
-                  <span>{item.message}</span>
-                  <small>{item.timestamp}</small>
-                </div>
-              ))}
-              {!workspace.dashboard?.recentAudit?.length && <div className="empty-inline">No recent activity.</div>}
+            <div className="form-grid compact-2">
+              <TextField label="Job Prefix" value={jobSettings.jobPrefix} onChange={(value) => setJobSettings((current) => ({ ...current, jobPrefix: value }))} />
+              <TextField label="Starting Job Number" value={jobSettings.startingJobNumber} onChange={(value) => setJobSettings((current) => ({ ...current, startingJobNumber: value }))} />
             </div>
           </div>
         </div>
+      </section>
+
+      <section className="panel">
+        <div className="panel-heading inline">
+          <div>
+            <h3>Operation Templates</h3>
+            <span>Standardize starting operations, parameters, and steps.</span>
+          </div>
+        </div>
+        <TemplateSettingsSection
+          workspace={workspace}
+          selectedTemplate={selectedTemplate}
+          setSelectedTemplateId={setSelectedTemplateId}
+          onStatus={onStatus}
+          onRefresh={onRefresh}
+        />
       </section>
 
       <section className="panel">
@@ -4299,7 +4283,7 @@ function SettingsView({ onChooseDataFolder, onOpenTemplates, onSavePreferences, 
                 <button className="danger subtle" onClick={() => removeFamily(selectedFamily.id)}><X size={14} /> Remove</button>
               </div>
 
-              <div className="form-grid">
+              <div className="form-grid compact-2">
                 <TextField
                   label="Material Name"
                   value={selectedFamily.name || ""}
@@ -4333,24 +4317,11 @@ function SettingsView({ onChooseDataFolder, onOpenTemplates, onSavePreferences, 
       <section className="panel">
         <div className="panel-heading inline">
           <div>
-            <h3>Job Numbering</h3>
-            <span>Defaults for the Next Job Number button.</span>
-          </div>
-        </div>
-        <div className="form-grid">
-          <TextField label="Job Prefix" value={jobSettings.jobPrefix} onChange={(value) => setJobSettings((current) => ({ ...current, jobPrefix: value }))} />
-          <TextField label="Starting Job Number" value={jobSettings.startingJobNumber} onChange={(value) => setJobSettings((current) => ({ ...current, startingJobNumber: value }))} />
-        </div>
-      </section>
-
-      <section className="panel">
-        <div className="panel-heading inline">
-          <div>
             <h3>Metrology Options</h3>
             <span>Dropdown lists used in gage records.</span>
           </div>
         </div>
-        <div className="stack-list">
+        <div className="settings-metrology-grid">
           {metrologySections.map(([key, label]) => (
             <div key={key} className="subpanel">
               <div className="subpanel-header">
@@ -4371,6 +4342,25 @@ function SettingsView({ onChooseDataFolder, onOpenTemplates, onSavePreferences, 
               </div>
             </div>
           ))}
+        </div>
+      </section>
+
+      <section className="panel">
+        <div className="panel-heading inline">
+          <div>
+            <h3>Activity</h3>
+            <span>Recent changes across the workspace.</span>
+          </div>
+        </div>
+        <div className="stack-list">
+          {(workspace.dashboard?.recentAudit || []).map((item, index) => (
+            <div className="inline-card" key={`${item.timestamp}-${index}`}>
+              <strong>{item.eventType}</strong>
+              <span>{item.message}</span>
+              <small>{item.timestamp}</small>
+            </div>
+          ))}
+          {!workspace.dashboard?.recentAudit?.length && <div className="empty-inline">No recent activity.</div>}
         </div>
       </section>
     </div>

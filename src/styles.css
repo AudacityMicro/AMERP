@@ -548,6 +548,10 @@ button:disabled:hover {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
+.form-grid.compact-2 {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 .form-grid.compact-4 {
   grid-template-columns: repeat(4, minmax(0, 1fr));
 }
@@ -1001,6 +1005,10 @@ button:disabled:hover {
   grid-template-columns: minmax(260px, 1.6fr) repeat(2, minmax(170px, 0.95fr)) minmax(180px, 1fr) repeat(3, minmax(150px, 0.85fr));
 }
 
+.metrology-search-grid {
+  grid-template-columns: minmax(260px, 1.8fr) repeat(4, minmax(170px, 1fr));
+}
+
 .materials-checkbox {
   align-self: end;
   min-height: 49px;
@@ -1104,6 +1112,11 @@ button:disabled:hover {
   color: #8c4a39;
 }
 
+.status-pill.warning {
+  background: #f6efe1;
+  color: #8a6422;
+}
+
 .materials-detail-grid {
   display: grid;
   gap: 1rem;
@@ -1112,6 +1125,28 @@ button:disabled:hover {
 
 .settings-grid {
   grid-template-columns: minmax(320px, 0.95fr) minmax(0, 1.35fr);
+}
+
+.settings-stack {
+  align-items: start;
+}
+
+.settings-admin-grid {
+  display: grid;
+  grid-template-columns: minmax(320px, 0.85fr) minmax(0, 1.15fr);
+  gap: 1rem;
+  align-items: start;
+}
+
+.settings-metrology-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+  align-items: start;
+}
+
+.settings-template-layout {
+  margin-top: 0.25rem;
 }
 
 .catalog-layout {
@@ -1179,6 +1214,7 @@ button:disabled:hover {
 
   .form-grid,
   .compact-3,
+  .compact-2,
   .compact-4,
   .job-header-grid,
   .record-grid,
@@ -1203,6 +1239,9 @@ button:disabled:hover {
   .materials-main-grid,
   .materials-detail-grid,
   .materials-search-grid,
+  .metrology-search-grid,
+  .settings-admin-grid,
+  .settings-metrology-grid,
   .catalog-layout,
   .settings-grid {
     grid-template-columns: 1fr;
