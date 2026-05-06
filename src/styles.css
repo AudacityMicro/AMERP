@@ -672,6 +672,7 @@ button:disabled:hover {
 .field select,
 .field textarea,
 .parameter-row input,
+.parameter-row select,
 .compact-select {
   width: 100%;
   border: 1px solid var(--line);

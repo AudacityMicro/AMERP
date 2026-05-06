@@ -2509,12 +2509,8 @@ function JobsView({
         job={job}
         part={selectedPart}
         operation={selectedOperation}
-        materials={materials}
-        instruments={instruments}
         libraries={workspace.libraries || {}}
         templates={templates}
-        constants={workspace.constants}
-        preferences={workspace.preferences}
         onUpdate={(updater) => updateOperation(selectedPart.id, selectedOperation.id, updater)}
         onRemove={() => {
           removeOperation(selectedPart.id, selectedOperation.id);
@@ -2523,9 +2519,6 @@ function JobsView({
         onAddImages={async () => {
           return onChooseOperationImages(job.id, selectedPart.id, selectedOperation.id);
         }}
-        onCreateInlineMaterial={onCreateInlineMaterial}
-        onAddMaterialFamily={onAddMaterialFamily}
-        onAddMaterialAlloy={onAddMaterialAlloy}
       />
     );
   }
@@ -2901,10 +2894,9 @@ function PartDetailScreen({
             {part.operations.map((operation) => (
               <button key={operation.id} className="record-list-item record-list-row" onClick={() => onOpenOperation(operation.id)}>
                 <div className="record-row-primary">
-                  <strong>{operation.sequence}. {operation.title || "Operation"}</strong>
+                  <strong>{operation.title || "Operation"}</strong>
                 </div>
                 <div className="record-row-meta">
-                  <small>{operation.operationCode || "No code"}</small>
                   <small>{operation.type || "General"}</small>
                   <small>{operation.tools?.length || 0} tools</small>
                   <div className="tiny-toolbar">
@@ -2976,17 +2968,11 @@ function OperationDetailScreen({
   job,
   part,
   operation,
-  instruments,
   libraries,
   templates,
-  constants,
-  preferences,
   onUpdate,
   onRemove,
   onAddImages,
-  onCreateInlineMaterial,
-  onAddMaterialFamily,
-  onAddMaterialAlloy
 }) {
   const updateField = (patch) => onUpdate((current) => ({ ...current, ...patch }));
   const updateInstructionSteps = (updater) => onUpdate((current) => {
@@ -2999,10 +2985,6 @@ function OperationDetailScreen({
       stepImages: nextSteps.flatMap((step) => step.images || [])
     };
   });
-  const toggleRef = (field, id) => onUpdate((current) => ({
-    ...current,
-    [field]: current[field].includes(id) ? current[field].filter((item) => item !== id) : [...current[field], id]
-  }));
   const updateParameter = (parameterId, patch) => onUpdate((current) => ({
     ...current,
     parameters: current.parameters.map((parameter) => parameter.id === parameterId ? { ...parameter, ...patch } : parameter)
@@ -3017,15 +2999,13 @@ function OperationDetailScreen({
   const removeTool = (toolId) => onUpdate((current) => ({ ...current, tools: (current.tools || []).filter((tool) => tool.id !== toolId) }));
   const instructionSteps = instructionStepsFromOperation(operation);
   const assignedLibraryNames = selectedLibraryNamesForOperation(operation, templates);
-  const updateLibrarySelections = (libraryName, recordId) => onUpdate((current) => {
-    const currentSelection = current.librarySelections?.[libraryName] || [];
+  const supportsTooling = ["milling", "turning"].includes(String(operation.type || "").toLowerCase());
+  const updateLibrarySelection = (libraryName, recordId) => onUpdate((current) => {
     return {
       ...current,
       librarySelections: {
         ...(current.librarySelections || {}),
-        [libraryName]: currentSelection.includes(recordId)
-          ? currentSelection.filter((item) => item !== recordId)
-          : [...currentSelection, recordId]
+        [libraryName]: recordId ? [recordId] : []
       }
     };
   });
@@ -3033,6 +3013,20 @@ function OperationDetailScreen({
   const addInstructionStep = () => updateInstructionSteps((current) => [...current, blankInstructionStep("")]);
   const changeInstructionStep = (stepId, text) => updateInstructionSteps((current) => current.map((step) => step.id === stepId ? { ...step, text } : step));
   const removeInstructionStep = (stepId) => updateInstructionSteps((current) => current.filter((step) => step.id !== stepId));
+  const moveInstructionStep = (stepId, direction) => updateInstructionSteps((current) => {
+    const currentIndex = current.findIndex((step) => step.id === stepId);
+    if (currentIndex < 0) {
+      return current;
+    }
+    const targetIndex = currentIndex + direction;
+    if (targetIndex < 0 || targetIndex >= current.length) {
+      return current;
+    }
+    const nextSteps = [...current];
+    const [movedStep] = nextSteps.splice(currentIndex, 1);
+    nextSteps.splice(targetIndex, 0, movedStep);
+    return nextSteps;
+  });
   const addImagesToStep = async (stepId) => {
     const images = await onAddImages();
     if (!images?.length) {
@@ -3044,160 +3038,151 @@ function OperationDetailScreen({
   return (
     <>
       <div className="workflow-stack">
-        <section className="panel">
-          <div className="panel-heading inline">
-            <div>
-              <h3>Operation Detail</h3>
-              <span>{job.jobNumber || job.id} / {part.partNumber || part.partName || part.id}</span>
-            </div>
-            <div className="toolbar">
-              <button className="danger subtle" onClick={onRemove}><X size={14} /> Remove Operation</button>
-            </div>
-          </div>
-
-          <div className="form-grid compact-4">
-            <TextField label="Sequence" value={String(operation.sequence || "")} onChange={(value) => updateField({ sequence: Number(value || 0) || 1 })} />
-            <TextField label="Op Code" value={operation.operationCode || ""} onChange={(value) => updateField({ operationCode: value })} />
-            <TextField label="Title" value={operation.title || ""} onChange={(value) => updateField({ title: value })} />
-            <SelectField label="Type" value={operation.type || OPERATION_TYPE_OPTIONS[0]} options={OPERATION_TYPE_OPTIONS} onChange={(value) => updateField({ type: value })} />
-            <TextField label="Work Center" value={operation.workCenter || ""} onChange={(value) => updateField({ workCenter: value })} />
-            <SelectField label="Status" value={operation.status || OPERATION_STATUS_OPTIONS[0]} options={OPERATION_STATUS_OPTIONS} onChange={(value) => updateField({ status: value })} />
-          </div>
-        </section>
-
-        <section className="panel">
-          <div className="panel-heading">
-            <div>
-              <h3>Instructions</h3>
-            </div>
-          </div>
-          <TextArea label="Setup Instructions" value={operation.setupInstructions || ""} onChange={(value) => updateField({ setupInstructions: value })} rows={2} />
-          <div className="template-editor-block">
-            <div className="subpanel-header">
-              <div>
-                <h4>Operation Steps</h4>
-                <span>{instructionSteps.length} step{instructionSteps.length === 1 ? "" : "s"}</span>
+        <div className="record-grid job-detail-columns">
+          <div className="workflow-stack">
+            <section className="panel">
+              <div className="panel-heading inline">
+                <div>
+                  <h3>Operation Detail</h3>
+                  <span>{job.jobNumber || job.id} / {part.partNumber || part.partName || part.id}</span>
+                </div>
+                <div className="toolbar">
+                  <button className="danger subtle" onClick={onRemove}><X size={14} /> Remove Operation</button>
+                </div>
               </div>
-              <button onClick={addInstructionStep}><Plus size={14} /> Step</button>
-            </div>
-            <div className="instruction-step-list">
-              {instructionSteps.map((step, index) => (
-                <div key={step.id} className="instruction-step-card">
-                  <div className="subpanel-header">
-                    <div>
-                      <h5>Step {index + 1}</h5>
-                      <span>{step.images?.length || 0} photo{(step.images?.length || 0) === 1 ? "" : "s"}</span>
-                    </div>
-                    <div className="toolbar">
-                      <button onClick={() => void addImagesToStep(step.id)}><FolderOpen size={14} /> Photos</button>
-                      <button className="danger subtle" onClick={() => removeInstructionStep(step.id)}><X size={14} /> Remove</button>
-                    </div>
+
+              <div className="form-grid compact-4">
+                <TextField label="Title" value={operation.title || ""} onChange={(value) => updateField({ title: value })} />
+                <TextField label="Work Center" value={operation.workCenter || ""} onChange={(value) => updateField({ workCenter: value })} />
+                <label className="field">
+                  <span>Type</span>
+                  <div className="static-field">{operation.type || OPERATION_TYPE_OPTIONS[0]}</div>
+                </label>
+              </div>
+            </section>
+
+            <section className="panel">
+              <div className="panel-heading">
+                <div>
+                  <h3>Operation Steps</h3>
+                </div>
+              </div>
+
+              <div className="template-editor-block">
+                <div className="subpanel-header">
+                  <div>
+                    <h4>Steps</h4>
+                    <span>{instructionSteps.length} step{instructionSteps.length === 1 ? "" : "s"}</span>
                   </div>
-                  <TextArea label="Instruction" value={step.text || ""} onChange={(value) => changeInstructionStep(step.id, value)} rows={2} />
-                  <div className="image-strip">
-                    {(step.images || []).map((image) => (
-                      <figure key={image.id} className="image-chip">
-                        <img src={api.assetUrl(image.relativePath)} alt={image.name || "Step photo"} />
-                        <figcaption>{image.name}</figcaption>
-                      </figure>
-                    ))}
-                    {!step.images?.length && <div className="empty-inline">No photos attached to this step.</div>}
-                  </div>
+                  <button onClick={addInstructionStep}><Plus size={14} /> Step</button>
                 </div>
-              ))}
-              {!instructionSteps.length && <div className="empty-inline">No operation steps yet.</div>}
-            </div>
-          </div>
-          <TextArea label="Operation Notes" value={operation.notes || ""} onChange={(value) => updateField({ notes: value })} rows={2} />
-        </section>
-
-        <section className="panel">
-          <div className="subpanel-header">
-            <div>
-              <h4>Tools</h4>
-              <span>{operation.tools?.length || 0} saved with this operation</span>
-            </div>
-            <button onClick={addTool}><Plus size={14} /> Tool</button>
-          </div>
-          <div className="job-tools-grid">
-            {(operation.tools || []).map((tool) => (
-              <div key={tool.id} className="tool-card">
-                <div className="form-grid compact">
-                  <TextField label="Tool" value={tool.name || ""} onChange={(value) => updateTool(tool.id, { name: value })} />
-                  <TextField label="Diameter" value={tool.diameter || ""} onChange={(value) => updateTool(tool.id, { diameter: value })} />
-                  <TextField label="Stickout" value={tool.length || ""} onChange={(value) => updateTool(tool.id, { length: value })} />
-                  <TextField label="Holder" value={tool.holder || ""} onChange={(value) => updateTool(tool.id, { holder: value })} />
-                </div>
-                <TextArea label="Details" value={tool.details || ""} onChange={(value) => updateTool(tool.id, { details: value })} rows={3} />
-                <div className="tool-card-actions">
-                  <button className="danger subtle" onClick={() => removeTool(tool.id)}><X size={14} /> Remove</button>
-                </div>
-              </div>
-            ))}
-            {!operation.tools?.length && <div className="empty-inline">No tools saved with this operation.</div>}
-          </div>
-        </section>
-
-        <section className="panel">
-          <div className="subpanel-header">
-            <div>
-              <h4>Libraries</h4>
-              <span>{assignedLibraryNames.length} assigned</span>
-            </div>
-          </div>
-          <div className="stack-list">
-            {assignedLibraryNames.map((libraryName) => {
-              const library = libraries?.[libraryName] || null;
-              const selectedIds = operation.librarySelections?.[libraryName] || [];
-              const recordMap = new Map((library?.records || []).map((record) => [record.id, record.name]));
-              const missingRecords = selectedIds.filter((recordId) => !recordMap.has(recordId));
-              return (
-                <div key={libraryName} className="subpanel">
-                  <RecordChecklist
-                    title={library?.label || libraryName}
-                    items={(library?.records || []).filter((record) => record.active !== false).map((record) => ({ id: record.id, label: record.name }))}
-                    selected={selectedIds}
-                    onToggle={(recordId) => updateLibrarySelections(libraryName, recordId)}
-                  />
-                  {missingRecords.length ? (
-                    <div className="missing-records-note">
-                      Missing records: {missingRecords.map((recordId) => recordMap.get(recordId) || recordId).join(", ")}
+                <div className="instruction-step-list">
+                  {instructionSteps.map((step, index) => (
+                    <div key={step.id} className="instruction-step-card">
+                      <div className="subpanel-header">
+                        <div>
+                          <h5>Step {index + 1}</h5>
+                          <span>{step.images?.length || 0} photo{(step.images?.length || 0) === 1 ? "" : "s"}</span>
+                        </div>
+                        <div className="toolbar">
+                          <button onClick={() => moveInstructionStep(step.id, -1)} disabled={index === 0}>Up</button>
+                          <button onClick={() => moveInstructionStep(step.id, 1)} disabled={index >= instructionSteps.length - 1}>Down</button>
+                          <button onClick={() => void addImagesToStep(step.id)}><FolderOpen size={14} /> Photos</button>
+                          <button className="danger subtle" onClick={() => removeInstructionStep(step.id)}><X size={14} /> Remove</button>
+                        </div>
+                      </div>
+                      <TextArea label="Instruction" value={step.text || ""} onChange={(value) => changeInstructionStep(step.id, value)} rows={2} />
+                      <div className="image-strip">
+                        {(step.images || []).map((image) => (
+                          <figure key={image.id} className="image-chip">
+                            <img src={api.assetUrl(image.relativePath)} alt={image.name || "Step photo"} />
+                            <figcaption>{image.name}</figcaption>
+                          </figure>
+                        ))}
+                        {!step.images?.length && <div className="empty-inline">No photos attached to this step.</div>}
+                      </div>
                     </div>
-                  ) : null}
+                  ))}
+                  {!instructionSteps.length && <div className="empty-inline">No operation steps yet.</div>}
                 </div>
-              );
-            })}
-            {!assignedLibraryNames.length && <div className="empty-inline">No libraries assigned from the template.</div>}
-          </div>
-        </section>
-
-        <section className="panel">
-          <RecordChecklist
-            title="Inspection Instruments"
-            items={instruments.map((item) => ({ id: item.instrumentId, label: `${item.toolName} - ${item.dueState}` }))}
-            selected={operation.requiredInstruments || []}
-            onToggle={(id) => toggleRef("requiredInstruments", id)}
-          />
-        </section>
-
-        <section className="panel">
-          <div className="subpanel-header">
-            <div>
-              <h4>Parameters</h4>
-            </div>
-            <button onClick={addParameter}><Plus size={14} /> Parameter</button>
-          </div>
-          <div className="parameter-list">
-            {operation.parameters.map((parameter) => (
-              <div className="parameter-row" key={parameter.id}>
-                <input value={parameter.label} placeholder="Label" onChange={(event) => updateParameter(parameter.id, { label: event.target.value })} />
-                <input value={parameter.value} placeholder="Value" onChange={(event) => updateParameter(parameter.id, { value: event.target.value })} />
-                <button className="danger subtle square" onClick={() => removeParameter(parameter.id)}><X size={13} /></button>
               </div>
-            ))}
-            {!operation.parameters.length && <div className="empty-inline">No parameters yet.</div>}
+              <TextArea label="Operation Notes" value={operation.notes || ""} onChange={(value) => updateField({ notes: value })} rows={2} />
+            </section>
           </div>
-        </section>
+
+          <div className="workflow-stack">
+            <section className="panel">
+              <div className="subpanel-header">
+                <div>
+                  <h4>Parameters</h4>
+                </div>
+                <button onClick={addParameter}><Plus size={14} /> Parameter</button>
+              </div>
+              <div className="parameter-list">
+                {operation.parameters.map((parameter) => (
+                  <div className="parameter-row" key={parameter.id}>
+                    <input value={parameter.label} placeholder="Label" onChange={(event) => updateParameter(parameter.id, { label: event.target.value })} />
+                    <input value={parameter.value} placeholder="Value" onChange={(event) => updateParameter(parameter.id, { value: event.target.value })} />
+                    <button className="danger subtle square" onClick={() => removeParameter(parameter.id)}><X size={13} /></button>
+                  </div>
+                ))}
+                {assignedLibraryNames.map((libraryName) => {
+                  const library = libraries?.[libraryName] || null;
+                  const selectedId = operation.librarySelections?.[libraryName]?.[0] || "";
+                  const availableRecords = (library?.records || []).filter((record) => record.active !== false);
+                  const hasMissingValue = selectedId && !availableRecords.some((record) => record.id === selectedId);
+                  return (
+                    <div className="parameter-row" key={`library-${libraryName}`}>
+                      <div className="static-field">{library?.label || libraryName}</div>
+                      <select
+                        value={selectedId}
+                        onChange={(event) => updateLibrarySelection(libraryName, event.target.value)}
+                        disabled={!availableRecords.length}
+                      >
+                        <option value="">{availableRecords.length ? "Select item" : "No records available"}</option>
+                        {hasMissingValue ? <option value={selectedId}>Missing record</option> : null}
+                        {availableRecords.map((record) => (
+                          <option key={record.id} value={record.id}>{record.name}</option>
+                        ))}
+                      </select>
+                      <div />
+                    </div>
+                  );
+                })}
+                {!operation.parameters.length && !assignedLibraryNames.length && <div className="empty-inline">No parameters yet.</div>}
+              </div>
+            </section>
+
+            {supportsTooling ? (
+              <section className="panel">
+                <div className="subpanel-header">
+                  <div>
+                    <h4>Tools</h4>
+                    <span>{operation.tools?.length || 0} saved with this operation</span>
+                  </div>
+                  <button onClick={addTool}><Plus size={14} /> Tool</button>
+                </div>
+                <div className="job-tools-grid">
+                  {(operation.tools || []).map((tool) => (
+                    <div key={tool.id} className="tool-card">
+                      <div className="form-grid compact">
+                        <TextField label="Tool" value={tool.name || ""} onChange={(value) => updateTool(tool.id, { name: value })} />
+                        <TextField label="Diameter" value={tool.diameter || ""} onChange={(value) => updateTool(tool.id, { diameter: value })} />
+                        <TextField label="Stickout" value={tool.length || ""} onChange={(value) => updateTool(tool.id, { length: value })} />
+                        <TextField label="Holder" value={tool.holder || ""} onChange={(value) => updateTool(tool.id, { holder: value })} />
+                      </div>
+                      <TextArea label="Details" value={tool.details || ""} onChange={(value) => updateTool(tool.id, { details: value })} rows={3} />
+                      <div className="tool-card-actions">
+                        <button className="danger subtle" onClick={() => removeTool(tool.id)}><X size={14} /> Remove</button>
+                      </div>
+                    </div>
+                  ))}
+                  {!operation.tools?.length && <div className="empty-inline">No tools saved with this operation.</div>}
+                </div>
+              </section>
+            ) : null}
+          </div>
+        </div>
 
       </div>
 
