@@ -19,14 +19,84 @@ protocol.registerSchemesAsPrivileged([
 
 let mainWindow = null;
 let backend = null;
+let pendingDeepLink = null;
 
-function createWindow() {
+function parseDeepLink(value) {
+  if (!value || typeof value !== "string" || !value.toLowerCase().startsWith("amerp://")) {
+    return null;
+  }
+  try {
+    const url = new URL(value);
+    const segments = url.pathname.split("/").filter(Boolean).map((segment) => decodeURIComponent(segment));
+    if (url.hostname === "open" && segments[0] === "kanban" && segments[1]) {
+      return { entity: "kanban", id: segments[1], url: value };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function extractDeepLink(argv = []) {
+  for (const value of argv) {
+    const parsed = parseDeepLink(value);
+    if (parsed) {
+      return parsed;
+    }
+  }
+  return null;
+}
+
+function deliverDeepLink(payload) {
+  if (!payload) {
+    return;
+  }
+  pendingDeepLink = payload;
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return;
+  }
+  if (mainWindow.isMinimized()) {
+    mainWindow.restore();
+  }
+  mainWindow.focus();
+  const send = () => {
+    if (!mainWindow || mainWindow.isDestroyed()) {
+      return;
+    }
+    mainWindow.webContents.send("amerp-deep-link", pendingDeepLink);
+    pendingDeepLink = null;
+  };
+  if (mainWindow.webContents.isLoadingMainFrame()) {
+    mainWindow.webContents.once("did-finish-load", send);
+  } else {
+    send();
+  }
+}
+
+function registerDeepLinkProtocol() {
+  if (process.platform === "win32" && process.defaultApp) {
+    const entry = process.argv[1] ? path.resolve(process.argv[1]) : "";
+    if (entry) {
+      app.setAsDefaultProtocolClient("amerp", process.execPath, [entry]);
+      return;
+    }
+  }
+  app.setAsDefaultProtocolClient("amerp");
+}
+
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
+if (!hasSingleInstanceLock) {
+  app.quit();
+}
+
+function createWindow(windowTitle = "AMERP", iconPath = "") {
   mainWindow = new BrowserWindow({
     width: 1480,
     height: 980,
     minWidth: 1100,
     minHeight: 720,
-    title: "AMERP",
+    title: windowTitle,
+    ...(iconPath ? { icon: iconPath } : {}),
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
@@ -48,9 +118,15 @@ function createWindow() {
   mainWindow.webContents.on("render-process-gone", (_event, details) => {
     console.error("[browser] render-process-gone", details);
   });
+  mainWindow.webContents.on("did-finish-load", () => {
+    if (pendingDeepLink) {
+      deliverDeepLink(pendingDeepLink);
+    }
+  });
 }
 
 app.whenReady().then(async () => {
+  registerDeepLinkProtocol();
   backend = new ERPBackend({
     app,
     devServerUrl: process.env.VITE_DEV_SERVER_URL || "",
@@ -68,10 +144,37 @@ app.whenReady().then(async () => {
   ipcMain.handle("select-data-folder", () => backend.selectDataFolder(mainWindow));
   ipcMain.handle("get-data-folder", () => backend.getDataFolder());
   ipcMain.handle("load-workspace", () => backend.loadWorkspace());
-  ipcMain.handle("save-preferences", (_event, preferences) => backend.savePreferences(preferences));
+  ipcMain.handle("choose-brand-icon", () => backend.chooseBrandIcon(mainWindow));
+  ipcMain.handle("save-preferences", async (_event, preferences) => {
+    const saved = await backend.savePreferences(preferences);
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.setTitle(String(saved.windowTitle || saved.appTitle || "AMERP"));
+      if (saved.appIconPath) {
+        mainWindow.setIcon(saved.appIconPath);
+      }
+    }
+    try {
+      await backend.syncDesktopShortcut(saved);
+    } catch (error) {
+      console.warn(`Unable to update desktop shortcut icon: ${error.message}`);
+    }
+    return saved;
+  });
 
   ipcMain.handle("list-jobs", () => backend.listJobSummaries());
+  ipcMain.handle("list-kanban-cards", () => backend.listKanbanCards());
+  ipcMain.handle("load-kanban-card", (_event, id, options) => backend.loadKanbanCard(id, options || {}));
+  ipcMain.handle("save-kanban-card", (_event, card) => backend.saveKanbanCard(card));
+  ipcMain.handle("archive-kanban-card", (_event, id) => backend.archiveKanbanCard(id));
+  ipcMain.handle("unarchive-kanban-card", (_event, id) => backend.unarchiveKanbanCard(id));
+  ipcMain.handle("delete-kanban-card", (_event, id) => backend.deleteKanbanCard(id));
+  ipcMain.handle("choose-kanban-photo", (_event, cardId) => backend.chooseKanbanPhoto(cardId, mainWindow));
+  ipcMain.handle("import-kanban-from-url", (_event, url) => backend.importKanbanFromUrl(url));
+  ipcMain.handle("ai-fill-kanban-card", (_event, card) => backend.aiFillKanbanCard(card));
+  ipcMain.handle("generate-kanban-image", (_event, card) => backend.generateKanbanImage(card));
+  ipcMain.handle("export-kanban-pdf", (_event, cardId, destinationPath, sizeId) => backend.exportKanbanPdf(cardId, destinationPath, sizeId));
   ipcMain.handle("generate-next-job-number", () => backend.generateNextJobNumber());
+  ipcMain.handle("generate-next-kanban-inventory-number", () => backend.generateNextKanbanInventoryNumber());
   ipcMain.handle("list-customers", () => backend.listCustomers());
   ipcMain.handle("save-customer", (_event, customer) => backend.saveCustomer(customer));
   ipcMain.handle("load-job", (_event, id, options) => backend.loadJob(id, options || {}));
@@ -138,13 +241,41 @@ ipcMain.handle("choose-operation-images", (_event, jobId, partId, operationId) =
   ipcMain.handle("read-audit-log", (_event, limit) => backend.readAuditLog(limit || 200));
 
   await backend.ensureDataFolderAtStartup(mainWindow);
-  createWindow();
+  const preferences = await backend.loadPreferences();
+  createWindow(
+    String(preferences.windowTitle || preferences.appTitle || "AMERP"),
+    String(preferences.appIconPath || "")
+  );
+  pendingDeepLink = extractDeepLink(process.argv);
+  if (pendingDeepLink) {
+    deliverDeepLink(pendingDeepLink);
+  }
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       createWindow();
     }
   });
+});
+
+app.on("second-instance", (_event, argv) => {
+  const payload = extractDeepLink(argv);
+  if (payload) {
+    deliverDeepLink(payload);
+  } else if (mainWindow && !mainWindow.isDestroyed()) {
+    if (mainWindow.isMinimized()) {
+      mainWindow.restore();
+    }
+    mainWindow.focus();
+  }
+});
+
+app.on("open-url", (event, url) => {
+  event.preventDefault();
+  const payload = parseDeepLink(url);
+  if (payload) {
+    deliverDeepLink(payload);
+  }
 });
 
 app.on("window-all-closed", () => {

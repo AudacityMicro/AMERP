@@ -6,10 +6,31 @@ contextBridge.exposeInMainWorld("amerp", {
   selectDataFolder: () => invoke("select-data-folder"),
   getDataFolder: () => invoke("get-data-folder"),
   loadWorkspace: () => invoke("load-workspace"),
+  chooseBrandIcon: () => invoke("choose-brand-icon"),
   savePreferences: (preferences) => invoke("save-preferences", preferences),
+  onDeepLink: (handler) => {
+    if (typeof handler !== "function") {
+      return () => {};
+    }
+    const listener = (_event, payload) => handler(payload);
+    ipcRenderer.on("amerp-deep-link", listener);
+    return () => ipcRenderer.removeListener("amerp-deep-link", listener);
+  },
 
   listJobs: () => invoke("list-jobs"),
+  listKanbanCards: () => invoke("list-kanban-cards"),
+  loadKanbanCard: (id, options) => invoke("load-kanban-card", id, options),
+  saveKanbanCard: (card) => invoke("save-kanban-card", card),
+  archiveKanbanCard: (id) => invoke("archive-kanban-card", id),
+  unarchiveKanbanCard: (id) => invoke("unarchive-kanban-card", id),
+  deleteKanbanCard: (id) => invoke("delete-kanban-card", id),
+  chooseKanbanPhoto: (cardId) => invoke("choose-kanban-photo", cardId),
+  importKanbanFromUrl: (url) => invoke("import-kanban-from-url", url),
+  aiFillKanbanCard: (card) => invoke("ai-fill-kanban-card", card),
+  generateKanbanImage: (card) => invoke("generate-kanban-image", card),
+  exportKanbanPdf: (cardId, destinationPath, sizeId) => invoke("export-kanban-pdf", cardId, destinationPath, sizeId),
   generateNextJobNumber: () => invoke("generate-next-job-number"),
+  generateNextKanbanInventoryNumber: () => invoke("generate-next-kanban-inventory-number"),
   listCustomers: () => invoke("list-customers"),
   saveCustomer: (customer) => invoke("save-customer", customer),
   loadJob: (id, options) => invoke("load-job", id, options),

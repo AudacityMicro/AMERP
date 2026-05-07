@@ -5,6 +5,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const crypto = require("node:crypto");
 const { spawn } = require("node:child_process");
+const { pathToFileURL } = require("node:url");
 
 const {
   DEFAULT_LIBRARY_DEFINITIONS,
@@ -31,10 +32,57 @@ const {
   writeJson,
   writeText
 } = require("./utils.cjs");
+const {
+  extractProductData,
+  inferVendorName
+} = require("./kanban-vendors.cjs");
+const {
+  enrichKanbanCardDraft,
+  generateKanbanReferenceImage
+} = require("./kanban-ai.cjs");
 
 const CONFIG_FILE = "amerp-config.json";
 const LOCK_TTL_MS = 8 * 60 * 60 * 1000;
 const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"]);
+const KANBAN_DEEP_LINK_PREFIX = "amerp://open/kanban/";
+const KANBAN_VENDOR_SKU_PREFIX = "Vendor SKU / Part #:";
+const BROWSER_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36";
+const KANBAN_DEPARTMENT_COLORS = ["#2563eb", "#f59e0b", "#0f766e", "#7c3aed", "#dc2626", "#475569"];
+const DEFAULT_KANBAN_CATEGORIES = [
+  "Cutting Tools",
+  "Shop Supplies",
+  "Maintenance",
+  "PPE",
+  "Packaging",
+  "Inspection",
+  "Office",
+  "Hardware"
+];
+const DEFAULT_KANBAN_DEPARTMENTS = [
+  { id: "kanban-dept-machining", name: "Machining", color: "#2563eb" },
+  { id: "kanban-dept-quality", name: "Quality", color: "#0f766e" },
+  { id: "kanban-dept-maintenance", name: "Maintenance", color: "#f59e0b" },
+  { id: "kanban-dept-shop-supplies", name: "Shop Supplies", color: "#7c3aed" }
+];
+const DEFAULT_KANBAN_PRINT_SIZES = [
+  { id: "kanban-size-2x4", name: '2" x 4"', widthIn: 2, heightIn: 4 },
+  { id: "kanban-size-2x3", name: '2" x 3"', widthIn: 2, heightIn: 3 },
+  { id: "kanban-size-3x5", name: '3" x 5"', widthIn: 3, heightIn: 5 },
+  { id: "kanban-size-4x6", name: '4" x 6"', widthIn: 4, heightIn: 6 }
+];
+
+function mergeKanbanOrderingNotes(notes, vendorPartNumber) {
+  const trimmedNotes = String(notes || "").trim();
+  const trimmedPartNumber = String(vendorPartNumber || "").trim();
+  if (!trimmedPartNumber) {
+    return trimmedNotes;
+  }
+  if (trimmedNotes.toLowerCase().includes(trimmedPartNumber.toLowerCase())) {
+    return trimmedNotes;
+  }
+  const line = `${KANBAN_VENDOR_SKU_PREFIX} ${trimmedPartNumber}`;
+  return trimmedNotes ? `${trimmedNotes}\n${line}` : line;
+}
 
 class ERPBackend {
   constructor({ app, devServerUrl, pythonPath }) {
@@ -79,6 +127,7 @@ class ERPBackend {
       "config",
       "customers",
       "jobs",
+      "kanban",
       "materials",
       "metrology/instruments",
       "metrology/standards",
@@ -127,6 +176,7 @@ class ERPBackend {
       await writeJson(indexPath, {
         generatedAt: nowIso(),
         jobs: [],
+        kanbanCards: [],
         materials: [],
         instruments: []
       });
@@ -200,10 +250,65 @@ class ERPBackend {
       const items = Array.isArray(value) ? value : fallback;
       return Array.from(new Set(items.map((item) => String(item || "").trim()).filter(Boolean)));
     };
+    const normalizeKanbanDepartments = (value) => {
+      const items = Array.isArray(value) && value.length ? value : DEFAULT_KANBAN_DEPARTMENTS;
+      return items
+        .map((item, index) => {
+          if (typeof item === "string") {
+            const name = String(item || "").trim();
+            return name ? {
+              id: `kanban-dept-${slugify(name) || index + 1}`,
+              name,
+              color: KANBAN_DEPARTMENT_COLORS[index % KANBAN_DEPARTMENT_COLORS.length]
+            } : null;
+          }
+          const name = String(item?.name || "").trim();
+          if (!name) {
+            return null;
+          }
+          const color = String(item?.color || KANBAN_DEPARTMENT_COLORS[index % KANBAN_DEPARTMENT_COLORS.length]).trim() || KANBAN_DEPARTMENT_COLORS[index % KANBAN_DEPARTMENT_COLORS.length];
+          return {
+            id: String(item?.id || `kanban-dept-${slugify(name) || index + 1}`).trim(),
+            name,
+            color
+          };
+        })
+        .filter(Boolean);
+    };
+    const normalizeKanbanPrintSizes = (value) => {
+      const items = Array.isArray(value) && value.length ? value : DEFAULT_KANBAN_PRINT_SIZES;
+      return items
+        .map((item, index) => {
+          const name = String(item?.name || "").trim();
+          const widthIn = Number(item?.widthIn);
+          const heightIn = Number(item?.heightIn);
+          if (!name || !Number.isFinite(widthIn) || !Number.isFinite(heightIn) || widthIn <= 0 || heightIn <= 0) {
+            return null;
+          }
+          return {
+            id: String(item?.id || `kanban-size-${slugify(name) || index + 1}`).trim(),
+            name,
+            widthIn,
+            heightIn
+          };
+        })
+        .filter(Boolean);
+    };
+    const kanbanDepartments = normalizeKanbanDepartments(preferences?.kanbanDepartments);
+    const kanbanPrintSizes = normalizeKanbanPrintSizes(preferences?.kanbanPrintSizes);
+    const defaultKanbanPrintSizeId = kanbanPrintSizes.some((item) => item.id === preferences?.defaultKanbanPrintSizeId)
+      ? preferences.defaultKanbanPrintSizeId
+      : (kanbanPrintSizes[0]?.id || DEFAULT_KANBAN_PRINT_SIZES[0].id);
     return {
+      appTitle: String(preferences?.appTitle || "AMERP").trim() || "AMERP",
+      appTagline: String(preferences?.appTagline || "Operator ERP").trim() || "Operator ERP",
+      windowTitle: String(preferences?.windowTitle || "AMERP").trim() || "AMERP",
+      appIconPath: String(preferences?.appIconPath || "").trim(),
       dueSoonDays: Number.isFinite(Number(preferences?.dueSoonDays)) ? Number(preferences.dueSoonDays) : 14,
       jobPrefix: String(preferences?.jobPrefix || "J03C").trim(),
       startingJobNumber: Number.isFinite(Number(preferences?.startingJobNumber)) ? Number(preferences.startingJobNumber) : 600,
+      kanbanInventoryPrefix: String(preferences?.kanbanInventoryPrefix || "J03C").trim(),
+      kanbanStartingInventoryNumber: Number.isFinite(Number(preferences?.kanbanStartingInventoryNumber)) ? Number(preferences.kanbanStartingInventoryNumber) : 600,
       resultsColumns: Array.from(new Set(resultsColumns)),
       materialFamilies: this.normalizeMaterialFamilies(sourceFamilies),
       metrologyToolTypes: listPreference(preferences?.metrologyToolTypes, ["Micrometer", "Caliper", "Indicator", "Pin Gage", "Thread Plug Gage", "Height Gage"]),
@@ -212,6 +317,13 @@ class ERPBackend {
       metrologyLocations: listPreference(preferences?.metrologyLocations, ["QC", "Inspection Bench", "Machine Shop", "Tool Crib"]),
       metrologyDepartments: listPreference(preferences?.metrologyDepartments, ["Quality", "Machining", "Assembly"]),
       metrologyStatuses: listPreference(preferences?.metrologyStatuses, ["In service", "Due for calibration", "Overdue", "Retired"]),
+      kanbanDepartments,
+      kanbanStorageLocations: listPreference(preferences?.kanbanStorageLocations, ["Stock Room", "Tool Crib", "Receiving", "Maintenance Bench"]),
+      kanbanVendors: listPreference(preferences?.kanbanVendors, ["McMaster-Carr", "MSC", "Amazon"]),
+      kanbanCategories: listPreference(preferences?.kanbanCategories, DEFAULT_KANBAN_CATEGORIES),
+      kanbanPrintSizes,
+      defaultKanbanPrintSizeId,
+      openaiApiKey: String(preferences?.openaiApiKey || "").trim(),
       lastInitializedAt: String(preferences?.lastInitializedAt || nowIso()).trim() || nowIso()
     };
   }
@@ -228,6 +340,249 @@ class ERPBackend {
     await writeJson(this.getPreferencesPath(dataRoot), next);
     await this.appendAudit("preferences_saved", "preferences", "Saved application settings.");
     return next;
+  }
+
+  async chooseBrandIcon(mainWindow = null) {
+    const result = await dialog.showOpenDialog(mainWindow || null, {
+      title: "Choose Branding Icon",
+      properties: ["openFile"],
+      filters: [
+        { name: "Images", extensions: ["png", "ico", "jpg", "jpeg", "bmp", "gif", "webp"] },
+        { name: "All files", extensions: ["*"] }
+      ]
+    });
+    if (result.canceled || !result.filePaths?.[0]) {
+      return null;
+    }
+    return path.resolve(result.filePaths[0]);
+  }
+
+  async syncDesktopShortcut(preferences = {}) {
+    if (process.platform !== "win32") {
+      return false;
+    }
+    const desktopPath = this.app.getPath("desktop");
+    const targetPath = path.join(this.app.getAppPath(), "Start-App.cmd");
+    const appTitle = String(preferences?.appTitle || "AMERP").trim() || "AMERP";
+    const iconLocation = String(preferences?.appIconPath || "").trim() || "C:\\Windows\\System32\\SHELL32.dll,13";
+    const psString = (value) => `'${String(value || "").replace(/'/g, "''")}'`;
+    const script = [
+      `$desktop = ${psString(desktopPath)}`,
+      `$target = ${psString(targetPath)}`,
+      `$icon = ${psString(iconLocation)}`,
+      `$names = @('AMERP.lnk', ${psString(`${appTitle}.lnk`)})`,
+      `$shell = New-Object -ComObject WScript.Shell`,
+      `Get-ChildItem -Path $desktop -Filter *.lnk | ForEach-Object {`,
+      `  $shortcut = $shell.CreateShortcut($_.FullName)`,
+      `  if ($shortcut.TargetPath -ieq $target -or $names -contains $_.Name) {`,
+      `    $shortcut.IconLocation = $icon`,
+      `    $shortcut.Save()`,
+      `  }`,
+      `}`
+    ].join("; ");
+    await this.runPowerShell(script);
+    return true;
+  }
+
+  buildKanbanDeepLink(cardId) {
+    return `${KANBAN_DEEP_LINK_PREFIX}${encodeURIComponent(cardId)}`;
+  }
+
+  isGenericKanbanItemName(url, itemName) {
+    const normalized = String(itemName || "").trim().toLowerCase();
+    if (!normalized) {
+      return true;
+    }
+    try {
+      const hostname = new URL(url).hostname.toLowerCase().replace(/^www\./, "");
+      const hostTokens = hostname.split(".").filter(Boolean);
+      return normalized === hostname
+        || hostTokens.includes(normalized)
+        || normalized === "mcmaster-carr"
+        || normalized === "mscdirect.com"
+        || normalized === "mscdirect";
+    } catch {
+      return false;
+    }
+  }
+
+  isGenericKanbanDescription(description) {
+    const normalized = String(description || "").trim().toLowerCase();
+    return !normalized
+      || normalized.includes("complete source for your plant")
+      || normalized.includes("products ordered ship from stock")
+      || normalized.includes("pardon our interruption");
+  }
+
+  isBotChallengeHtml(html) {
+    const normalized = String(html || "").toLowerCase();
+    return normalized.includes("pardon our interruption")
+      || normalized.includes("imperva")
+      || normalized.includes("window.onprotectioninitialized")
+      || normalized.includes("cookieisset")
+      || normalized.includes("showblockpage");
+  }
+
+  kanbanImportConfidenceScore(url, imported, html) {
+    let score = 0;
+    if (imported?.itemName && !this.isGenericKanbanItemName(url, imported.itemName)) {
+      score += 3;
+    }
+    if (imported?.description && !this.isGenericKanbanDescription(imported.description)) {
+      score += 2;
+    }
+    if (imported?.imageUrl && !String(imported.imageUrl).toLowerCase().includes("favicon")) {
+      score += 2;
+    }
+    if (imported?.vendorPartNumber) {
+      score += 1;
+    }
+    if (imported?.packSize) {
+      score += 1;
+    }
+    if (this.isBotChallengeHtml(html)) {
+      score -= 4;
+    }
+    return score;
+  }
+
+  shouldUseRenderedKanbanFallback(url, html, imported) {
+    if (this.isBotChallengeHtml(html)) {
+      return true;
+    }
+    return this.kanbanImportConfidenceScore(url, imported, html) < 3;
+  }
+
+  mergeKanbanImportedData(url, primary, fallback) {
+    const firstUseful = (...values) => values.find((value) => String(value || "").trim());
+    const preferredItemName = !this.isGenericKanbanItemName(url, fallback?.itemName) ? fallback?.itemName : primary?.itemName;
+    const preferredDescription = !this.isGenericKanbanDescription(fallback?.description) ? fallback?.description : primary?.description;
+    const preferredImage = (fallback?.imageUrl && !String(fallback.imageUrl).toLowerCase().includes("favicon")) ? fallback.imageUrl : primary?.imageUrl;
+    return {
+      vendor: firstUseful(fallback?.vendor, primary?.vendor),
+      itemName: firstUseful(preferredItemName, fallback?.itemName, primary?.itemName),
+      vendorPartNumber: firstUseful(fallback?.vendorPartNumber, primary?.vendorPartNumber),
+      description: firstUseful(preferredDescription, fallback?.description, primary?.description),
+      purchaseUrl: firstUseful(fallback?.purchaseUrl, primary?.purchaseUrl),
+      imageUrl: firstUseful(preferredImage, fallback?.imageUrl, primary?.imageUrl),
+      packSize: firstUseful(fallback?.packSize, primary?.packSize),
+      warnings: [...new Set([...(primary?.warnings || []), ...(fallback?.warnings || [])])]
+    };
+  }
+
+  async fetchHtml(url) {
+    const response = await fetch(url, {
+      headers: {
+        "user-agent": BROWSER_USER_AGENT,
+        accept: "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "accept-language": "en-US,en;q=0.9"
+      },
+      redirect: "follow"
+    });
+    if (!response.ok) {
+      throw new Error(`Vendor page returned ${response.status} ${response.statusText}`.trim());
+    }
+    return response.text();
+  }
+
+  async fetchRenderedHtml(url, waitMs = 2500) {
+    const window = new BrowserWindow({
+      show: false,
+      width: 1280,
+      height: 900,
+      webPreferences: {
+        sandbox: false,
+        contextIsolation: true,
+        javascript: true
+      }
+    });
+    try {
+      const loadPromise = new Promise((resolve, reject) => {
+        let settled = false;
+        const finish = (handler) => (value) => {
+          if (settled) return;
+          settled = true;
+          handler(value);
+        };
+        const resolveOnce = finish(resolve);
+        const rejectOnce = finish(reject);
+        const timer = setTimeout(() => rejectOnce(new Error("Timed out waiting for rendered page content.")), 20000);
+        window.webContents.once("did-fail-load", (_event, _code, description) => {
+          clearTimeout(timer);
+          rejectOnce(new Error(description || "Failed to load rendered page."));
+        });
+        window.webContents.once("did-finish-load", () => {
+          setTimeout(() => {
+            clearTimeout(timer);
+            resolveOnce();
+          }, waitMs);
+        });
+      });
+      await window.loadURL(url, { userAgent: BROWSER_USER_AGENT });
+      await loadPromise;
+      return await window.webContents.executeJavaScript("document.documentElement.outerHTML", true);
+    } finally {
+      window.destroy();
+    }
+  }
+
+  async loadKanbanProductContext(url) {
+    const html = await this.fetchHtml(url);
+    let imported = extractProductData(url, html);
+    let finalHtml = html;
+    let usedRenderedFallback = false;
+    if (this.shouldUseRenderedKanbanFallback(url, html, imported)) {
+      try {
+        const renderedHtml = await this.fetchRenderedHtml(url);
+        const renderedImported = extractProductData(url, renderedHtml);
+        imported = this.mergeKanbanImportedData(url, imported, renderedImported);
+        finalHtml = renderedHtml;
+        usedRenderedFallback = true;
+      } catch (error) {
+        imported = {
+          ...imported,
+          warnings: [...(imported.warnings || []), `Rendered page fallback did not improve extraction: ${error.message}`]
+        };
+      }
+    }
+    return { html: finalHtml, imported, usedRenderedFallback };
+  }
+
+  async downloadRemoteFile(url, destinationFolder, preferredBaseName = "image") {
+    const response = await fetch(url, {
+      headers: {
+        "user-agent": BROWSER_USER_AGENT,
+        accept: "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8"
+      },
+      redirect: "follow"
+    });
+    if (!response.ok) {
+      throw new Error(`Image download returned ${response.status} ${response.statusText}`.trim());
+    }
+    const contentType = String(response.headers.get("content-type") || "").toLowerCase();
+    const extension = contentType.includes("png")
+      ? ".png"
+      : contentType.includes("jpeg") || contentType.includes("jpg")
+        ? ".jpg"
+        : contentType.includes("webp")
+          ? ".webp"
+          : contentType.includes("gif")
+            ? ".gif"
+            : contentType.includes("bmp")
+              ? ".bmp"
+              : path.extname(new URL(response.url || url).pathname) || ".png";
+    const baseName = safeFileName(preferredBaseName, "image");
+    await ensureDir(destinationFolder);
+    let fileName = `${baseName}${extension}`;
+    let counter = 1;
+    while (await pathExists(path.join(destinationFolder, fileName))) {
+      fileName = `${baseName}-${counter}${extension}`;
+      counter += 1;
+    }
+    const destination = path.join(destinationFolder, fileName);
+    const buffer = Buffer.from(await response.arrayBuffer());
+    await fs.writeFile(destination, buffer);
+    return destination;
   }
 
   getLockPath(dataRoot, kind, id) {
@@ -337,7 +692,7 @@ class ERPBackend {
       }
       templates.push({
         ...template,
-        libraryNames: toDisplayList(template.libraryNames),
+        libraryNames: this.normalizeTemplateLibraryNames(template.libraryNames),
         defaultParameters: Array.isArray(template.defaultParameters) ? template.defaultParameters : [],
         defaultSteps: Array.isArray(template.defaultSteps) ? template.defaultSteps : []
       });
@@ -351,13 +706,17 @@ class ERPBackend {
       id: template?.id || randomId("template"),
       name: String(template?.name || "New Template").trim(),
       category: String(template?.category || "General").trim(),
-      libraryNames: toDisplayList(template?.libraryNames),
+      libraryNames: this.normalizeTemplateLibraryNames(template?.libraryNames),
       defaultParameters: Array.isArray(template?.defaultParameters) ? template.defaultParameters : [],
       defaultSteps: Array.isArray(template?.defaultSteps) ? template.defaultSteps : []
     };
     await writeJson(path.join(dataRoot, "templates", "operations", `${safeFileName(normalized.id)}.json`), normalized);
     await this.appendAudit("template_saved", normalized.id, `Saved template ${normalized.name}.`);
     return normalized;
+  }
+
+  normalizeTemplateLibraryNames(libraryNames) {
+    return toDisplayList(libraryNames).filter((name) => name !== "cuttingTools");
   }
 
   normalizeCustomer(customer) {
@@ -468,6 +827,393 @@ class ERPBackend {
     return true;
   }
 
+  async listKanbanCards() {
+    const dataRoot = await this.requireDataFolder();
+    const root = path.join(dataRoot, "kanban");
+    const entries = await fs.readdir(root, { withFileTypes: true });
+    const cards = [];
+    for (const entry of entries) {
+      if (!entry.isDirectory()) {
+        continue;
+      }
+      const card = await readJson(path.join(root, entry.name, "card.json"), null);
+      if (!card?.id) {
+        continue;
+      }
+      const normalized = this.normalizeKanbanCard(card);
+      cards.push({
+        id: normalized.id,
+        itemName: normalized.itemName,
+        internalInventoryNumber: normalized.internalInventoryNumber,
+        vendor: normalized.vendor,
+        category: normalized.category,
+        department: normalized.department,
+        storageLocation: normalized.storageLocation,
+        orderingNotes: normalized.orderingNotes,
+        active: normalized.active,
+        archivedAt: normalized.archivedAt,
+        updatedAt: normalized.updatedAt
+      });
+    }
+    return cards.sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
+  }
+
+  async loadKanbanCard(cardId, options = {}) {
+    const dataRoot = await this.requireDataFolder();
+    const root = this.getKanbanRoot(dataRoot, cardId);
+    const card = await readJson(path.join(root, "card.json"), null);
+    if (!card) {
+      return null;
+    }
+    if (options.acquireLock) {
+      await this.acquireLock("kanban", cardId, path.join(root, "card.json"));
+    }
+    return this.normalizeKanbanCard(card);
+  }
+
+  async saveKanbanCard(card) {
+    const dataRoot = await this.requireDataFolder();
+    const timestamp = nowIso();
+    const normalized = this.normalizeKanbanCard({
+      ...card,
+      createdAt: card?.createdAt || timestamp,
+      updatedAt: timestamp
+    });
+    const nextInventoryNumber = normalizeText(normalized.internalInventoryNumber);
+    if (nextInventoryNumber) {
+      const existingCards = await this.listKanbanCards();
+      const duplicate = existingCards.find((item) => item.id !== normalized.id && normalizeText(item.internalInventoryNumber) === nextInventoryNumber);
+      if (duplicate) {
+        throw new Error(`Kanban inventory number already exists: ${normalized.internalInventoryNumber}`);
+      }
+    }
+    const root = this.getKanbanRoot(dataRoot, normalized.id);
+    await ensureDir(path.join(root, "assets"));
+    await writeJson(path.join(root, "card.json"), normalized);
+    await writeText(path.join(root, "history.md"), this.kanbanHistoryMarkdown(normalized));
+    await this.appendAudit("kanban_saved", normalized.id, `Saved kanban card ${normalized.itemName || normalized.internalInventoryNumber || normalized.id}.`);
+    await this.rebuildIndex();
+    return this.loadKanbanCard(normalized.id);
+  }
+
+  async archiveKanbanCard(cardId) {
+    const card = await this.loadKanbanCard(cardId);
+    if (!card) {
+      throw new Error(`Kanban card not found: ${cardId}`);
+    }
+    const saved = await this.saveKanbanCard({
+      ...card,
+      active: false,
+      archivedAt: nowIso()
+    });
+    await this.appendAudit("kanban_archived", cardId, `Archived kanban card ${card.itemName || card.internalInventoryNumber || card.id}.`);
+    return saved;
+  }
+
+  async unarchiveKanbanCard(cardId) {
+    const card = await this.loadKanbanCard(cardId);
+    if (!card) {
+      throw new Error(`Kanban card not found: ${cardId}`);
+    }
+    const saved = await this.saveKanbanCard({
+      ...card,
+      active: true,
+      archivedAt: ""
+    });
+    await this.appendAudit("kanban_unarchived", cardId, `Unarchived kanban card ${card.itemName || card.internalInventoryNumber || card.id}.`);
+    return saved;
+  }
+
+  async deleteKanbanCard(cardId) {
+    const card = await this.loadKanbanCard(cardId);
+    if (!card) {
+      throw new Error(`Kanban card not found: ${cardId}`);
+    }
+    if (card.active !== false) {
+      throw new Error("Only archived Kanban cards can be deleted.");
+    }
+    const root = this.kanbanRoot(cardId);
+    await removePath(root);
+    await this.appendAudit("kanban_deleted", cardId, `Deleted archived kanban card ${card.itemName || card.internalInventoryNumber || card.id}.`);
+    await this.rebuildIndex();
+    return { ok: true };
+  }
+
+  async chooseKanbanPhoto(cardId, mainWindow = null) {
+    const result = await dialog.showOpenDialog(mainWindow || null, {
+      title: "Choose Kanban Photo",
+      properties: ["openFile"],
+      filters: [{ name: "Images", extensions: ["png", "jpg", "jpeg", "webp", "gif", "bmp"] }]
+    });
+    if (result.canceled || !result.filePaths?.[0]) {
+      return null;
+    }
+    const sourcePath = path.resolve(result.filePaths[0]);
+    const extension = path.extname(sourcePath).toLowerCase();
+    if (!IMAGE_EXTENSIONS.has(extension)) {
+      throw new Error("Only image files can be used as Kanban photos.");
+    }
+    const dataRoot = await this.requireDataFolder();
+    const root = this.getKanbanRoot(dataRoot, cardId || randomId("kanban"));
+    const destination = await copyFileUnique(sourcePath, path.join(root, "assets"), "photo-");
+    return this.normalizeKanbanPhoto({
+      id: randomId("photo"),
+      originalFilename: path.basename(sourcePath),
+      storedFilename: path.basename(destination),
+      relativePath: path.relative(dataRoot, destination).replaceAll("\\", "/"),
+      attachedAt: nowIso()
+    });
+  }
+
+  async importKanbanFromUrl(url) {
+    const purchaseUrl = String(url || "").trim();
+    if (!purchaseUrl) {
+      throw new Error("Enter a product URL to import.");
+    }
+    let validatedUrl = "";
+    try {
+      const parsed = new URL(purchaseUrl);
+      if (!["http:", "https:"].includes(parsed.protocol)) {
+        throw new Error("Only http and https URLs are supported.");
+      }
+      validatedUrl = parsed.toString();
+    } catch (error) {
+      throw new Error(`Invalid product URL: ${error.message}`);
+    }
+
+    const dataRoot = await this.requireDataFolder();
+    const preferences = await this.loadPreferences(dataRoot);
+    const cardId = randomId("kanban");
+    const inferredVendor = inferVendorName(validatedUrl);
+    const warnings = [];
+    let draft = this.normalizeKanbanCard({
+      id: cardId,
+      purchaseUrl: validatedUrl,
+      vendor: inferredVendor
+    });
+
+    try {
+      const { html, imported, usedRenderedFallback } = await this.loadKanbanProductContext(validatedUrl);
+      warnings.push(...(imported.warnings || []));
+      if (usedRenderedFallback) {
+        warnings.push("Used browser-rendered page fallback for better product extraction.");
+      }
+      const baseDraft = this.normalizeKanbanCard({
+        ...draft,
+        itemName: imported.itemName || draft.itemName,
+        vendor: imported.vendor || draft.vendor,
+        purchaseUrl: imported.purchaseUrl || draft.purchaseUrl,
+        packSize: imported.packSize || draft.packSize,
+        description: imported.description || draft.description,
+        orderingNotes: mergeKanbanOrderingNotes(draft.orderingNotes, imported.vendorPartNumber)
+      });
+      draft = baseDraft;
+      const imagePromise = imported.imageUrl
+        ? this.downloadRemoteFile(imported.imageUrl, path.join(this.getKanbanRoot(dataRoot, cardId), "assets"), "vendor-photo")
+        : null;
+      const aiPromise = preferences.openaiApiKey
+        ? enrichKanbanCardDraft({
+          apiKey: preferences.openaiApiKey,
+          card: draft,
+          categories: preferences.kanbanCategories || [],
+          vendorContext: { html, scraped: imported }
+        })
+        : null;
+
+      if (!preferences.openaiApiKey) {
+        warnings.push("No OpenAI API key is set. Imported basic page metadata only.");
+      }
+
+      const [imageResult, aiResult] = await Promise.allSettled([
+        imagePromise || Promise.resolve(null),
+        aiPromise || Promise.resolve(null)
+      ]);
+
+      if (imageResult.status === "fulfilled" && imageResult.value) {
+        draft.photo = this.normalizeKanbanPhoto({
+          id: randomId("photo"),
+          originalFilename: path.basename(new URL(imported.imageUrl).pathname) || "vendor-photo",
+          storedFilename: path.basename(imageResult.value),
+          relativePath: path.relative(dataRoot, imageResult.value).replaceAll("\\", "/"),
+          sourceUrl: imported.imageUrl,
+          attachedAt: nowIso()
+        });
+      } else if (imageResult.status === "rejected") {
+        warnings.push(`Could not download product thumbnail: ${imageResult.reason.message}`);
+      }
+
+      if (aiResult.status === "fulfilled" && aiResult.value) {
+        const enriched = aiResult.value;
+        draft = this.normalizeKanbanCard({
+          ...draft,
+          itemName: enriched.itemName || draft.itemName,
+          description: enriched.description || draft.description,
+          orderingNotes: enriched.orderingNotes || draft.orderingNotes,
+          category: enriched.category || draft.category,
+          vendor: enriched.vendor || draft.vendor,
+          minimumLevel: enriched.minimumLevel || draft.minimumLevel,
+          maximumLevel: enriched.maximumLevel || draft.maximumLevel,
+          orderQuantity: enriched.orderQuantity || draft.orderQuantity,
+          packSize: enriched.packSize || draft.packSize
+        });
+      } else if (aiResult.status === "rejected") {
+        warnings.push(`Could not enrich the card with AI: ${aiResult.reason.message}`);
+      }
+    } catch (error) {
+      warnings.push(`Could not import product details automatically: ${error.message}`);
+    }
+
+    await this.appendAudit("kanban_url_import_prepared", cardId, `Prepared kanban card draft from ${validatedUrl}.`);
+    return { card: draft, warnings };
+  }
+
+  async aiFillKanbanCard(card) {
+    const preferences = await this.loadPreferences();
+    const normalizedCard = this.normalizeKanbanCard(card);
+    const warnings = [];
+    let vendorContext = null;
+
+    if (normalizedCard.purchaseUrl) {
+      try {
+        const { html, imported: scraped, usedRenderedFallback } = await this.loadKanbanProductContext(normalizedCard.purchaseUrl);
+        warnings.push(...(scraped.warnings || []));
+        if (usedRenderedFallback) {
+          warnings.push("Used browser-rendered page fallback for better product extraction.");
+        }
+        vendorContext = { html, scraped };
+      } catch (error) {
+        warnings.push(`Could not refresh vendor page details: ${error.message}`);
+      }
+    }
+
+    const baseCard = this.normalizeKanbanCard({
+      ...normalizedCard,
+      vendor: vendorContext?.scraped?.vendor || normalizedCard.vendor,
+      purchaseUrl: vendorContext?.scraped?.purchaseUrl || normalizedCard.purchaseUrl,
+      packSize: vendorContext?.scraped?.packSize || normalizedCard.packSize,
+      orderingNotes: mergeKanbanOrderingNotes(normalizedCard.orderingNotes, vendorContext?.scraped?.vendorPartNumber)
+    });
+
+    const enriched = await enrichKanbanCardDraft({
+      apiKey: preferences.openaiApiKey,
+      card: baseCard,
+      categories: preferences.kanbanCategories || [],
+      vendorContext
+    });
+
+    const updatedCard = this.normalizeKanbanCard({
+      ...baseCard,
+      itemName: enriched.itemName || baseCard.itemName,
+      description: enriched.description || baseCard.description,
+      orderingNotes: enriched.orderingNotes || baseCard.orderingNotes,
+      category: enriched.category || baseCard.category,
+      vendor: enriched.vendor || baseCard.vendor,
+      minimumLevel: enriched.minimumLevel || baseCard.minimumLevel,
+      maximumLevel: enriched.maximumLevel || baseCard.maximumLevel,
+      orderQuantity: enriched.orderQuantity || baseCard.orderQuantity,
+      packSize: enriched.packSize || baseCard.packSize
+    });
+    await this.appendAudit("kanban_ai_fill_prepared", updatedCard.id, `Prepared AI enrichment for kanban card ${updatedCard.itemName || updatedCard.internalInventoryNumber || updatedCard.id}.`);
+    return {
+      card: updatedCard,
+      warnings
+    };
+  }
+
+  async generateKanbanImage(card) {
+    const dataRoot = await this.requireDataFolder();
+    const preferences = await this.loadPreferences(dataRoot);
+    const normalizedCard = this.normalizeKanbanCard(card);
+    const generated = await generateKanbanReferenceImage({
+      apiKey: preferences.openaiApiKey,
+      card: normalizedCard
+    });
+    const assetsRoot = path.join(this.getKanbanRoot(dataRoot, normalizedCard.id), "assets");
+    await ensureDir(assetsRoot);
+    const filename = `ai-generated-${Date.now()}${generated.extension || ".png"}`;
+    const destination = path.join(assetsRoot, filename);
+    await fs.writeFile(destination, generated.buffer);
+    const updatedCard = this.normalizeKanbanCard({
+      ...normalizedCard,
+      photo: {
+        id: randomId("photo"),
+        originalFilename: filename,
+        storedFilename: filename,
+        relativePath: path.relative(dataRoot, destination).replaceAll("\\", "/"),
+        sourceUrl: "ai-generated",
+        attachedAt: nowIso()
+      }
+    });
+    await this.appendAudit("kanban_ai_image_generated", updatedCard.id, `Generated AI image for kanban card ${updatedCard.itemName || updatedCard.internalInventoryNumber || updatedCard.id}.`);
+    return updatedCard;
+  }
+
+  async exportKanbanPdf(cardId, destinationPath, sizeId = "") {
+    const dataRoot = await this.requireDataFolder();
+    const card = await this.loadKanbanCard(cardId);
+    const preferences = await this.loadPreferences(dataRoot);
+    if (!card) {
+      throw new Error("Kanban card not found.");
+    }
+    const selectedSize = (preferences.kanbanPrintSizes || []).find((item) => item.id === sizeId)
+      || (preferences.kanbanPrintSizes || []).find((item) => item.id === preferences.defaultKanbanPrintSizeId)
+      || DEFAULT_KANBAN_PRINT_SIZES[0];
+    let outputPath = destinationPath;
+    if (!outputPath) {
+      const result = await dialog.showSaveDialog({
+        title: "Export Kanban Card PDF",
+        defaultPath: path.join(dataRoot, `${safeFileName(card.internalInventoryNumber || card.itemName || card.id)}-kanban-card.pdf`),
+        filters: [{ name: "PDF", extensions: ["pdf"] }]
+      });
+      if (result.canceled || !result.filePath) {
+        return null;
+      }
+      outputPath = result.filePath;
+    }
+
+    const printWindow = new BrowserWindow({
+      show: false,
+      width: 1000,
+      height: 1400,
+      webPreferences: {
+        preload: path.join(__dirname, "..", "preload.cjs"),
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: false
+      }
+    });
+    if (this.devServerUrl) {
+      await printWindow.loadURL(`${this.devServerUrl}#/print/kanban/${encodeURIComponent(cardId)}?size=${encodeURIComponent(selectedSize.id)}`);
+    } else {
+      await printWindow.loadFile(path.join(this.app.getAppPath(), "dist", "index.html"), {
+        hash: `/print/kanban/${encodeURIComponent(cardId)}?size=${encodeURIComponent(selectedSize.id)}`
+      });
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    const pdf = await printWindow.webContents.printToPDF({
+      pageSize: {
+        width: Math.round(Number(selectedSize.widthIn || 2) * 25400),
+        height: Math.round(Number(selectedSize.heightIn || 4) * 25400)
+      },
+      printBackground: true,
+      margins: {
+        marginType: "custom",
+        top: 0.05,
+        bottom: 0.05,
+        left: 0.05,
+        right: 0.05
+      }
+    });
+    await fs.writeFile(outputPath, pdf);
+    printWindow.close();
+    const openError = await shell.openPath(outputPath);
+    if (openError) {
+      console.warn(`Unable to open exported Kanban PDF: ${openError}`);
+    }
+    await this.appendAudit("kanban_pdf_exported", cardId, `Exported kanban card PDF to ${outputPath}.`);
+    return outputPath;
+  }
+
   async listJobSummaries() {
     const dataRoot = await this.requireDataFolder();
     const jobsRoot = path.join(dataRoot, "jobs");
@@ -521,6 +1267,41 @@ class ERPBackend {
     return `${next.prefix}${String(next.number + 1).padStart(next.digits.length, "0")}`;
   }
 
+  async generateNextKanbanInventoryNumber() {
+    const cards = await this.listKanbanCards();
+    const preferences = await this.loadPreferences();
+    const configuredPrefix = String(preferences.kanbanInventoryPrefix || "").trim();
+    const startingNumber = Number.isFinite(Number(preferences.kanbanStartingInventoryNumber)) ? Number(preferences.kanbanStartingInventoryNumber) : 1;
+    const candidates = cards
+      .map((card) => {
+        const value = String(card.internalInventoryNumber || "").trim();
+        const match = value.match(/^(.*?)(\d+)$/);
+        if (!match) {
+          return null;
+        }
+        return {
+          prefix: match[1],
+          digits: match[2],
+          number: Number(match[2]),
+          updatedAt: String(card.updatedAt || "")
+        };
+      })
+      .filter(Boolean)
+      .sort((a, b) => b.number - a.number || String(b.updatedAt).localeCompare(String(a.updatedAt)));
+
+    const preferredCandidates = configuredPrefix
+      ? candidates.filter((candidate) => candidate.prefix === configuredPrefix)
+      : candidates;
+
+    if (!preferredCandidates.length) {
+      const digits = Math.max(String(startingNumber).length, 4);
+      return `${configuredPrefix}${String(startingNumber).padStart(digits, "0")}`;
+    }
+
+    const next = preferredCandidates[0];
+    return `${next.prefix}${String(next.number + 1).padStart(next.digits.length, "0")}`;
+  }
+
   async buildJobSummaryFromHeader(header) {
     return {
       id: header.id,
@@ -541,6 +1322,10 @@ class ERPBackend {
 
   getJobRoot(dataRoot, jobId) {
     return path.join(dataRoot, "jobs", safeFileName(jobId));
+  }
+
+  getKanbanRoot(dataRoot, cardId) {
+    return path.join(dataRoot, "kanban", safeFileName(cardId));
   }
 
   getMaterialRoot(dataRoot, materialId) {
@@ -665,7 +1450,76 @@ class ERPBackend {
         revisedAt: String(revision?.revisedAt || "").trim(),
         revisionNumber: Number(revision?.revisionNumber || 1) || 1
       }))
+      };
+    }
+
+  normalizeKanbanPhoto(photo) {
+    if (!photo?.relativePath && !photo?.storedPath && !photo?.path) {
+      return null;
+    }
+    const originalFilename = String(photo?.originalFilename || photo?.storedFilename || photo?.name || "Photo").trim();
+    const storedFilename = String(photo?.storedFilename || originalFilename).trim();
+    return {
+      id: photo?.id || randomId("photo"),
+      originalFilename,
+      storedFilename,
+      relativePath: String(photo?.relativePath || photo?.storedPath || photo?.path || "").replaceAll("\\", "/"),
+      sourceUrl: String(photo?.sourceUrl || "").trim(),
+      attachedAt: String(photo?.attachedAt || nowIso()).trim() || nowIso()
     };
+  }
+
+  normalizeKanbanCard(card) {
+    const orderingNotes = mergeKanbanOrderingNotes(card?.orderingNotes, card?.vendorPartNumber);
+    return {
+      id: card?.id || randomId("kanban"),
+      itemName: String(card?.itemName || "").trim(),
+      internalInventoryNumber: String(card?.internalInventoryNumber || "").trim(),
+      minimumLevel: String(card?.minimumLevel || "").trim(),
+      maximumLevel: String(card?.maximumLevel || "").trim(),
+      orderQuantity: String(card?.orderQuantity || "").trim(),
+      storageLocation: String(card?.storageLocation || "").trim(),
+      department: String(card?.department || "").trim(),
+      category: String(card?.category || "").trim(),
+      vendor: String(card?.vendor || "").trim(),
+      purchaseUrl: String(card?.purchaseUrl || "").trim(),
+      orderingNotes,
+      packSize: String(card?.packSize || "").trim(),
+      description: String(card?.description || "").trim(),
+      photo: this.normalizeKanbanPhoto(card?.photo),
+      active: card?.active !== false,
+      archivedAt: String(card?.archivedAt || "").trim(),
+      createdAt: String(card?.createdAt || nowIso()).trim() || nowIso(),
+      updatedAt: String(card?.updatedAt || nowIso()).trim() || nowIso()
+    };
+  }
+
+  kanbanHistoryMarkdown(card) {
+    return [
+      `# Kanban Card: ${card.itemName || card.internalInventoryNumber || card.id}`,
+      "",
+      `Generated: ${nowIso()}`,
+      "",
+      `- Inventory Number: ${card.internalInventoryNumber || "-"}`,
+      `- Vendor: ${card.vendor || "-"}`,
+      `- Category: ${card.category || "-"}`,
+      `- Department: ${card.department || "-"}`,
+      `- Storage Location: ${card.storageLocation || "-"}`,
+      `- Minimum Level: ${card.minimumLevel || "-"}`,
+      `- Maximum Level: ${card.maximumLevel || "-"}`,
+      `- Order Quantity: ${card.orderQuantity || "-"}`,
+      `- Pack Size: ${card.packSize || "-"}`,
+      `- Purchase URL: ${card.purchaseUrl || "-"}`,
+      `- Active: ${card.active !== false ? "Yes" : "No"}`,
+      "",
+      "## Description",
+      "",
+      card.description || "No description.",
+      "",
+      "## Ordering Notes",
+      "",
+      card.orderingNotes || "No ordering notes."
+    ].join("\n");
   }
 
   normalizeParameter(parameter) {
@@ -2209,8 +3063,9 @@ class ERPBackend {
 
   async rebuildIndex() {
     const dataRoot = await this.requireDataFolder();
-    const [jobs, materials, instruments] = await Promise.all([
+    const [jobs, kanbanCards, materials, instruments] = await Promise.all([
       this.listJobSummaries(),
+      this.listKanbanCards(),
       this.listMaterials(),
       this.listInstruments()
     ]);
@@ -2220,6 +3075,11 @@ class ERPBackend {
         id: job.id,
         label: `${job.jobNumber || job.id} ${job.customer || ""}`.trim(),
         searchText: `${job.jobNumber} ${job.customer} ${job.routeSummary}`.toLowerCase()
+      })),
+      kanbanCards: kanbanCards.map((card) => ({
+        id: card.id,
+        label: `${card.itemName || card.internalInventoryNumber || card.id} ${card.vendor || ""}`.trim(),
+        searchText: `${card.itemName} ${card.internalInventoryNumber} ${card.vendor} ${card.category || ""} ${card.department} ${card.storageLocation} ${card.orderingNotes || ""}`.toLowerCase()
       })),
       materials: materials.map((material) => ({
         id: material.id,
@@ -2257,9 +3117,10 @@ class ERPBackend {
 
   async loadWorkspace() {
     const dataFolder = await this.requireDataFolder();
-    const [dashboard, jobs, customers, materials, instruments, templates, libraries, standards, preferences] = await Promise.all([
+    const [dashboard, jobs, kanbanCards, customers, materials, instruments, templates, libraries, standards, preferences] = await Promise.all([
       this.getDashboardState(),
       this.listJobSummaries(),
+      this.listKanbanCards(),
       this.listCustomers(),
       this.listMaterials(),
       this.listInstruments(),
@@ -2272,6 +3133,7 @@ class ERPBackend {
       dataFolder,
       dashboard,
       jobs,
+      kanbanCards,
       customers,
       materials,
       instruments,
@@ -2280,14 +3142,15 @@ class ERPBackend {
       standards,
       preferences,
       constants: {
-        material: MATERIAL_CONSTANTS,
-        documentCategories: DOCUMENT_CATEGORIES,
-        jobStatuses: ["Open", "In Process", "On Hold", "Complete", "Archived"],
-        priorities: ["Low", "Normal", "High", "Hot"],
-        instrumentStatuses: ["In service", "Due for calibration", "Overdue", "Retired"]
-      }
-    };
-  }
+          material: MATERIAL_CONSTANTS,
+          documentCategories: DOCUMENT_CATEGORIES,
+          jobStatuses: ["Open", "In Process", "On Hold", "Complete", "Archived"],
+          priorities: ["Low", "Normal", "High", "Hot"],
+          instrumentStatuses: ["In service", "Due for calibration", "Overdue", "Retired"],
+          kanbanDeepLinkPrefix: KANBAN_DEEP_LINK_PREFIX
+        }
+      };
+    }
 
   buildXometryTravelerNotes(traveler) {
     const lines = [
@@ -3001,6 +3864,30 @@ class ERPBackend {
         } catch (error) {
           reject(new Error(`Unable to parse Python output: ${error.message}`));
         }
+      });
+    });
+  }
+
+  async runPowerShell(script) {
+    return new Promise((resolve, reject) => {
+      const child = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script], {
+        stdio: ["ignore", "pipe", "pipe"]
+      });
+      let stdout = "";
+      let stderr = "";
+      child.stdout.on("data", (chunk) => {
+        stdout += chunk.toString("utf8");
+      });
+      child.stderr.on("data", (chunk) => {
+        stderr += chunk.toString("utf8");
+      });
+      child.on("error", reject);
+      child.on("close", (code) => {
+        if (code !== 0) {
+          reject(new Error(stderr.trim() || stdout.trim() || `PowerShell exited with status ${code}`));
+          return;
+        }
+        resolve(stdout.trim());
       });
     });
   }

@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
+import QRCode from "qrcode";
 import {
   Archive,
   ArchiveRestore,
@@ -147,6 +148,28 @@ const blankMaterial = () => ({
   usageRefs: []
 });
 
+const blankKanbanCard = (defaults = {}) => ({
+  id: uid("kanban"),
+  itemName: "",
+  internalInventoryNumber: "",
+  minimumLevel: "",
+  maximumLevel: "",
+  orderQuantity: "",
+  storageLocation: defaults.storageLocation || "",
+  department: defaults.department || "",
+  category: defaults.category || "",
+  photo: null,
+  vendor: defaults.vendor || "",
+  purchaseUrl: "",
+  orderingNotes: "",
+  packSize: "",
+  description: "",
+  active: true,
+  archivedAt: "",
+  createdAt: nowIso(),
+  updatedAt: nowIso()
+});
+
 const blankInstrumentPayload = () => ({
   instrument: {
     instrument_id: uid("INS"),
@@ -233,6 +256,19 @@ const blankCustomer = (name = "") => ({
   active: true
 });
 
+const blankKanbanDepartment = () => ({
+  id: uid("kanban-dept"),
+  name: "",
+  color: "#2563eb"
+});
+
+const blankKanbanPrintSize = () => ({
+  id: uid("kanban-size"),
+  name: "New Size",
+  widthIn: "2",
+  heightIn: "4"
+});
+
 const formatDateTime = (value) => {
   if (!value) return "-";
   const date = new Date(value);
@@ -288,6 +324,29 @@ function materialAlloyOptions(preferences, familyName) {
   return materialFamilyList(preferences).find((family) => family.name === familyName)?.alloys || [];
 }
 
+function kanbanDepartmentList(preferences) {
+  return Array.isArray(preferences?.kanbanDepartments) ? preferences.kanbanDepartments : [];
+}
+
+function kanbanDepartmentOptions(preferences) {
+  return kanbanDepartmentList(preferences).map((item) => String(item?.name || "").trim()).filter(Boolean);
+}
+
+function kanbanDepartmentColor(preferences, departmentName) {
+  return kanbanDepartmentList(preferences).find((item) => String(item?.name || "") === String(departmentName || ""))?.color || "#2563eb";
+}
+
+function kanbanPrintSizes(preferences) {
+  return Array.isArray(preferences?.kanbanPrintSizes) ? preferences.kanbanPrintSizes : [];
+}
+
+function defaultKanbanPrintSizeId(preferences) {
+  const sizes = kanbanPrintSizes(preferences);
+  return sizes.some((item) => item.id === preferences?.defaultKanbanPrintSizeId)
+    ? preferences.defaultKanbanPrintSizeId
+    : (sizes[0]?.id || "");
+}
+
 function inferMaterialClassification(materialType, preferences) {
   const normalized = String(materialType || "").trim().toLowerCase();
   if (!normalized) {
@@ -321,6 +380,27 @@ function syncMaterialClassification(material, preferences) {
 
 function updateMaterialRecord(material, patch, preferences) {
   return syncMaterialClassification(updateMaterialWithShape(material, patch), preferences);
+}
+
+function localFileUrl(filePath) {
+  const normalized = String(filePath || "").trim().replaceAll("\\", "/");
+  if (!normalized) {
+    return "";
+  }
+  const withLeadingSlash = normalized.startsWith("/") ? normalized : `/${normalized}`;
+  return encodeURI(`file://${withLeadingSlash}`);
+}
+
+function kanbanDeepLink(cardId, workspace) {
+  const prefix = workspace?.constants?.kanbanDeepLinkPrefix || "amerp://open/kanban/";
+  return `${prefix}${encodeURIComponent(cardId)}`;
+}
+
+function kanbanPhotoSrc(card) {
+  if (!card?.photo?.relativePath) {
+    return "";
+  }
+  return api.assetUrl(card.photo.relativePath);
 }
 
 function materialDisplayType(material) {
@@ -634,6 +714,12 @@ function App() {
   if (!api) {
     return <Fatal title="AMERP" message="Run the app inside Electron so the secure local file APIs are available." />;
   }
+  if (route.startsWith("/print/kanban/")) {
+    const [pathPart, queryPart = ""] = route.replace("/print/kanban/", "").split("?");
+    const cardId = decodeURIComponent(pathPart);
+    const params = new URLSearchParams(queryPart);
+    return <PrintKanbanCard cardId={cardId} sizeId={params.get("size") || ""} />;
+  }
   if (route.startsWith("/print/")) {
     const jobId = decodeURIComponent(route.replace("/print/", "").split("?")[0]);
     return <PrintPacket jobId={jobId} />;
@@ -674,15 +760,24 @@ function Workspace() {
   const [status, setStatus] = useState("");
   const [startupError, setStartupError] = useState("");
   const [confirmDeleteJobOpen, setConfirmDeleteJobOpen] = useState(false);
+  const [confirmDeleteKanbanOpen, setConfirmDeleteKanbanOpen] = useState(false);
   const [saveState, setSaveState] = useState("saved");
   const fusionImportInFlight = useRef(false);
   const refreshWorkspaceRef = useRef(null);
+  const openKanbanCardRef = useRef(null);
 
   const [selectedJobId, setSelectedJobId] = useState(null);
   const [job, setJob] = useState(null);
   const [jobScreen, setJobScreen] = useState("list");
   const [selectedPartId, setSelectedPartId] = useState(null);
   const [selectedOperationId, setSelectedOperationId] = useState(null);
+
+  const [selectedKanbanId, setSelectedKanbanId] = useState(null);
+  const [kanbanCard, setKanbanCard] = useState(null);
+  const [kanbanScreen, setKanbanScreen] = useState("list");
+  const [kanbanAiState, setKanbanAiState] = useState("idle");
+  const [kanbanPrintDialogOpen, setKanbanPrintDialogOpen] = useState(false);
+  const [selectedKanbanPrintSizeId, setSelectedKanbanPrintSizeId] = useState("");
 
   const [selectedMaterialId, setSelectedMaterialId] = useState(null);
   const [material, setMaterial] = useState(null);
@@ -717,6 +812,10 @@ function Workspace() {
         setJobScreen("list");
         setSelectedPartId(null);
         setSelectedOperationId(null);
+        setSelectedKanbanId(null);
+        setKanbanCard(null);
+        setKanbanScreen("list");
+        setKanbanAiState("idle");
         setSelectedMaterialId(null);
         setMaterial(null);
         setMaterialScreen("list");
@@ -755,6 +854,12 @@ function Workspace() {
     };
   }, []);
 
+  useEffect(() => api.onDeepLink?.((payload) => {
+    if (payload?.entity === "kanban" && payload.id) {
+      openKanbanCardRef.current?.(payload.id);
+    }
+  }), []);
+
   useEffect(() => {
     if (!workspace) return;
     const runIndexMaintenance = async () => {
@@ -772,13 +877,18 @@ function Workspace() {
   }, [workspace?.dataFolder]);
 
   useEffect(() => {
+    document.title = String(workspace?.preferences?.windowTitle || workspace?.preferences?.appTitle || "AMERP");
+  }, [workspace?.preferences?.windowTitle, workspace?.preferences?.appTitle]);
+
+  useEffect(() => {
     if ((view === "jobs" && jobScreen === "list")
+      || (view === "kanban" && kanbanScreen === "list")
       || (view === "materials" && materialScreen === "list")
       || (view === "metrology" && metrologyScreen === "list")
       || view === "settings") {
       setSaveState("saved");
     }
-  }, [view, jobScreen, materialScreen, metrologyScreen]);
+  }, [view, jobScreen, kanbanScreen, materialScreen, metrologyScreen]);
 
   const openJob = async (jobId) => {
     setBusy(true);
@@ -800,6 +910,27 @@ function Workspace() {
       setBusy(false);
     }
   };
+
+  const openKanbanCard = async (cardId) => {
+    setBusy(true);
+    try {
+      if (selectedKanbanId && selectedKanbanId !== cardId) {
+        await api.releaseLock("kanban", selectedKanbanId);
+      }
+      const loaded = await api.loadKanbanCard(cardId, { acquireLock: true });
+      setSelectedKanbanId(cardId);
+    setKanbanCard(loaded);
+    setKanbanScreen("detail");
+    setKanbanAiState("idle");
+    setView("kanban");
+      setSaveState("saved");
+    } catch (error) {
+      showStatus(error.message || String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+  openKanbanCardRef.current = openKanbanCard;
 
   const openMaterial = async (materialId) => {
     setBusy(true);
@@ -850,11 +981,28 @@ function Workspace() {
     setSaveState("saved");
   };
 
+  const createNewKanbanCard = (draft = null) => {
+    if (selectedKanbanId) api.releaseLock("kanban", selectedKanbanId).catch(() => {});
+    setSelectedKanbanId(null);
+    setKanbanCard(draft || blankKanbanCard());
+    setKanbanScreen("detail");
+    setKanbanAiState("idle");
+    setView("kanban");
+    setSaveState("saved");
+  };
+
   const showJobList = () => {
     setView("jobs");
     setJobScreen("list");
     setSelectedPartId(null);
     setSelectedOperationId(null);
+    setSaveState("saved");
+  };
+
+  const showKanbanList = () => {
+    setView("kanban");
+    setKanbanScreen("list");
+    setKanbanAiState("idle");
     setSaveState("saved");
   };
 
@@ -1267,12 +1415,49 @@ function Workspace() {
     }
   };
 
+  const assignNextKanbanInventoryNumber = async () => {
+    try {
+      const next = await api.generateNextKanbanInventoryNumber();
+      if (!next) {
+        return;
+      }
+      setKanbanCard((current) => current ? { ...current, internalInventoryNumber: next } : current);
+      showStatus(`Assigned inventory number ${next}.`);
+    } catch (error) {
+      showStatus(error.message || String(error));
+    }
+  };
+
   const applySavedJob = async (saved) => {
     setJob(saved);
     setSelectedJobId(saved.id);
     setSelectedPartId((current) => saved.parts.some((part) => part.id === current) ? current : null);
     setSelectedOperationId((current) => saved.parts.some((part) => part.operations.some((operation) => operation.id === current)) ? current : null);
     await refreshWorkspace();
+  };
+
+  const applySavedKanbanCard = async (saved) => {
+    setKanbanCard(saved);
+    setSelectedKanbanId(saved.id);
+    await refreshWorkspace();
+  };
+
+  const generateCurrentKanbanImage = async () => {
+    if (!kanbanCard) return;
+    setKanbanAiState("imaging");
+    setBusy(true);
+    try {
+      const updated = await api.generateKanbanImage(kanbanCard);
+      if (updated) {
+        setKanbanCard(updated);
+        showStatus("AI product image generated.");
+      }
+    } catch (error) {
+      showStatus(error.message || String(error));
+    } finally {
+      setKanbanAiState("idle");
+      setBusy(false);
+    }
   };
 
   const exportCurrentJobPdf = async () => {
@@ -1290,6 +1475,29 @@ function Workspace() {
     }
   };
 
+  const exportCurrentKanbanPdf = async () => {
+    if (!kanbanCard) return;
+    setBusy(true);
+    try {
+      const saved = await api.saveKanbanCard(kanbanCard);
+      await applySavedKanbanCard(saved);
+      await api.exportKanbanPdf(saved.id, undefined, selectedKanbanPrintSizeId || defaultKanbanPrintSizeId(workspace?.preferences));
+      showStatus("Kanban card PDF created.");
+    } catch (error) {
+      showStatus(error.message || String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const openKanbanPrintDialog = () => {
+    if (!kanbanCard || busy) {
+      return;
+    }
+    setSelectedKanbanPrintSizeId(defaultKanbanPrintSizeId(workspace?.preferences));
+    setKanbanPrintDialogOpen(true);
+  };
+
   const archiveCurrentJob = async () => {
     if (!selectedJobId) return;
     setBusy(true);
@@ -1303,6 +1511,63 @@ function Workspace() {
     } finally {
       setBusy(false);
     }
+  };
+
+  const archiveCurrentKanbanCard = async () => {
+    if (!selectedKanbanId) return;
+    setBusy(true);
+    try {
+      const saved = await api.archiveKanbanCard(selectedKanbanId);
+      setKanbanCard(saved);
+      await refreshWorkspace();
+      showStatus("Kanban card archived.");
+    } catch (error) {
+      showStatus(error.message || String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const unarchiveCurrentKanbanCard = async () => {
+    if (!selectedKanbanId) return;
+    setBusy(true);
+    try {
+      const saved = await api.unarchiveKanbanCard(selectedKanbanId);
+      setKanbanCard(saved);
+      await refreshWorkspace();
+      showStatus("Kanban card unarchived.");
+    } catch (error) {
+      showStatus(error.message || String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const deleteCurrentKanbanCard = async () => {
+    if (!selectedKanbanId) return;
+    setBusy(true);
+    try {
+      await api.deleteKanbanCard(selectedKanbanId);
+      await api.releaseLock("kanban", selectedKanbanId).catch(() => {});
+      setSelectedKanbanId(null);
+      setKanbanCard(null);
+      setKanbanScreen("list");
+      setKanbanAiState("idle");
+      setView("kanban");
+      await refreshWorkspace();
+      showStatus("Archived Kanban card deleted.");
+    } catch (error) {
+      showStatus(error.message || String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const openDeleteKanbanConfirm = () => {
+    if (!selectedKanbanId || busy) {
+      return;
+    }
+    setConfirmDeleteKanbanOpen(true);
   };
 
   const unarchiveCurrentJob = async () => {
@@ -1552,6 +1817,92 @@ function Workspace() {
     setSaveState("saved");
   };
 
+  const importKanbanFromUrl = async (url) => {
+    setKanbanAiState("filling");
+    setBusy(true);
+    try {
+      const imported = await api.importKanbanFromUrl(url);
+      if (!imported?.card) {
+        return;
+      }
+      createNewKanbanCard(imported.card);
+      if (imported.warnings?.length) {
+        showStatus(`Imported product draft with warnings:\n- ${[...new Set(imported.warnings)].join("\n- ")}`);
+      } else {
+        showStatus("Imported product details from URL.");
+      }
+    } catch (error) {
+      showStatus(error.message || String(error));
+    } finally {
+      setKanbanAiState("idle");
+      setBusy(false);
+    }
+  };
+
+  const refreshCurrentKanbanFromUrl = async () => {
+    if (!kanbanCard?.purchaseUrl) {
+      showStatus("Enter a purchase URL before refreshing from URL.");
+      return;
+    }
+    setKanbanAiState("filling");
+    setBusy(true);
+    try {
+      const imported = await api.importKanbanFromUrl(kanbanCard.purchaseUrl);
+      if (!imported?.card) {
+        return;
+      }
+      setKanbanCard((current) => {
+        if (!current) {
+          return current;
+        }
+        const next = imported.card;
+        return {
+          ...current,
+          itemName: next.itemName || current.itemName,
+          minimumLevel: next.minimumLevel || current.minimumLevel,
+          maximumLevel: next.maximumLevel || current.maximumLevel,
+          orderQuantity: next.orderQuantity || current.orderQuantity,
+          category: next.category || current.category,
+          photo: next.photo || current.photo,
+          vendor: next.vendor || current.vendor,
+          purchaseUrl: next.purchaseUrl || current.purchaseUrl,
+          orderingNotes: next.orderingNotes || current.orderingNotes,
+          packSize: next.packSize || current.packSize,
+          description: next.description || current.description
+        };
+      });
+      if (imported.warnings?.length) {
+        showStatus(`Refreshed product details with warnings:\n- ${[...new Set(imported.warnings)].join("\n- ")}`);
+      } else {
+        showStatus("Refreshed product details from URL.");
+      }
+    } catch (error) {
+      showStatus(error.message || String(error));
+    } finally {
+      setKanbanAiState("idle");
+      setBusy(false);
+    }
+  };
+
+  const chooseKanbanPhoto = async () => {
+    if (!kanbanCard?.id) {
+      return;
+    }
+    setBusy(true);
+    try {
+      const photo = await api.chooseKanbanPhoto(kanbanCard.id);
+      if (!photo) {
+        return;
+      }
+      setKanbanCard((current) => current ? { ...current, photo } : current);
+      showStatus("Kanban photo selected.");
+    } catch (error) {
+      showStatus(error.message || String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const saveCustomer = async (customer) => {
     const saved = await api.saveCustomer(customer);
     await refreshWorkspace();
@@ -1610,6 +1961,39 @@ function Workspace() {
     return nextAlloy;
   };
 
+  const addPreferenceListOption = async (key, value, missingMessage) => {
+    const trimmed = String(value || "").trim();
+    if (!trimmed) {
+      throw new Error(missingMessage);
+    }
+    const existing = Array.isArray(workspace?.preferences?.[key]) ? workspace.preferences[key] : [];
+    const match = existing.find((item) => String(item || "").trim().toLowerCase() === trimmed.toLowerCase());
+    if (match) {
+      return match;
+    }
+    await savePreferences({ [key]: [...existing, trimmed] }, { silent: true });
+    return trimmed;
+  };
+
+  const addKanbanVendorOption = async (value) => addPreferenceListOption("kanbanVendors", value, "Enter a vendor.");
+  const addKanbanLocationOption = async (value) => addPreferenceListOption("kanbanStorageLocations", value, "Enter a location.");
+  const addKanbanCategoryOption = async (value) => addPreferenceListOption("kanbanCategories", value, "Enter a category.");
+  const addKanbanDepartmentOption = async (value) => {
+    const trimmed = String(value || "").trim();
+    if (!trimmed) {
+      throw new Error("Enter a department.");
+    }
+    const existing = workspace?.preferences?.kanbanDepartments || [];
+    const match = existing.find((item) => String(item?.name || "").trim().toLowerCase() === trimmed.toLowerCase());
+    if (match) {
+      return match.name;
+    }
+    const colors = ["#2563eb", "#f59e0b", "#0f766e", "#7c3aed", "#dc2626", "#475569"];
+    const next = [...existing, { id: uid("kanban-dept"), name: trimmed, color: colors[existing.length % colors.length] }];
+    await savePreferences({ kanbanDepartments: next }, { silent: true });
+    return trimmed;
+  };
+
   useAutoSave({
     value: job,
     resetKey: `job:${job?.id || "none"}`,
@@ -1620,6 +2004,21 @@ function Workspace() {
     onError: (error) => showStatus(error.message || String(error)),
     onStateChange: (next) => {
       if (view === "jobs" && jobScreen !== "list") {
+        setSaveState(next);
+      }
+    }
+  });
+
+  useAutoSave({
+    value: kanbanCard,
+    resetKey: `kanban:${kanbanCard?.id || "none"}`,
+    enabled: Boolean(kanbanCard),
+    isReady: (current) => Boolean(current?.itemName || current?.internalInventoryNumber || current?.purchaseUrl || current?.vendor || current?.category),
+    save: (current) => api.saveKanbanCard(current),
+    onSaved: applySavedKanbanCard,
+    onError: (error) => showStatus(error.message || String(error)),
+    onStateChange: (next) => {
+      if (view === "kanban" && kanbanScreen === "detail") {
         setSaveState(next);
       }
     }
@@ -1710,6 +2109,34 @@ function Workspace() {
         ].filter(Boolean)
       };
     }
+    if (view === "kanban") {
+      return {
+        breadcrumbs: [
+          { label: "Kanban", onClick: showKanbanList, active: kanbanScreen === "list" },
+          ...(kanbanScreen === "detail" && kanbanCard ? [{ label: kanbanCard.itemName || kanbanCard.internalInventoryNumber || "New Card", onClick: null, active: true }] : [])
+        ],
+        title: kanbanScreen === "detail" ? (kanbanCard?.itemName || kanbanCard?.internalInventoryNumber || "New Card") : "Kanban",
+        subtitle: kanbanScreen === "detail"
+          ? [kanbanCard?.vendor, kanbanCard?.category, kanbanCard?.internalInventoryNumber].filter(Boolean).join(" / ")
+          : "Purchasing cards for replenishment and reorder points.",
+        primaryActions: [
+          kanbanScreen === "list" ? <button key="new-kanban" onClick={() => createNewKanbanCard()}><Plus size={15} /> New Card</button> : null,
+          kanbanScreen === "detail" ? <button key="kanban-ai-image" onClick={generateCurrentKanbanImage} disabled={!kanbanCard || busy}>{kanbanAiState === "imaging" ? "Generating Image..." : "Generate Image"}</button> : null,
+          kanbanScreen === "detail" ? <button key="kanban-pdf" onClick={openKanbanPrintDialog} disabled={!kanbanCard || busy}><FileDown size={16} /> PDF</button> : null
+        ].filter(Boolean),
+        dangerActions: [
+          kanbanScreen === "detail" && kanbanCard?.active !== false
+            ? <button key="archive-kanban" className="danger" onClick={archiveCurrentKanbanCard} disabled={!selectedKanbanId || busy}><Archive size={16} /> Archive</button>
+            : null,
+          kanbanScreen === "detail" && kanbanCard?.active === false
+            ? <button key="unarchive-kanban" onClick={unarchiveCurrentKanbanCard} disabled={!selectedKanbanId || busy}><ArchiveRestore size={16} /> Unarchive</button>
+            : null,
+          kanbanScreen === "detail" && kanbanCard?.active === false
+            ? <button key="delete-kanban" className="danger" onClick={openDeleteKanbanConfirm} disabled={!selectedKanbanId || busy}><Trash2 size={16} /> Delete</button>
+            : null
+        ].filter(Boolean)
+      };
+    }
     if (view === "materials") {
       return {
         breadcrumbs: [
@@ -1754,20 +2181,28 @@ function Workspace() {
       dangerActions: []
     };
   })();
+  const appTitle = workspace?.preferences?.appTitle || "AMERP";
+  const appTagline = workspace?.preferences?.appTagline || "Operator ERP";
+  const appIconPath = workspace?.preferences?.appIconPath || "";
 
   return (
     <div className="app-shell">
       <aside className="sidebar">
         <div className="brand-row">
-          <Hammer size={26} />
+          {appIconPath ? (
+            <img className="brand-icon-image" src={localFileUrl(appIconPath)} alt={`${appTitle} icon`} />
+          ) : (
+            <Hammer size={26} />
+          )}
           <div>
-            <h1>AMERP</h1>
-            <span>Operator ERP</span>
+            <h1>{appTitle}</h1>
+            <span>{appTagline}</span>
           </div>
         </div>
 
         <nav className="nav-tabs">
           <NavButton icon={Package} active={view === "jobs"} label="Jobs" onClick={showJobList} />
+          <NavButton icon={ClipboardList} active={view === "kanban"} label="Kanban" onClick={showKanbanList} />
           <NavButton icon={Database} active={view === "materials"} label="Materials" onClick={showMaterialsList} />
           <NavButton icon={Gauge} active={view === "metrology"} label="Gages" onClick={showMetrologyList} />
           <NavButton icon={Settings} active={view === "settings"} label="Settings" onClick={() => setView("settings")} />
@@ -1843,6 +2278,26 @@ function Workspace() {
             onAddMaterialAlloy={addMaterialAlloyOption}
           />
         )}
+        {view === "kanban" && (
+          <KanbanView
+            workspace={workspace}
+            screen={kanbanScreen}
+            card={kanbanCard}
+            setCard={setKanbanCard}
+            onOpenCard={openKanbanCard}
+            onShowList={showKanbanList}
+            onCreateNew={() => createNewKanbanCard()}
+            onImportFromUrl={importKanbanFromUrl}
+            onRefreshFromUrl={refreshCurrentKanbanFromUrl}
+            onChoosePhoto={chooseKanbanPhoto}
+            onAssignInventoryNumber={assignNextKanbanInventoryNumber}
+            onAddVendor={addKanbanVendorOption}
+            onAddDepartment={addKanbanDepartmentOption}
+            onAddLocation={addKanbanLocationOption}
+            onAddCategory={addKanbanCategoryOption}
+            aiState={kanbanAiState}
+          />
+        )}
         {view === "materials" && (
           <MaterialsView
             workspace={workspace}
@@ -1897,6 +2352,30 @@ function Workspace() {
         onConfirm={async () => {
           setConfirmDeleteJobOpen(false);
           await deleteCurrentJob();
+        }}
+      />
+
+      <ConfirmDialog
+        open={confirmDeleteKanbanOpen}
+        title="Delete Archived Kanban Card?"
+        message={`Delete ${kanbanCard?.itemName || kanbanCard?.internalInventoryNumber || "this archived Kanban card"}? This cannot be undone.`}
+        confirmLabel="Delete Card"
+        onCancel={() => setConfirmDeleteKanbanOpen(false)}
+        onConfirm={async () => {
+          setConfirmDeleteKanbanOpen(false);
+          await deleteCurrentKanbanCard();
+        }}
+      />
+
+      <KanbanPrintDialog
+        open={kanbanPrintDialogOpen}
+        sizes={kanbanPrintSizes(workspace?.preferences)}
+        selectedSizeId={selectedKanbanPrintSizeId}
+        onChange={setSelectedKanbanPrintSizeId}
+        onCancel={() => setKanbanPrintDialogOpen(false)}
+        onConfirm={async () => {
+          setKanbanPrintDialogOpen(false);
+          await exportCurrentKanbanPdf();
         }}
       />
     </div>
@@ -3000,6 +3479,23 @@ function OperationDetailScreen({
   const instructionSteps = instructionStepsFromOperation(operation);
   const assignedLibraryNames = selectedLibraryNamesForOperation(operation, templates);
   const supportsTooling = ["milling", "turning"].includes(String(operation.type || "").toLowerCase());
+  const moveParameter = (parameterId, direction) => onUpdate((current) => {
+    const currentIndex = (current.parameters || []).findIndex((parameter) => parameter.id === parameterId);
+    if (currentIndex < 0) {
+      return current;
+    }
+    const targetIndex = currentIndex + direction;
+    if (targetIndex < 0 || targetIndex >= (current.parameters || []).length) {
+      return current;
+    }
+    const nextParameters = [...(current.parameters || [])];
+    const [moved] = nextParameters.splice(currentIndex, 1);
+    nextParameters.splice(targetIndex, 0, moved);
+    return {
+      ...current,
+      parameters: nextParameters
+    };
+  });
   const updateLibrarySelection = (libraryName, recordId) => onUpdate((current) => {
     return {
       ...current,
@@ -3123,7 +3619,11 @@ function OperationDetailScreen({
                   <div className="parameter-row" key={parameter.id}>
                     <input value={parameter.label} placeholder="Label" onChange={(event) => updateParameter(parameter.id, { label: event.target.value })} />
                     <input value={parameter.value} placeholder="Value" onChange={(event) => updateParameter(parameter.id, { value: event.target.value })} />
-                    <button className="danger subtle square" onClick={() => removeParameter(parameter.id)}><X size={13} /></button>
+                    <div className="tiny-toolbar parameter-actions">
+                      <button type="button" className="inline-action-button" onClick={() => moveParameter(parameter.id, -1)} disabled={operation.parameters.findIndex((item) => item.id === parameter.id) === 0}>Up</button>
+                      <button type="button" className="inline-action-button" onClick={() => moveParameter(parameter.id, 1)} disabled={operation.parameters.findIndex((item) => item.id === parameter.id) === operation.parameters.length - 1}>Down</button>
+                      <button className="danger subtle square" onClick={() => removeParameter(parameter.id)}><X size={13} /></button>
+                    </div>
                   </div>
                 ))}
                 {assignedLibraryNames.map((libraryName) => {
@@ -3768,6 +4268,291 @@ function MaterialDetailScreen({
           onReviseDocument={onReviseAttachment}
           emptyText="No material attachments attached yet."
         />
+      </div>
+    </div>
+  );
+}
+
+function KanbanView({
+  workspace,
+  screen,
+  card,
+  setCard,
+  onOpenCard,
+  onShowList,
+  onCreateNew,
+  onImportFromUrl,
+  onRefreshFromUrl,
+  onChoosePhoto,
+  onAssignInventoryNumber,
+  onAddVendor,
+  onAddDepartment,
+  onAddLocation,
+  onAddCategory,
+  aiState
+}) {
+  const [query, setQuery] = useState("");
+  const [showArchived, setShowArchived] = useState(false);
+  const [importDialogOpen, setImportDialogOpen] = useState(false);
+  const cards = workspace.kanbanCards || [];
+  const filteredCards = cards.filter((item) => {
+    if (!showArchived && item.active === false) {
+      return false;
+    }
+    const haystack = [
+      item.itemName,
+      item.internalInventoryNumber,
+      item.vendor,
+      item.category,
+      item.department,
+      item.storageLocation,
+      item.id
+    ].join(" ").toLowerCase();
+    return haystack.includes(query.trim().toLowerCase());
+  });
+  const updateCard = (patch) => setCard((current) => current ? { ...current, ...patch } : current);
+
+  return (
+    <>
+      {screen === "detail" && card ? (
+        <KanbanDetailScreen
+          workspace={workspace}
+          card={card}
+          onBack={onShowList}
+          onChange={updateCard}
+          onChoosePhoto={onChoosePhoto}
+          onImportFromUrl={onRefreshFromUrl}
+          onAssignInventoryNumber={onAssignInventoryNumber}
+          onAddVendor={onAddVendor}
+          onAddDepartment={onAddDepartment}
+          onAddLocation={onAddLocation}
+          onAddCategory={onAddCategory}
+          aiState={aiState}
+        />
+      ) : (
+        <section className="panel">
+          <div className="panel-heading inline">
+            <div>
+              <h3>Kanban Cards</h3>
+              <span>{filteredCards.length} visible records</span>
+            </div>
+            <div className="toolbar">
+              <button onClick={() => setShowArchived((current) => !current)}>
+                {showArchived ? "Hide Archived" : "Show Archived"}
+              </button>
+              <button onClick={() => setImportDialogOpen(true)}><Import size={15} /> Import From URL</button>
+              <button onClick={onCreateNew}><Plus size={15} /> New Card</button>
+            </div>
+          </div>
+          <TextField
+            label="Search Cards"
+            value={query}
+            onChange={setQuery}
+            placeholder="Item, inventory number, vendor, category, department, location..."
+          />
+          <div className="record-list top-gap">
+            {filteredCards.map((item) => (
+              <button key={item.id} className="record-list-item record-list-row" onClick={() => onOpenCard(item.id)}>
+                <div className="record-row-primary">
+                    <strong>{item.itemName || item.internalInventoryNumber || item.id}</strong>
+                    <span>{item.internalInventoryNumber || "No inventory number"}</span>
+                  </div>
+                  <div className="record-row-meta">
+                    <small>{item.vendor || "No vendor"}</small>
+                    <small>{item.category || "No category"}</small>
+                    <small>{item.department || "No department"}</small>
+                    <small>{item.storageLocation || "No location"}</small>
+                    <small>{item.active === false ? "Archived" : "Active"}</small>
+                  </div>
+                </button>
+            ))}
+            {!filteredCards.length && (
+              <EmptyState
+                icon={ClipboardList}
+                title="No Kanban Cards"
+                text="Create a card manually or import one from any product URL."
+                actionLabel="New Card"
+                onAction={onCreateNew}
+              />
+            )}
+          </div>
+        </section>
+      )}
+      <KanbanImportDialog
+        open={importDialogOpen}
+        onClose={() => setImportDialogOpen(false)}
+        onImport={async (url) => {
+          await onImportFromUrl(url);
+          setImportDialogOpen(false);
+        }}
+      />
+    </>
+  );
+}
+
+function KanbanDetailScreen({
+  workspace,
+  card,
+  onChange,
+  onChoosePhoto,
+  onImportFromUrl,
+  onAssignInventoryNumber,
+  onAddVendor,
+  onAddDepartment,
+  onAddLocation,
+  onAddCategory,
+  aiState = "idle"
+}) {
+  const vendorOptions = Array.from(new Set(["", ...(workspace.preferences?.kanbanVendors || []), card.vendor || ""]));
+  const departmentOptions = Array.from(new Set(["", ...kanbanDepartmentOptions(workspace.preferences), card.department || ""]));
+  const locationOptions = Array.from(new Set(["", ...(workspace.preferences?.kanbanStorageLocations || []), card.storageLocation || ""]));
+  const categoryOptions = Array.from(new Set(["", ...(workspace.preferences?.kanbanCategories || []), card.category || ""]));
+  const photoUrl = kanbanPhotoSrc(card);
+  const aiMessage = aiState === "filling"
+    ? "Refreshing from URL and applying AI..."
+    : aiState === "imaging"
+      ? "AI is generating a product image..."
+      : "";
+
+  return (
+    <div className="workflow-stack">
+      <div className="workspace-columns">
+        <section className="panel">
+          <div className="panel-heading inline">
+            <div>
+              <h3>Card Details</h3>
+              <span>{aiMessage || (card.active === false ? "Archived" : "Active")}</span>
+            </div>
+            <div className="toolbar">
+              <button onClick={onImportFromUrl} disabled={!card.purchaseUrl || aiState === "filling"}>
+                <Import size={14} /> {aiState === "filling" ? "Refreshing URL..." : "Refresh From URL"}
+              </button>
+            </div>
+          </div>
+          <div className="form-grid compact-3">
+            <TextField label="Item Name" value={card.itemName || ""} onChange={(value) => onChange({ itemName: value })} />
+            <label className="field">
+              <span>Internal Inventory Number</span>
+              <div className="field-action-row">
+                <input value={card.internalInventoryNumber || ""} onChange={(event) => onChange({ internalInventoryNumber: event.target.value })} />
+                <button className="subtle" onClick={onAssignInventoryNumber} disabled={Boolean(card.internalInventoryNumber)}>Assign Number</button>
+              </div>
+            </label>
+            <SelectWithInlineAdd
+              label="Vendor"
+              value={card.vendor || ""}
+              options={vendorOptions}
+              emptyLabel="Choose vendor"
+              newPlaceholder="New vendor"
+              onChange={(value) => onChange({ vendor: value })}
+              onAddOption={onAddVendor}
+            />
+            <TextField label="Minimum Level" value={card.minimumLevel || ""} onChange={(value) => onChange({ minimumLevel: value })} />
+            <TextField label="Maximum Level" value={card.maximumLevel || ""} onChange={(value) => onChange({ maximumLevel: value })} />
+            <TextField label="Order Quantity" value={card.orderQuantity || ""} onChange={(value) => onChange({ orderQuantity: value })} />
+            <SelectWithInlineAdd
+              label="Storage Location"
+              value={card.storageLocation || ""}
+              options={locationOptions}
+              emptyLabel="Choose location"
+              newPlaceholder="New location"
+              onChange={(value) => onChange({ storageLocation: value })}
+              onAddOption={onAddLocation}
+            />
+            <SelectWithInlineAdd
+              label="Department"
+              value={card.department || ""}
+              options={departmentOptions}
+              emptyLabel="Choose department"
+              newPlaceholder="New department"
+              onChange={(value) => onChange({ department: value })}
+              onAddOption={onAddDepartment}
+            />
+            <SelectWithInlineAdd
+              label="Category"
+              value={card.category || ""}
+              options={categoryOptions}
+              emptyLabel="Choose category"
+              newPlaceholder="New category"
+              onChange={(value) => onChange({ category: value })}
+              onAddOption={onAddCategory}
+            />
+            <TextField label="Pack Size / Unit" value={card.packSize || ""} onChange={(value) => onChange({ packSize: value })} />
+            <label className="field full">
+              <span>Purchase URL</span>
+              <input value={card.purchaseUrl || ""} onChange={(event) => onChange({ purchaseUrl: event.target.value })} />
+            </label>
+          </div>
+          <TextArea label="Description" value={card.description || ""} onChange={(value) => onChange({ description: value })} rows={4} />
+          <TextArea label="Ordering Notes" value={card.orderingNotes || ""} onChange={(value) => onChange({ orderingNotes: value })} rows={4} />
+        </section>
+
+        <section className="panel">
+          <div className="panel-heading inline">
+            <div>
+              <h3>Product Photo</h3>
+              <span>{aiState === "imaging" ? "Generating image..." : (card.photo?.originalFilename || "No photo selected.")}</span>
+            </div>
+            <div className="toolbar">
+              <button onClick={onChoosePhoto}><FolderOpen size={14} /> Choose Photo</button>
+              {card.photo ? <button className="subtle" onClick={() => onChange({ photo: null })}><X size={14} /> Clear</button> : null}
+            </div>
+          </div>
+          {photoUrl ? (
+            <div className="kanban-photo-frame">
+              <img src={photoUrl} alt={card.itemName || "Kanban item"} />
+            </div>
+          ) : (
+            <div className="empty-inline">No photo selected yet.</div>
+          )}
+        </section>
+      </div>
+    </div>
+  );
+}
+
+function KanbanImportDialog({ open, onClose, onImport }) {
+  const [url, setUrl] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (!open) {
+      setUrl("");
+      setBusy(false);
+    }
+  }, [open]);
+
+  if (!open) {
+    return null;
+  }
+
+  return (
+    <div className="dialog-backdrop">
+      <div className="dialog-panel narrow">
+        <div className="panel-heading">
+          <h3>Import Product URL</h3>
+        </div>
+        <p>Paste any product URL to prefill a new Kanban card with AI-assisted page parsing.</p>
+        <TextField label="Product URL" value={url} onChange={setUrl} placeholder="https://..." />
+        <div className="dialog-actions">
+          <button onClick={onClose} disabled={busy}>Cancel</button>
+          <button
+            onClick={async () => {
+              if (!url.trim()) {
+                return;
+              }
+              setBusy(true);
+              try {
+                await onImport(url.trim());
+              } finally {
+                setBusy(false);
+              }
+            }}
+            disabled={busy || !url.trim()}
+          >
+            <Import size={14} /> Import
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -4481,9 +5266,19 @@ function LibrarySettingsSection({ workspace, onStatus, onRefresh }) {
 function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, selectedTemplate, setSelectedTemplateId, onStatus, onRefresh }) {
   const [materialFamilies, setMaterialFamilies] = useState(workspace.preferences?.materialFamilies || []);
   const [selectedFamilyId, setSelectedFamilyId] = useState(workspace.preferences?.materialFamilies?.[0]?.id || null);
+  const [brandingSettings, setBrandingSettings] = useState({
+    appTitle: workspace.preferences?.appTitle || "AMERP",
+    appTagline: workspace.preferences?.appTagline || "Operator ERP",
+    windowTitle: workspace.preferences?.windowTitle || "AMERP",
+    appIconPath: workspace.preferences?.appIconPath || ""
+  });
   const [jobSettings, setJobSettings] = useState({
     jobPrefix: workspace.preferences?.jobPrefix || "J03C",
     startingJobNumber: String(workspace.preferences?.startingJobNumber ?? 600)
+  });
+  const [kanbanNumberSettings, setKanbanNumberSettings] = useState({
+    kanbanInventoryPrefix: workspace.preferences?.kanbanInventoryPrefix || "J03C",
+    kanbanStartingInventoryNumber: String(workspace.preferences?.kanbanStartingInventoryNumber ?? 600)
   });
   const [metrologyOptions, setMetrologyOptions] = useState({
     metrologyToolTypes: workspace.preferences?.metrologyToolTypes || [],
@@ -4493,14 +5288,41 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
     metrologyDepartments: workspace.preferences?.metrologyDepartments || [],
     metrologyStatuses: workspace.preferences?.metrologyStatuses || []
   });
+  const [aiSettings, setAiSettings] = useState({
+    openaiApiKey: workspace.preferences?.openaiApiKey || ""
+  });
+  const [kanbanDepartments, setKanbanDepartments] = useState(workspace.preferences?.kanbanDepartments || []);
+  const [kanbanOptions, setKanbanOptions] = useState({
+    kanbanStorageLocations: workspace.preferences?.kanbanStorageLocations || [],
+    kanbanVendors: workspace.preferences?.kanbanVendors || [],
+    kanbanCategories: workspace.preferences?.kanbanCategories || []
+  });
+  const [kanbanPrintSettings, setKanbanPrintSettings] = useState({
+    defaultKanbanPrintSizeId: workspace.preferences?.defaultKanbanPrintSizeId || defaultKanbanPrintSizeId(workspace.preferences),
+    kanbanPrintSizes: (workspace.preferences?.kanbanPrintSizes || []).map((item) => ({
+      ...item,
+      widthIn: String(item.widthIn ?? ""),
+      heightIn: String(item.heightIn ?? "")
+    }))
+  });
 
   useEffect(() => {
     const families = workspace.preferences?.materialFamilies || [];
     setMaterialFamilies(families);
     setSelectedFamilyId((current) => families.some((family) => family.id === current) ? current : families[0]?.id || null);
+    setBrandingSettings({
+      appTitle: workspace.preferences?.appTitle || "AMERP",
+      appTagline: workspace.preferences?.appTagline || "Operator ERP",
+      windowTitle: workspace.preferences?.windowTitle || "AMERP",
+      appIconPath: workspace.preferences?.appIconPath || ""
+    });
     setJobSettings({
       jobPrefix: workspace.preferences?.jobPrefix || "J03C",
       startingJobNumber: String(workspace.preferences?.startingJobNumber ?? 600)
+    });
+    setKanbanNumberSettings({
+      kanbanInventoryPrefix: workspace.preferences?.kanbanInventoryPrefix || "J03C",
+      kanbanStartingInventoryNumber: String(workspace.preferences?.kanbanStartingInventoryNumber ?? 600)
     });
     setMetrologyOptions({
       metrologyToolTypes: workspace.preferences?.metrologyToolTypes || [],
@@ -4509,6 +5331,23 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
       metrologyLocations: workspace.preferences?.metrologyLocations || [],
       metrologyDepartments: workspace.preferences?.metrologyDepartments || [],
       metrologyStatuses: workspace.preferences?.metrologyStatuses || []
+    });
+    setAiSettings({
+      openaiApiKey: workspace.preferences?.openaiApiKey || ""
+    });
+    setKanbanDepartments(workspace.preferences?.kanbanDepartments || []);
+    setKanbanOptions({
+      kanbanStorageLocations: workspace.preferences?.kanbanStorageLocations || [],
+      kanbanVendors: workspace.preferences?.kanbanVendors || [],
+      kanbanCategories: workspace.preferences?.kanbanCategories || []
+    });
+    setKanbanPrintSettings({
+      defaultKanbanPrintSizeId: workspace.preferences?.defaultKanbanPrintSizeId || defaultKanbanPrintSizeId(workspace.preferences),
+      kanbanPrintSizes: (workspace.preferences?.kanbanPrintSizes || []).map((item) => ({
+        ...item,
+        widthIn: String(item.widthIn ?? ""),
+        heightIn: String(item.heightIn ?? "")
+      }))
     });
   }, [workspace.preferences]);
 
@@ -4553,6 +5392,76 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
   const addMetrologyOption = (key) => updateMetrologyList(key, (current) => [...current, ""]);
   const updateMetrologyOption = (key, index, value) => updateMetrologyList(key, (current) => current.map((item, itemIndex) => itemIndex === index ? value : item));
   const removeMetrologyOption = (key, index) => updateMetrologyList(key, (current) => current.filter((_item, itemIndex) => itemIndex !== index));
+  const updateKanbanDepartment = (departmentId, patch) => {
+    setKanbanDepartments((current) => current.map((item) => item.id === departmentId ? { ...item, ...patch } : item));
+  };
+  const addKanbanDepartment = () => {
+    setKanbanDepartments((current) => [...current, blankKanbanDepartment()]);
+  };
+  const removeKanbanDepartment = (departmentId) => {
+    setKanbanDepartments((current) => current.filter((item) => item.id !== departmentId));
+  };
+  const updateKanbanList = (key, updater) => {
+    setKanbanOptions((current) => ({
+      ...current,
+      [key]: typeof updater === "function" ? updater(current[key] || []) : updater
+    }));
+  };
+  const addKanbanOption = (key) => updateKanbanList(key, (current) => [...current, ""]);
+  const updateKanbanOption = (key, index, value) => updateKanbanList(key, (current) => current.map((item, itemIndex) => itemIndex === index ? value : item));
+  const removeKanbanOption = (key, index) => updateKanbanList(key, (current) => current.filter((_item, itemIndex) => itemIndex !== index));
+  const updateKanbanPrintSize = (sizeId, patch) => {
+    setKanbanPrintSettings((current) => ({
+      ...current,
+      kanbanPrintSizes: (current.kanbanPrintSizes || []).map((item) => item.id === sizeId ? { ...item, ...patch } : item)
+    }));
+  };
+  const addKanbanPrintSize = () => {
+    setKanbanPrintSettings((current) => {
+      const next = [...(current.kanbanPrintSizes || []), blankKanbanPrintSize()];
+      return {
+        ...current,
+        defaultKanbanPrintSizeId: current.defaultKanbanPrintSizeId || next[0]?.id || "",
+        kanbanPrintSizes: next
+      };
+    });
+  };
+  const removeKanbanPrintSize = (sizeId) => {
+    setKanbanPrintSettings((current) => {
+      const next = (current.kanbanPrintSizes || []).filter((item) => item.id !== sizeId);
+      return {
+        defaultKanbanPrintSizeId: current.defaultKanbanPrintSizeId === sizeId ? (next[0]?.id || "") : current.defaultKanbanPrintSizeId,
+        kanbanPrintSizes: next
+      };
+    });
+  };
+  const chooseBrandIcon = async () => {
+    try {
+      const selectedPath = await api.chooseBrandIcon();
+      if (!selectedPath) {
+        return;
+      }
+      setBrandingSettings((current) => ({ ...current, appIconPath: selectedPath }));
+    } catch (error) {
+      onStatus(error.message || String(error));
+    }
+  };
+
+  useAutoSave({
+    value: brandingSettings,
+    resetKey: `branding-settings:${workspace.dataFolder}:${workspace.preferences?.appTitle || ""}:${workspace.preferences?.appTagline || ""}:${workspace.preferences?.windowTitle || ""}:${workspace.preferences?.appIconPath || ""}`,
+    enabled: true,
+    isReady: (current) => Boolean(current),
+    save: async (current) => {
+      await onSavePreferences({
+        appTitle: String(current.appTitle || "").trim() || "AMERP",
+        appTagline: String(current.appTagline || "").trim() || "Operator ERP",
+        windowTitle: String(current.windowTitle || "").trim() || "AMERP",
+        appIconPath: String(current.appIconPath || "").trim()
+      }, { silent: true });
+      return current;
+    }
+  });
 
   useAutoSave({
     value: materialFamilies,
@@ -4586,6 +5495,20 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
   });
 
   useAutoSave({
+    value: kanbanNumberSettings,
+    resetKey: `kanban-number-settings:${workspace.dataFolder}:${workspace.preferences?.kanbanInventoryPrefix || ""}:${workspace.preferences?.kanbanStartingInventoryNumber ?? ""}`,
+    enabled: true,
+    isReady: (current) => Boolean(current),
+    save: async (current) => {
+      await onSavePreferences({
+        kanbanInventoryPrefix: String(current.kanbanInventoryPrefix || "").trim(),
+        kanbanStartingInventoryNumber: Number(current.kanbanStartingInventoryNumber || 0) || 1
+      }, { silent: true });
+      return current;
+    }
+  });
+
+  useAutoSave({
     value: metrologyOptions,
     resetKey: `metrology-settings:${workspace.dataFolder}:${JSON.stringify({
       metrologyToolTypes: workspace.preferences?.metrologyToolTypes || [],
@@ -4605,6 +5528,86 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
     }
   });
 
+  useAutoSave({
+    value: aiSettings,
+    resetKey: `ai-settings:${workspace.dataFolder}:${workspace.preferences?.openaiApiKey || ""}`,
+    enabled: true,
+    isReady: (current) => Boolean(current),
+    save: async (current) => {
+      await onSavePreferences({
+        openaiApiKey: String(current.openaiApiKey || "").trim()
+      }, { silent: true });
+      return current;
+    }
+  });
+
+  useAutoSave({
+    value: kanbanDepartments,
+    resetKey: `kanban-departments:${workspace.dataFolder}:${JSON.stringify(workspace.preferences?.kanbanDepartments || [])}`,
+    enabled: true,
+    isReady: (current) => Boolean(current),
+    save: async (current) => {
+      await onSavePreferences({
+        kanbanDepartments: (current || [])
+          .map((item) => ({
+            id: item.id,
+            name: String(item.name || "").trim(),
+            color: String(item.color || "#2563eb").trim() || "#2563eb"
+          }))
+          .filter((item) => item.name)
+      }, { silent: true });
+      return current;
+    }
+  });
+
+  useAutoSave({
+    value: kanbanOptions,
+    resetKey: `kanban-settings:${workspace.dataFolder}:${JSON.stringify({
+      kanbanStorageLocations: workspace.preferences?.kanbanStorageLocations || [],
+      kanbanVendors: workspace.preferences?.kanbanVendors || [],
+      kanbanCategories: workspace.preferences?.kanbanCategories || []
+    })}`,
+    enabled: true,
+    isReady: (current) => Boolean(current),
+    save: async (current) => {
+      await onSavePreferences(Object.fromEntries(
+        Object.entries(current).map(([key, values]) => [key, (values || []).map((value) => String(value || "").trim()).filter(Boolean)])
+      ), { silent: true });
+      return current;
+    }
+  });
+
+  useAutoSave({
+    value: kanbanPrintSettings,
+    resetKey: `kanban-print-settings:${workspace.dataFolder}:${JSON.stringify({
+      kanbanPrintSizes: workspace.preferences?.kanbanPrintSizes || [],
+      defaultKanbanPrintSizeId: workspace.preferences?.defaultKanbanPrintSizeId || ""
+    })}`,
+    enabled: true,
+    isReady: (current) => Boolean(current),
+    save: async (current) => {
+      const sizes = (current.kanbanPrintSizes || [])
+        .map((item) => ({
+          id: item.id,
+          name: String(item.name || "").trim(),
+          widthIn: Number(item.widthIn || 0),
+          heightIn: Number(item.heightIn || 0)
+        }))
+        .filter((item) => item.name && Number.isFinite(item.widthIn) && item.widthIn > 0 && Number.isFinite(item.heightIn) && item.heightIn > 0);
+      const defaultId = sizes.some((item) => item.id === current.defaultKanbanPrintSizeId)
+        ? current.defaultKanbanPrintSizeId
+        : (sizes[0]?.id || "");
+      await onSavePreferences({
+        kanbanPrintSizes: sizes,
+        defaultKanbanPrintSizeId: defaultId
+      }, { silent: true });
+      return {
+        ...current,
+        defaultKanbanPrintSizeId: defaultId
+      };
+    }
+  });
+
   const metrologySections = [
     ["metrologyToolTypes", "Tool Types"],
     ["metrologyManufacturers", "Manufacturers"],
@@ -4613,6 +5616,17 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
     ["metrologyDepartments", "Departments"],
     ["metrologyStatuses", "Statuses"]
   ];
+  const kanbanSections = [
+    ["kanbanStorageLocations", "Storage Locations"],
+    ["kanbanVendors", "Vendors"],
+    ["kanbanCategories", "Categories"]
+  ];
+  const settingsOptionPlaceholder = (label) => {
+    if (label === "Categories") {
+      return "Category";
+    }
+    return label.endsWith("s") ? label.slice(0, -1) : label;
+  };
 
   return (
     <div className="workflow-stack settings-stack">
@@ -4632,6 +5646,38 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
           <div className="subpanel">
             <div className="subpanel-header">
               <div>
+                <h4>Branding</h4>
+                <span>Change the software label, tagline, icon, and native window title.</span>
+              </div>
+            </div>
+            <div className="form-grid compact-2">
+              <TextField label="Software Title" value={brandingSettings.appTitle} onChange={(value) => setBrandingSettings((current) => ({ ...current, appTitle: value }))} />
+              <TextField label="Tagline" value={brandingSettings.appTagline} onChange={(value) => setBrandingSettings((current) => ({ ...current, appTagline: value }))} />
+              <TextField label="Window Title" value={brandingSettings.windowTitle} onChange={(value) => setBrandingSettings((current) => ({ ...current, windowTitle: value }))} />
+            </div>
+            <div className="subpanel top-gap">
+              <div className="subpanel-header">
+                <div>
+                  <h4>Icon</h4>
+                  <span>{brandingSettings.appIconPath || "No custom icon selected."}</span>
+                </div>
+                <div className="toolbar">
+                  <button onClick={() => void chooseBrandIcon()}><FolderOpen size={14} /> Choose Icon</button>
+                  <button onClick={() => setBrandingSettings((current) => ({ ...current, appIconPath: "" }))}>Clear</button>
+                </div>
+              </div>
+              {brandingSettings.appIconPath ? (
+                <div className="settings-icon-preview">
+                  <img src={localFileUrl(brandingSettings.appIconPath)} alt="Brand icon preview" />
+                </div>
+              ) : (
+                <div className="empty-inline">Using the default icon.</div>
+              )}
+            </div>
+          </div>
+          <div className="subpanel">
+            <div className="subpanel-header">
+              <div>
                 <h4>Job Numbering</h4>
                 <span>Defaults for Assign Number.</span>
               </div>
@@ -4639,6 +5685,35 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
             <div className="form-grid compact-2">
               <TextField label="Job Prefix" value={jobSettings.jobPrefix} onChange={(value) => setJobSettings((current) => ({ ...current, jobPrefix: value }))} />
               <TextField label="Starting Job Number" value={jobSettings.startingJobNumber} onChange={(value) => setJobSettings((current) => ({ ...current, startingJobNumber: value }))} />
+            </div>
+          </div>
+          <div className="subpanel">
+            <div className="subpanel-header">
+              <div>
+                <h4>Kanban Numbering</h4>
+                <span>Defaults for Kanban Assign Number.</span>
+              </div>
+            </div>
+            <div className="form-grid compact-2">
+              <TextField label="Inventory Prefix" value={kanbanNumberSettings.kanbanInventoryPrefix} onChange={(value) => setKanbanNumberSettings((current) => ({ ...current, kanbanInventoryPrefix: value }))} />
+              <TextField label="Starting Inventory Number" value={kanbanNumberSettings.kanbanStartingInventoryNumber} onChange={(value) => setKanbanNumberSettings((current) => ({ ...current, kanbanStartingInventoryNumber: value }))} />
+            </div>
+          </div>
+          <div className="subpanel">
+            <div className="subpanel-header">
+              <div>
+                <h4>AI</h4>
+                <span>OpenAI settings for manual Kanban enrichment and image generation.</span>
+              </div>
+            </div>
+            <div className="form-grid compact-2">
+              <TextField
+                label="OpenAI API Key"
+                type="password"
+                value={aiSettings.openaiApiKey}
+                onChange={(value) => setAiSettings((current) => ({ ...current, openaiApiKey: value }))}
+                placeholder="sk-..."
+              />
             </div>
           </div>
         </div>
@@ -4760,17 +5835,94 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
                 </div>
                 <button onClick={() => addMetrologyOption(key)}><Plus size={14} /> Option</button>
               </div>
-              <div className="parameter-list">
-                {(metrologyOptions[key] || []).map((value, index) => (
-                  <div className="parameter-row catalog-alloy-row" key={`${key}-${index}`}>
-                    <input value={value || ""} placeholder={`${label.slice(0, -1)} option`} onChange={(event) => updateMetrologyOption(key, index, event.target.value)} />
-                    <button className="danger subtle square" onClick={() => removeMetrologyOption(key, index)}><X size={13} /></button>
-                  </div>
-                ))}
+                <div className="parameter-list">
+                  {(metrologyOptions[key] || []).map((value, index) => (
+                    <div className="parameter-row catalog-alloy-row" key={`${key}-${index}`}>
+                      <input value={value || ""} placeholder={`${settingsOptionPlaceholder(label)} option`} onChange={(event) => updateMetrologyOption(key, index, event.target.value)} />
+                      <button className="danger subtle square" onClick={() => removeMetrologyOption(key, index)}><X size={13} /></button>
+                    </div>
+                  ))}
                 {!metrologyOptions[key]?.length && <div className="empty-inline">No options configured yet.</div>}
               </div>
             </div>
           ))}
+        </div>
+      </section>
+
+      <section className="panel">
+        <div className="panel-heading inline">
+          <div>
+            <h3>Kanban Options</h3>
+            <span>Controlled lists used in Kanban cards.</span>
+          </div>
+        </div>
+        <div className="subpanel top-gap">
+          <div className="subpanel-header">
+            <div>
+              <h4>Departments</h4>
+              <span>Name and accent color used on printed Kanban cards.</span>
+            </div>
+            <button onClick={addKanbanDepartment}><Plus size={14} /> Department</button>
+          </div>
+          <div className="parameter-list">
+            {(kanbanDepartments || []).map((department) => (
+              <div className="parameter-row kanban-department-row" key={department.id}>
+                <input value={department.name || ""} placeholder="Department name" onChange={(event) => updateKanbanDepartment(department.id, { name: event.target.value })} />
+                <input type="color" value={department.color || "#2563eb"} onChange={(event) => updateKanbanDepartment(department.id, { color: event.target.value })} />
+                <button className="danger subtle square" onClick={() => removeKanbanDepartment(department.id)}><X size={13} /></button>
+              </div>
+            ))}
+            {!kanbanDepartments.length && <div className="empty-inline">No departments configured yet.</div>}
+          </div>
+        </div>
+        <div className="settings-metrology-grid">
+          {kanbanSections.map(([key, label]) => (
+            <div key={key} className="subpanel">
+              <div className="subpanel-header">
+                <div>
+                  <h4>{label}</h4>
+                  <span>{kanbanOptions[key]?.length || 0} options</span>
+                </div>
+                <button onClick={() => addKanbanOption(key)}><Plus size={14} /> Option</button>
+              </div>
+              <div className="parameter-list">
+                {(kanbanOptions[key] || []).map((value, index) => (
+                  <div className="parameter-row catalog-alloy-row" key={`${key}-${index}`}>
+                    <input value={value || ""} placeholder={`${settingsOptionPlaceholder(label)} option`} onChange={(event) => updateKanbanOption(key, index, event.target.value)} />
+                    <button className="danger subtle square" onClick={() => removeKanbanOption(key, index)}><X size={13} /></button>
+                  </div>
+                ))}
+                {!kanbanOptions[key]?.length && <div className="empty-inline">No options configured yet.</div>}
+              </div>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      <section className="panel">
+        <div className="panel-heading inline">
+          <div>
+            <h3>Kanban Print Sizes</h3>
+            <span>Preset label/card sizes available when generating a Kanban PDF.</span>
+          </div>
+          <button onClick={addKanbanPrintSize}><Plus size={14} /> Size</button>
+        </div>
+        <div className="parameter-list">
+          {(kanbanPrintSettings.kanbanPrintSizes || []).map((size) => (
+            <div className="parameter-row kanban-print-size-row" key={size.id}>
+              <input
+                type="radio"
+                name="default-kanban-size"
+                checked={kanbanPrintSettings.defaultKanbanPrintSizeId === size.id}
+                onChange={() => setKanbanPrintSettings((current) => ({ ...current, defaultKanbanPrintSizeId: size.id }))}
+              />
+              <input value={size.name || ""} placeholder='Size name (for example 2" x 4")' onChange={(event) => updateKanbanPrintSize(size.id, { name: event.target.value })} />
+              <input type="number" min="0.5" step="0.1" value={size.widthIn} placeholder="Width (in)" onChange={(event) => updateKanbanPrintSize(size.id, { widthIn: event.target.value })} />
+              <input type="number" min="0.5" step="0.1" value={size.heightIn} placeholder="Height (in)" onChange={(event) => updateKanbanPrintSize(size.id, { heightIn: event.target.value })} />
+              <button className="danger subtle square" onClick={() => removeKanbanPrintSize(size.id)}><X size={13} /></button>
+            </div>
+          ))}
+          {!kanbanPrintSettings.kanbanPrintSizes?.length && <div className="empty-inline">No print sizes configured yet.</div>}
         </div>
       </section>
 
@@ -4791,6 +5943,161 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
           ))}
           {!workspace.dashboard?.recentAudit?.length && <div className="empty-inline">No recent activity.</div>}
         </div>
+      </section>
+    </div>
+  );
+}
+
+function QrCodeImage({ value, alt }) {
+  const [src, setSrc] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!value) {
+      setSrc("");
+      return () => {
+        cancelled = true;
+      };
+    }
+    QRCode.toDataURL(String(value), {
+      margin: 1,
+      width: 240,
+      color: {
+        dark: "#111111",
+        light: "#ffffff"
+      }
+    }).then((dataUrl) => {
+      if (!cancelled) {
+        setSrc(dataUrl);
+      }
+    }).catch(() => {
+      if (!cancelled) {
+        setSrc("");
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [value]);
+
+  if (!src) {
+    return <div className="qr-placeholder">QR unavailable</div>;
+  }
+  return <img className="qr-image" src={src} alt={alt} />;
+}
+
+function PrintKanbanCard({ cardId, sizeId = "" }) {
+  const [card, setCard] = useState(null);
+  const [workspaceData, setWorkspaceData] = useState(null);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    const load = async () => {
+      try {
+        const [loadedCard, loadedWorkspace] = await Promise.all([
+          api.loadKanbanCard(cardId),
+          api.loadWorkspace()
+        ]);
+        if (!loadedCard) {
+          throw new Error("Kanban card not found.");
+        }
+        setCard(loadedCard);
+        setWorkspaceData(loadedWorkspace);
+      } catch (loadError) {
+        setError(loadError.message || String(loadError));
+      }
+    };
+    load();
+  }, [cardId]);
+
+  if (error) return <Fatal title="Print Error" message={error} />;
+  if (!card || !workspaceData) return <LoadingScreen message="Loading Kanban card..." />;
+
+  const photoUrl = kanbanPhotoSrc(card);
+  const amerpQrValue = kanbanDeepLink(card.id, workspaceData);
+  const size = kanbanPrintSizes(workspaceData.preferences).find((item) => item.id === sizeId)
+    || kanbanPrintSizes(workspaceData.preferences).find((item) => item.id === defaultKanbanPrintSizeId(workspaceData.preferences))
+    || { name: '2" x 4"', widthIn: 2, heightIn: 4 };
+  const accentColor = kanbanDepartmentColor(workspaceData.preferences, card.department);
+  const subtitle = [card.internalInventoryNumber, card.packSize].filter(Boolean).join(" | ");
+  const detailRows = [
+    ["Minimum", card.minimumLevel],
+    ["Location", card.storageLocation],
+    ["Order", card.orderQuantity],
+    ["Vendor", card.vendor],
+    ["Category", card.category]
+  ].filter(([, value]) => value);
+
+  return (
+    <div className="print-shell">
+      <div className="print-actions screen-only kanban-label-actions" style={{ width: `${size.widthIn}in` }}>
+        <button onClick={() => { window.location.hash = "/"; }}>Back</button>
+        <button onClick={() => window.print()}>Print</button>
+      </div>
+
+      <section
+        className="print-page kanban-print-page kanban-label-page"
+        style={{
+          width: `${size.widthIn}in`,
+          minHeight: `${size.heightIn}in`,
+          "--kanban-accent": accentColor
+        }}
+      >
+        <article className="kanban-label-card">
+          <header className="kanban-label-header">
+            <div className="kanban-label-title-block">
+              <h1>{card.itemName || "Kanban Item"}</h1>
+              {subtitle ? <p>{subtitle}</p> : null}
+            </div>
+            <div className="kanban-label-qr-small">
+              <QrCodeImage value={amerpQrValue} alt="AMERP QR code" />
+            </div>
+          </header>
+
+          <div className="kanban-label-accent-line" />
+
+          <div className="kanban-label-body">
+            <div className="kanban-label-details">
+              {detailRows.map(([label, value]) => (
+                <div key={label} className="kanban-detail-row">
+                  <span>{label}</span>
+                  <strong>{value}</strong>
+                </div>
+              ))}
+              {card.description ? (
+                <div className="kanban-label-copy">
+                  <span>Description</span>
+                  <p>{card.description}</p>
+                </div>
+              ) : null}
+              {card.orderingNotes ? (
+                <div className="kanban-label-copy secondary">
+                  <span>Notes</span>
+                  <p>{card.orderingNotes}</p>
+                </div>
+              ) : null}
+            </div>
+
+            <div className="kanban-label-photo-wrap">
+              {photoUrl ? (
+                <div className="kanban-label-photo">
+                  <img src={photoUrl} alt={card.itemName || "Kanban item"} />
+                </div>
+              ) : (
+                <div className="kanban-label-photo empty-inline">No product photo</div>
+              )}
+            </div>
+          </div>
+
+          <footer className="kanban-label-footer">
+            <div className="kanban-label-department">
+              <span>{card.department || "Kanban"}</span>
+            </div>
+            <div className="kanban-label-vendor-qr">
+              <QrCodeImage value={card.purchaseUrl} alt="Vendor QR code" />
+            </div>
+          </footer>
+        </article>
       </section>
     </div>
   );
@@ -4957,6 +6264,73 @@ function SelectField({ label, value, options, onChange, emptyLabel = "", disable
   );
 }
 
+function SelectWithInlineAdd({
+  label,
+  value,
+  options,
+  onChange,
+  onAddOption,
+  emptyLabel = "",
+  newPlaceholder = "New option",
+  disabled = false
+}) {
+  const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const saveOption = async () => {
+    if (!onAddOption) return;
+    setSaving(true);
+    try {
+      const saved = await onAddOption(draft);
+      onChange(saved);
+      setDraft("");
+      setOpen(false);
+    } catch (error) {
+      window.alert(error.message || String(error));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <label className="field">
+      <span>{label}</span>
+      <div className="field-action-row">
+        <select value={value || ""} onChange={(event) => onChange(event.target.value)} disabled={disabled}>
+          {options.map((option) => (
+            <option key={`${label}-${option || "empty"}`} value={option}>
+              {option || emptyLabel}
+            </option>
+          ))}
+        </select>
+        {onAddOption ? (
+          <button type="button" className="inline-action-button" onClick={() => setOpen((current) => !current)} disabled={disabled || saving}>
+            <Plus size={13} /> New
+          </button>
+        ) : null}
+      </div>
+      {open ? (
+        <div className="mini-inline-editor">
+          <input value={draft} placeholder={newPlaceholder} onChange={(event) => setDraft(event.target.value)} disabled={saving} />
+          <button type="button" className="inline-action-button" onClick={() => void saveOption()} disabled={saving || !draft.trim()}>Add</button>
+          <button
+            type="button"
+            className="inline-action-button"
+            onClick={() => {
+              setOpen(false);
+              setDraft("");
+            }}
+            disabled={saving}
+          >
+            Cancel
+          </button>
+        </div>
+      ) : null}
+    </label>
+  );
+}
+
 function TextArea({ label, value, onChange, rows = 4 }) {
   return (
     <label className="field full">
@@ -4989,6 +6363,34 @@ function ConfirmDialog({ open, title, message, confirmLabel = "Confirm", onCance
         <div className="dialog-actions">
           <button onClick={onCancel}>Cancel</button>
           <button className="danger" onClick={onConfirm}>{confirmLabel}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function KanbanPrintDialog({ open, sizes, selectedSizeId, onChange, onCancel, onConfirm }) {
+  if (!open) return null;
+  return (
+    <div className="dialog-backdrop">
+      <div className="dialog-panel narrow">
+        <div className="panel-heading">
+          <h3>Kanban Card Size</h3>
+        </div>
+        <p>Choose the card or label size to use for this PDF.</p>
+        <label className="field">
+          <span>Print Size</span>
+          <select value={selectedSizeId || ""} onChange={(event) => onChange(event.target.value)}>
+            {(sizes || []).map((size) => (
+              <option key={size.id} value={size.id}>
+                {size.name} ({size.widthIn}" x {size.heightIn}")
+              </option>
+            ))}
+          </select>
+        </label>
+        <div className="dialog-actions">
+          <button onClick={onCancel}>Cancel</button>
+          <button onClick={onConfirm} disabled={!selectedSizeId}><FileDown size={14} /> Export PDF</button>
         </div>
       </div>
     </div>
@@ -5033,6 +6435,7 @@ function PrintField({ label, value, compact = false }) {
 function titleForView(view) {
   return {
     jobs: "Jobs",
+    kanban: "Kanban",
     materials: "Materials",
     metrology: "Gages",
     templates: "Operation Templates",
@@ -5043,6 +6446,7 @@ function titleForView(view) {
 function subtitleForView(view) {
   return {
     jobs: "",
+    kanban: "",
     materials: "",
     metrology: "",
     templates: "",
