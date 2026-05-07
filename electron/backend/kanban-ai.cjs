@@ -57,7 +57,6 @@ function buildSeedPayload(card, vendorContext, categories) {
       itemName: normalizeWhitespace(card?.itemName),
       internalInventoryNumber: normalizeWhitespace(card?.internalInventoryNumber),
       minimumLevel: normalizeWhitespace(card?.minimumLevel),
-      maximumLevel: normalizeWhitespace(card?.maximumLevel),
       orderQuantity: normalizeWhitespace(card?.orderQuantity),
       storageLocation: normalizeWhitespace(card?.storageLocation),
       department: normalizeWhitespace(card?.department),
@@ -92,7 +91,7 @@ async function enrichKanbanCardDraft({ apiKey, card, categories, vendorContext }
               "Write a practical description that is short and to the point, usually one sentence and never more than two short sentences.",
               "Write concise ordering notes for a buyer.",
               "Do not include any URLs, web addresses, or link text in the description or ordering notes.",
-              "Suggest reasonable minimum level, maximum level, order quantity, and pack size or purchase unit when they can be inferred from the product context.",
+              "Suggest reasonable minimum level, order quantity, and pack size or purchase unit when they can be inferred from the product context.",
               "Do not invent pricing, stock, or ordering requirements.",
               buildCategoryInstruction(categories)
             ].join(" ")
@@ -124,11 +123,10 @@ async function enrichKanbanCardDraft({ apiKey, card, categories, vendorContext }
             category: { type: "string" },
             vendor: { type: "string" },
             minimumLevel: { type: "string" },
-            maximumLevel: { type: "string" },
             orderQuantity: { type: "string" },
             packSize: { type: "string" }
           },
-          required: ["itemName", "description", "orderingNotes", "category", "vendor", "minimumLevel", "maximumLevel", "orderQuantity", "packSize"]
+          required: ["itemName", "description", "orderingNotes", "category", "vendor", "minimumLevel", "orderQuantity", "packSize"]
         }
       }
     }
@@ -142,7 +140,6 @@ async function enrichKanbanCardDraft({ apiKey, card, categories, vendorContext }
     category: normalizeCategory(parsed?.category, categories),
     vendor: normalizeWhitespace(parsed?.vendor),
     minimumLevel: normalizeWhitespace(parsed?.minimumLevel),
-    maximumLevel: normalizeWhitespace(parsed?.maximumLevel),
     orderQuantity: normalizeWhitespace(parsed?.orderQuantity),
     packSize: normalizeWhitespace(parsed?.packSize)
   };

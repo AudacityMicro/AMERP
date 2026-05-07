@@ -31,6 +31,9 @@ function parseDeepLink(value) {
     if (url.hostname === "open" && segments[0] === "kanban" && segments[1]) {
       return { entity: "kanban", id: segments[1], url: value };
     }
+    if (url.hostname === "open" && segments[0] === "material" && segments[1]) {
+      return { entity: "material", id: segments[1], url: value };
+    }
     return null;
   } catch {
     return null;
@@ -170,9 +173,10 @@ app.whenReady().then(async () => {
   ipcMain.handle("delete-kanban-card", (_event, id) => backend.deleteKanbanCard(id));
   ipcMain.handle("choose-kanban-photo", (_event, cardId) => backend.chooseKanbanPhoto(cardId, mainWindow));
   ipcMain.handle("import-kanban-from-url", (_event, url) => backend.importKanbanFromUrl(url));
-  ipcMain.handle("ai-fill-kanban-card", (_event, card) => backend.aiFillKanbanCard(card));
-  ipcMain.handle("generate-kanban-image", (_event, card) => backend.generateKanbanImage(card));
-  ipcMain.handle("export-kanban-pdf", (_event, cardId, destinationPath, sizeId) => backend.exportKanbanPdf(cardId, destinationPath, sizeId));
+ipcMain.handle("ai-fill-kanban-card", (_event, card) => backend.aiFillKanbanCard(card));
+ipcMain.handle("generate-kanban-image", (_event, card) => backend.generateKanbanImage(card));
+ipcMain.handle("export-kanban-pdf", (_event, cardId, destinationPath, sizeId, options) => backend.exportKanbanPdf(cardId, destinationPath, sizeId, options));
+  ipcMain.handle("export-material-pdf", (_event, materialId, destinationPath, sizeId, options) => backend.exportMaterialPdf(materialId, destinationPath, sizeId, options));
   ipcMain.handle("generate-next-job-number", () => backend.generateNextJobNumber());
   ipcMain.handle("generate-next-kanban-inventory-number", () => backend.generateNextKanbanInventoryNumber());
   ipcMain.handle("list-customers", () => backend.listCustomers());

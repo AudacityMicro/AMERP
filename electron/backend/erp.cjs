@@ -42,9 +42,10 @@ const {
 } = require("./kanban-ai.cjs");
 
 const CONFIG_FILE = "amerp-config.json";
-const LOCK_TTL_MS = 8 * 60 * 60 * 1000;
+const LOCK_TTL_MS = 15 * 60 * 1000;
 const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"]);
 const KANBAN_DEEP_LINK_PREFIX = "amerp://open/kanban/";
+const MATERIAL_DEEP_LINK_PREFIX = "amerp://open/material/";
 const KANBAN_VENDOR_SKU_PREFIX = "Vendor SKU / Part #:";
 const BROWSER_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36";
 const KANBAN_DEPARTMENT_COLORS = ["#2563eb", "#f59e0b", "#0f766e", "#7c3aed", "#dc2626", "#475569"];
@@ -250,16 +251,18 @@ class ERPBackend {
       const items = Array.isArray(value) ? value : fallback;
       return Array.from(new Set(items.map((item) => String(item || "").trim()).filter(Boolean)));
     };
-    const normalizeKanbanDepartments = (value) => {
+    const normalizeLocationList = (value) => Array.from(new Set((Array.isArray(value) ? value : []).map((item) => String(item || "").trim()).filter(Boolean)));
+    const normalizeKanbanDepartments = (value, legacyLocations = []) => {
       const items = Array.isArray(value) && value.length ? value : DEFAULT_KANBAN_DEPARTMENTS;
-      return items
+      const normalized = items
         .map((item, index) => {
           if (typeof item === "string") {
             const name = String(item || "").trim();
             return name ? {
               id: `kanban-dept-${slugify(name) || index + 1}`,
               name,
-              color: KANBAN_DEPARTMENT_COLORS[index % KANBAN_DEPARTMENT_COLORS.length]
+              color: KANBAN_DEPARTMENT_COLORS[index % KANBAN_DEPARTMENT_COLORS.length],
+              locations: []
             } : null;
           }
           const name = String(item?.name || "").trim();
@@ -270,10 +273,18 @@ class ERPBackend {
           return {
             id: String(item?.id || `kanban-dept-${slugify(name) || index + 1}`).trim(),
             name,
-            color
+            color,
+            locations: normalizeLocationList(item?.locations)
           };
         })
         .filter(Boolean);
+      if (!normalized.some((item) => item.locations?.length) && legacyLocations.length && normalized.length) {
+        normalized[0] = {
+          ...normalized[0],
+          locations: normalizeLocationList([...(normalized[0].locations || []), ...legacyLocations])
+        };
+      }
+      return normalized;
     };
     const normalizeKanbanPrintSizes = (value) => {
       const items = Array.isArray(value) && value.length ? value : DEFAULT_KANBAN_PRINT_SIZES;
@@ -294,7 +305,8 @@ class ERPBackend {
         })
         .filter(Boolean);
     };
-    const kanbanDepartments = normalizeKanbanDepartments(preferences?.kanbanDepartments);
+    const legacyKanbanStorageLocations = listPreference(preferences?.kanbanStorageLocations, ["Stock Room", "Tool Crib", "Receiving", "Maintenance Bench"]);
+    const kanbanDepartments = normalizeKanbanDepartments(preferences?.kanbanDepartments, legacyKanbanStorageLocations);
     const kanbanPrintSizes = normalizeKanbanPrintSizes(preferences?.kanbanPrintSizes);
     const defaultKanbanPrintSizeId = kanbanPrintSizes.some((item) => item.id === preferences?.defaultKanbanPrintSizeId)
       ? preferences.defaultKanbanPrintSizeId
@@ -318,7 +330,7 @@ class ERPBackend {
       metrologyDepartments: listPreference(preferences?.metrologyDepartments, ["Quality", "Machining", "Assembly"]),
       metrologyStatuses: listPreference(preferences?.metrologyStatuses, ["In service", "Due for calibration", "Overdue", "Retired"]),
       kanbanDepartments,
-      kanbanStorageLocations: listPreference(preferences?.kanbanStorageLocations, ["Stock Room", "Tool Crib", "Receiving", "Maintenance Bench"]),
+      kanbanStorageLocations: Array.from(new Set(kanbanDepartments.flatMap((item) => item.locations || []).filter(Boolean))),
       kanbanVendors: listPreference(preferences?.kanbanVendors, ["McMaster-Carr", "MSC", "Amazon"]),
       kanbanCategories: listPreference(preferences?.kanbanCategories, DEFAULT_KANBAN_CATEGORIES),
       kanbanPrintSizes,
@@ -386,6 +398,10 @@ class ERPBackend {
 
   buildKanbanDeepLink(cardId) {
     return `${KANBAN_DEEP_LINK_PREFIX}${encodeURIComponent(cardId)}`;
+  }
+
+  buildMaterialDeepLink(materialId) {
+    return `${MATERIAL_DEEP_LINK_PREFIX}${encodeURIComponent(materialId)}`;
   }
 
   isGenericKanbanItemName(url, itemName) {
@@ -1052,7 +1068,6 @@ class ERPBackend {
           category: enriched.category || draft.category,
           vendor: enriched.vendor || draft.vendor,
           minimumLevel: enriched.minimumLevel || draft.minimumLevel,
-          maximumLevel: enriched.maximumLevel || draft.maximumLevel,
           orderQuantity: enriched.orderQuantity || draft.orderQuantity,
           packSize: enriched.packSize || draft.packSize
         });
@@ -1109,7 +1124,6 @@ class ERPBackend {
       category: enriched.category || baseCard.category,
       vendor: enriched.vendor || baseCard.vendor,
       minimumLevel: enriched.minimumLevel || baseCard.minimumLevel,
-      maximumLevel: enriched.maximumLevel || baseCard.maximumLevel,
       orderQuantity: enriched.orderQuantity || baseCard.orderQuantity,
       packSize: enriched.packSize || baseCard.packSize
     });
@@ -1148,7 +1162,38 @@ class ERPBackend {
     return updatedCard;
   }
 
-  async exportKanbanPdf(cardId, destinationPath, sizeId = "") {
+  async waitForPrintSelector(printWindow, selector, timeoutMs = 15000) {
+    if (!printWindow?.webContents) {
+      return;
+    }
+    await printWindow.webContents.executeJavaScript(`
+      new Promise((resolve, reject) => {
+        const selector = ${JSON.stringify(selector)};
+        const timeoutMs = ${Number(timeoutMs)};
+        const startedAt = Date.now();
+        const finish = () => requestAnimationFrame(() => requestAnimationFrame(() => resolve(true)));
+        const check = () => {
+          const fatal = document.querySelector(".fatal");
+          if (fatal) {
+            reject(new Error(fatal.innerText || "Print route failed to render."));
+            return;
+          }
+          if (document.querySelector(selector)) {
+            finish();
+            return;
+          }
+          if (Date.now() - startedAt > timeoutMs) {
+            reject(new Error(\`Timed out waiting for print layout: \${selector}\`));
+            return;
+          }
+          setTimeout(check, 50);
+        };
+        check();
+      });
+    `, true);
+  }
+
+  async exportKanbanPdf(cardId, destinationPath, sizeId = "", options = {}) {
     const dataRoot = await this.requireDataFolder();
     const card = await this.loadKanbanCard(cardId);
     const preferences = await this.loadPreferences(dataRoot);
@@ -1158,17 +1203,15 @@ class ERPBackend {
     const selectedSize = (preferences.kanbanPrintSizes || []).find((item) => item.id === sizeId)
       || (preferences.kanbanPrintSizes || []).find((item) => item.id === preferences.defaultKanbanPrintSizeId)
       || DEFAULT_KANBAN_PRINT_SIZES[0];
+    const monochrome = options?.monochrome === true;
+    const effectiveWidth = Number(selectedSize.widthIn || 2) * 0.93;
+    const effectiveHeight = Number(selectedSize.heightIn || 4) * 0.93;
     let outputPath = destinationPath;
     if (!outputPath) {
-      const result = await dialog.showSaveDialog({
-        title: "Export Kanban Card PDF",
-        defaultPath: path.join(dataRoot, `${safeFileName(card.internalInventoryNumber || card.itemName || card.id)}-kanban-card.pdf`),
-        filters: [{ name: "PDF", extensions: ["pdf"] }]
-      });
-      if (result.canceled || !result.filePath) {
-        return null;
-      }
-      outputPath = result.filePath;
+      const exportFolder = path.join(dataRoot, "kanban-cards");
+      await ensureDir(exportFolder);
+      const sizeSuffix = safeFileName(selectedSize.name || `${selectedSize.widthIn}x${selectedSize.heightIn}`);
+      outputPath = path.join(exportFolder, `${safeFileName(card.internalInventoryNumber || card.itemName || card.id)}-${sizeSuffix}-kanban-card.pdf`);
     }
 
     const printWindow = new BrowserWindow({
@@ -1183,25 +1226,25 @@ class ERPBackend {
       }
     });
     if (this.devServerUrl) {
-      await printWindow.loadURL(`${this.devServerUrl}#/print/kanban/${encodeURIComponent(cardId)}?size=${encodeURIComponent(selectedSize.id)}`);
+      await printWindow.loadURL(`${this.devServerUrl}#/print/kanban/${encodeURIComponent(cardId)}?size=${encodeURIComponent(selectedSize.id)}${monochrome ? "&bw=1" : ""}`);
     } else {
       await printWindow.loadFile(path.join(this.app.getAppPath(), "dist", "index.html"), {
-        hash: `/print/kanban/${encodeURIComponent(cardId)}?size=${encodeURIComponent(selectedSize.id)}`
+        hash: `/print/kanban/${encodeURIComponent(cardId)}?size=${encodeURIComponent(selectedSize.id)}${monochrome ? "&bw=1" : ""}`
       });
     }
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    await this.waitForPrintSelector(printWindow, ".kanban-label-card-back");
     const pdf = await printWindow.webContents.printToPDF({
       pageSize: {
-        width: Math.round(Number(selectedSize.widthIn || 2) * 25400),
-        height: Math.round(Number(selectedSize.heightIn || 4) * 25400)
+        width: effectiveWidth,
+        height: effectiveHeight
       },
       printBackground: true,
       margins: {
         marginType: "custom",
-        top: 0.05,
-        bottom: 0.05,
-        left: 0.05,
-        right: 0.05
+        top: 0,
+        bottom: 0,
+        left: 0,
+        right: 0
       }
     });
     await fs.writeFile(outputPath, pdf);
@@ -1211,6 +1254,70 @@ class ERPBackend {
       console.warn(`Unable to open exported Kanban PDF: ${openError}`);
     }
     await this.appendAudit("kanban_pdf_exported", cardId, `Exported kanban card PDF to ${outputPath}.`);
+    return outputPath;
+  }
+
+  async exportMaterialPdf(materialId, destinationPath, sizeId = "", options = {}) {
+    const dataRoot = await this.requireDataFolder();
+    const material = await this.loadMaterial(materialId);
+    const preferences = await this.loadPreferences(dataRoot);
+    if (!material) {
+      throw new Error("Material not found.");
+    }
+    const selectedSize = (preferences.kanbanPrintSizes || []).find((item) => item.id === sizeId)
+      || (preferences.kanbanPrintSizes || []).find((item) => item.id === preferences.defaultKanbanPrintSizeId)
+      || DEFAULT_KANBAN_PRINT_SIZES[0];
+    const monochrome = options?.monochrome === true;
+    const effectiveWidth = Number(selectedSize.widthIn || 2) * 0.93;
+    const effectiveHeight = Number(selectedSize.heightIn || 4) * 0.93;
+    let outputPath = destinationPath;
+    if (!outputPath) {
+      const exportFolder = path.join(dataRoot, "material-labels");
+      await ensureDir(exportFolder);
+      const sizeSuffix = safeFileName(selectedSize.name || `${selectedSize.widthIn}x${selectedSize.heightIn}`);
+      outputPath = path.join(exportFolder, `${safeFileName(material.serialCode || material.materialType || material.id)}-${sizeSuffix}-material-label.pdf`);
+    }
+
+    const printWindow = new BrowserWindow({
+      show: false,
+      width: 1000,
+      height: 1400,
+      webPreferences: {
+        preload: path.join(__dirname, "..", "preload.cjs"),
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: false
+      }
+    });
+    if (this.devServerUrl) {
+      await printWindow.loadURL(`${this.devServerUrl}#/print/material/${encodeURIComponent(materialId)}?size=${encodeURIComponent(selectedSize.id)}${monochrome ? "&bw=1" : ""}`);
+    } else {
+      await printWindow.loadFile(path.join(this.app.getAppPath(), "dist", "index.html"), {
+        hash: `/print/material/${encodeURIComponent(materialId)}?size=${encodeURIComponent(selectedSize.id)}${monochrome ? "&bw=1" : ""}`
+      });
+    }
+    await this.waitForPrintSelector(printWindow, ".material-label-card");
+    const pdf = await printWindow.webContents.printToPDF({
+      pageSize: {
+        width: effectiveWidth,
+        height: effectiveHeight
+      },
+      printBackground: true,
+      margins: {
+        marginType: "custom",
+        top: 0,
+        bottom: 0,
+        left: 0,
+        right: 0
+      }
+    });
+    await fs.writeFile(outputPath, pdf);
+    printWindow.close();
+    const openError = await shell.openPath(outputPath);
+    if (openError) {
+      console.warn(`Unable to open exported material label PDF: ${openError}`);
+    }
+    await this.appendAudit("material_pdf_exported", materialId, `Exported material label PDF to ${outputPath}.`);
     return outputPath;
   }
 
@@ -1506,7 +1613,6 @@ class ERPBackend {
       `- Department: ${card.department || "-"}`,
       `- Storage Location: ${card.storageLocation || "-"}`,
       `- Minimum Level: ${card.minimumLevel || "-"}`,
-      `- Maximum Level: ${card.maximumLevel || "-"}`,
       `- Order Quantity: ${card.orderQuantity || "-"}`,
       `- Pack Size: ${card.packSize || "-"}`,
       `- Purchase URL: ${card.purchaseUrl || "-"}`,
@@ -3141,13 +3247,14 @@ class ERPBackend {
       libraries,
       standards,
       preferences,
-      constants: {
+        constants: {
           material: MATERIAL_CONSTANTS,
           documentCategories: DOCUMENT_CATEGORIES,
           jobStatuses: ["Open", "In Process", "On Hold", "Complete", "Archived"],
           priorities: ["Low", "Normal", "High", "Hot"],
           instrumentStatuses: ["In service", "Due for calibration", "Overdue", "Retired"],
-          kanbanDeepLinkPrefix: KANBAN_DEEP_LINK_PREFIX
+          kanbanDeepLinkPrefix: KANBAN_DEEP_LINK_PREFIX,
+          materialDeepLinkPrefix: MATERIAL_DEEP_LINK_PREFIX
         }
       };
     }
@@ -4037,16 +4144,16 @@ class ERPBackend {
         hash: `/print/${encodeURIComponent(jobId)}`
       });
     }
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    await this.waitForPrintSelector(printWindow, ".traveler-header");
     const pdf = await printWindow.webContents.printToPDF({
       pageSize: "Letter",
       printBackground: true,
       margins: {
         marginType: "custom",
-        top: 0.35,
-        bottom: 0.35,
-        left: 0.35,
-        right: 0.35
+        top: 0,
+        bottom: 0,
+        left: 0,
+        right: 0
       }
     });
     await fs.writeFile(outputPath, pdf);

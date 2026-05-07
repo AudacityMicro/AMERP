@@ -153,7 +153,6 @@ const blankKanbanCard = (defaults = {}) => ({
   itemName: "",
   internalInventoryNumber: "",
   minimumLevel: "",
-  maximumLevel: "",
   orderQuantity: "",
   storageLocation: defaults.storageLocation || "",
   department: defaults.department || "",
@@ -258,8 +257,9 @@ const blankCustomer = (name = "") => ({
 
 const blankKanbanDepartment = () => ({
   id: uid("kanban-dept"),
-  name: "",
-  color: "#2563eb"
+  name: "New Department",
+  color: "#2563eb",
+  locations: []
 });
 
 const blankKanbanPrintSize = () => ({
@@ -336,6 +336,11 @@ function kanbanDepartmentColor(preferences, departmentName) {
   return kanbanDepartmentList(preferences).find((item) => String(item?.name || "") === String(departmentName || ""))?.color || "#2563eb";
 }
 
+function kanbanLocationOptions(preferences, departmentName) {
+  const department = kanbanDepartmentList(preferences).find((item) => String(item?.name || "") === String(departmentName || ""));
+  return Array.from(new Set((department?.locations || []).map((item) => String(item || "").trim()).filter(Boolean)));
+}
+
 function kanbanPrintSizes(preferences) {
   return Array.isArray(preferences?.kanbanPrintSizes) ? preferences.kanbanPrintSizes : [];
 }
@@ -396,11 +401,26 @@ function kanbanDeepLink(cardId, workspace) {
   return `${prefix}${encodeURIComponent(cardId)}`;
 }
 
+function materialDeepLink(materialId, workspace) {
+  const prefix = workspace?.constants?.materialDeepLinkPrefix || "amerp://open/material/";
+  return `${prefix}${encodeURIComponent(materialId)}`;
+}
+
 function kanbanPhotoSrc(card) {
   if (!card?.photo?.relativePath) {
     return "";
   }
   return api.assetUrl(card.photo.relativePath);
+}
+
+function materialLabelPhotoSrc(material) {
+  const imageExtensions = new Set(["png", "jpg", "jpeg", "webp", "gif", "bmp"]);
+  const attachment = (material?.attachments || []).find((item) => {
+    const filename = String(item?.storedFilename || item?.originalFilename || "").toLowerCase();
+    const extension = filename.includes(".") ? filename.split(".").pop() : "";
+    return item?.active !== false && item?.relativePath && imageExtensions.has(extension);
+  });
+  return attachment?.relativePath ? api.assetUrl(attachment.relativePath) : "";
 }
 
 function materialDisplayType(material) {
@@ -541,6 +561,34 @@ function summarizeOperationLibraries(operation, libraries, templates) {
       return `${library?.label || libraryName}: ${selectedNames.join(", ")}`;
     })
     .filter(Boolean);
+}
+
+function operationLibraryRows(operation, libraries, templates) {
+  return selectedLibraryNamesForOperation(operation, templates)
+    .map((libraryName) => {
+      const library = libraries?.[libraryName] || null;
+      const selectedIds = operation?.librarySelections?.[libraryName] || [];
+      if (!selectedIds.length) {
+        return null;
+      }
+      const recordMap = new Map((library?.records || []).map((record) => [record.id, record.name]));
+      const selectedNames = selectedIds.map((recordId) => recordMap.get(recordId) || `[Missing] ${recordId}`);
+      return {
+        label: library?.label || libraryName,
+        value: selectedNames.join(", ")
+      };
+    })
+    .filter(Boolean);
+}
+
+function supportsDetailedTooling(type) {
+  return ["milling", "turning"].includes(String(type || "").trim().toLowerCase());
+}
+
+function toolHeading(tool, index) {
+  const toolNumber = tool?.fusionToolNumber ? `T${tool.fusionToolNumber}` : `Tool ${index + 1}`;
+  const toolName = tool?.name || tool?.description || "";
+  return toolName ? `${toolNumber} - ${toolName}` : toolNumber;
 }
 
 function instructionStepsFromOperation(operation) {
@@ -718,11 +766,17 @@ function App() {
     const [pathPart, queryPart = ""] = route.replace("/print/kanban/", "").split("?");
     const cardId = decodeURIComponent(pathPart);
     const params = new URLSearchParams(queryPart);
-    return <PrintKanbanCard cardId={cardId} sizeId={params.get("size") || ""} />;
+    return <PrintKanbanCard cardId={cardId} sizeId={params.get("size") || ""} monochrome={params.get("bw") === "1"} />;
+  }
+  if (route.startsWith("/print/material/")) {
+    const [pathPart, queryPart = ""] = route.replace("/print/material/", "").split("?");
+    const materialId = decodeURIComponent(pathPart);
+    const params = new URLSearchParams(queryPart);
+    return <PrintMaterialLabel materialId={materialId} sizeId={params.get("size") || ""} monochrome={params.get("bw") === "1"} />;
   }
   if (route.startsWith("/print/")) {
     const jobId = decodeURIComponent(route.replace("/print/", "").split("?")[0]);
-    return <PrintPacket jobId={jobId} />;
+    return <TravelerPrintPacket jobId={jobId} />;
   }
   return (
     <RenderBoundary>
@@ -765,6 +819,7 @@ function Workspace() {
   const fusionImportInFlight = useRef(false);
   const refreshWorkspaceRef = useRef(null);
   const openKanbanCardRef = useRef(null);
+  const openMaterialRef = useRef(null);
 
   const [selectedJobId, setSelectedJobId] = useState(null);
   const [job, setJob] = useState(null);
@@ -778,10 +833,14 @@ function Workspace() {
   const [kanbanAiState, setKanbanAiState] = useState("idle");
   const [kanbanPrintDialogOpen, setKanbanPrintDialogOpen] = useState(false);
   const [selectedKanbanPrintSizeId, setSelectedKanbanPrintSizeId] = useState("");
+  const [selectedKanbanPrintMonochrome, setSelectedKanbanPrintMonochrome] = useState(false);
 
   const [selectedMaterialId, setSelectedMaterialId] = useState(null);
   const [material, setMaterial] = useState(null);
   const [materialScreen, setMaterialScreen] = useState("list");
+  const [materialPrintDialogOpen, setMaterialPrintDialogOpen] = useState(false);
+  const [selectedMaterialPrintSizeId, setSelectedMaterialPrintSizeId] = useState("");
+  const [selectedMaterialPrintMonochrome, setSelectedMaterialPrintMonochrome] = useState(false);
 
   const [selectedInstrumentId, setSelectedInstrumentId] = useState(null);
   const [instrumentPayload, setInstrumentPayload] = useState(null);
@@ -854,9 +913,13 @@ function Workspace() {
     };
   }, []);
 
-  useEffect(() => api.onDeepLink?.((payload) => {
+useEffect(() => api.onDeepLink?.((payload) => {
     if (payload?.entity === "kanban" && payload.id) {
       openKanbanCardRef.current?.(payload.id);
+      return;
+    }
+    if (payload?.entity === "material" && payload.id) {
+      openMaterialRef.current?.(payload.id);
     }
   }), []);
 
@@ -889,6 +952,33 @@ function Workspace() {
       setSaveState("saved");
     }
   }, [view, jobScreen, kanbanScreen, materialScreen, metrologyScreen]);
+
+  useEffect(() => {
+    const activeLocks = [];
+    if (selectedJobId && jobScreen !== "list") {
+      activeLocks.push({ kind: "job", id: selectedJobId });
+    }
+    if (selectedKanbanId && kanbanScreen === "detail") {
+      activeLocks.push({ kind: "kanban", id: selectedKanbanId });
+    }
+    if (selectedMaterialId && materialScreen === "detail") {
+      activeLocks.push({ kind: "material", id: selectedMaterialId });
+    }
+    if (selectedInstrumentId && metrologyScreen === "detail") {
+      activeLocks.push({ kind: "instrument", id: selectedInstrumentId });
+    }
+    if (!activeLocks.length) {
+      return undefined;
+    }
+    const renewLocks = () => {
+      activeLocks.forEach(({ kind, id }) => {
+        api.acquireLock(kind, id, "").catch(() => {});
+      });
+    };
+    renewLocks();
+    const timer = window.setInterval(renewLocks, 60 * 1000);
+    return () => window.clearInterval(timer);
+  }, [selectedJobId, jobScreen, selectedKanbanId, kanbanScreen, selectedMaterialId, materialScreen, selectedInstrumentId, metrologyScreen]);
 
   const openJob = async (jobId) => {
     setBusy(true);
@@ -950,6 +1040,7 @@ function Workspace() {
       setBusy(false);
     }
   };
+  openMaterialRef.current = openMaterial;
 
   const openInstrument = async (instrumentId) => {
     setBusy(true);
@@ -992,6 +1083,11 @@ function Workspace() {
   };
 
   const showJobList = () => {
+    if (selectedJobId) {
+      api.releaseLock("job", selectedJobId).catch(() => {});
+    }
+    setSelectedJobId(null);
+    setJob(null);
     setView("jobs");
     setJobScreen("list");
     setSelectedPartId(null);
@@ -1000,6 +1096,11 @@ function Workspace() {
   };
 
   const showKanbanList = () => {
+    if (selectedKanbanId) {
+      api.releaseLock("kanban", selectedKanbanId).catch(() => {});
+    }
+    setSelectedKanbanId(null);
+    setKanbanCard(null);
     setView("kanban");
     setKanbanScreen("list");
     setKanbanAiState("idle");
@@ -1481,8 +1582,33 @@ function Workspace() {
     try {
       const saved = await api.saveKanbanCard(kanbanCard);
       await applySavedKanbanCard(saved);
-      await api.exportKanbanPdf(saved.id, undefined, selectedKanbanPrintSizeId || defaultKanbanPrintSizeId(workspace?.preferences));
+      await api.exportKanbanPdf(
+        saved.id,
+        undefined,
+        selectedKanbanPrintSizeId || defaultKanbanPrintSizeId(workspace?.preferences),
+        { monochrome: selectedKanbanPrintMonochrome }
+      );
       showStatus("Kanban card PDF created.");
+    } catch (error) {
+      showStatus(error.message || String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const exportCurrentMaterialPdf = async () => {
+    if (!material) return;
+    setBusy(true);
+    try {
+      const saved = await api.saveMaterial(material);
+      await applySavedMaterial(saved);
+      await api.exportMaterialPdf(
+        saved.id,
+        undefined,
+        selectedMaterialPrintSizeId || defaultKanbanPrintSizeId(workspace?.preferences),
+        { monochrome: selectedMaterialPrintMonochrome }
+      );
+      showStatus("Material label PDF created.");
     } catch (error) {
       showStatus(error.message || String(error));
     } finally {
@@ -1495,7 +1621,17 @@ function Workspace() {
       return;
     }
     setSelectedKanbanPrintSizeId(defaultKanbanPrintSizeId(workspace?.preferences));
+    setSelectedKanbanPrintMonochrome(false);
     setKanbanPrintDialogOpen(true);
+  };
+
+  const openMaterialPrintDialog = () => {
+    if (!material || busy) {
+      return;
+    }
+    setSelectedMaterialPrintSizeId(defaultKanbanPrintSizeId(workspace?.preferences));
+    setSelectedMaterialPrintMonochrome(false);
+    setMaterialPrintDialogOpen(true);
   };
 
   const archiveCurrentJob = async () => {
@@ -1806,12 +1942,22 @@ function Workspace() {
   };
 
   const showMaterialsList = () => {
+    if (selectedMaterialId) {
+      api.releaseLock("material", selectedMaterialId).catch(() => {});
+    }
+    setSelectedMaterialId(null);
+    setMaterial(null);
     setView("materials");
     setMaterialScreen("list");
     setSaveState("saved");
   };
 
   const showMetrologyList = () => {
+    if (selectedInstrumentId) {
+      api.releaseLock("instrument", selectedInstrumentId).catch(() => {});
+    }
+    setSelectedInstrumentId(null);
+    setInstrumentPayload(null);
     setView("metrology");
     setMetrologyScreen("list");
     setSaveState("saved");
@@ -1860,7 +2006,6 @@ function Workspace() {
           ...current,
           itemName: next.itemName || current.itemName,
           minimumLevel: next.minimumLevel || current.minimumLevel,
-          maximumLevel: next.maximumLevel || current.maximumLevel,
           orderQuantity: next.orderQuantity || current.orderQuantity,
           category: next.category || current.category,
           photo: next.photo || current.photo,
@@ -1976,7 +2121,33 @@ function Workspace() {
   };
 
   const addKanbanVendorOption = async (value) => addPreferenceListOption("kanbanVendors", value, "Enter a vendor.");
-  const addKanbanLocationOption = async (value) => addPreferenceListOption("kanbanStorageLocations", value, "Enter a location.");
+  const addKanbanLocationOption = async (departmentName, value) => {
+    const trimmedDepartment = String(departmentName || "").trim();
+    const trimmedLocation = String(value || "").trim();
+    if (!trimmedDepartment) {
+      throw new Error("Choose a department before adding a storage location.");
+    }
+    if (!trimmedLocation) {
+      throw new Error("Enter a location.");
+    }
+    const existing = workspace?.preferences?.kanbanDepartments || [];
+    let matchedName = trimmedDepartment;
+    let found = false;
+    const next = existing.map((item) => {
+      if (String(item?.name || "").trim() !== trimmedDepartment) {
+        return item;
+      }
+      found = true;
+      matchedName = item.name;
+      const locations = Array.from(new Set([...(item.locations || []), trimmedLocation]));
+      return { ...item, locations };
+    });
+    if (!found) {
+      throw new Error("Choose a valid department before adding a storage location.");
+    }
+    await savePreferences({ kanbanDepartments: next, kanbanStorageLocations: [] }, { silent: true });
+    return trimmedLocation;
+  };
   const addKanbanCategoryOption = async (value) => addPreferenceListOption("kanbanCategories", value, "Enter a category.");
   const addKanbanDepartmentOption = async (value) => {
     const trimmed = String(value || "").trim();
@@ -1989,7 +2160,7 @@ function Workspace() {
       return match.name;
     }
     const colors = ["#2563eb", "#f59e0b", "#0f766e", "#7c3aed", "#dc2626", "#475569"];
-    const next = [...existing, { id: uid("kanban-dept"), name: trimmed, color: colors[existing.length % colors.length] }];
+    const next = [...existing, { id: uid("kanban-dept"), name: trimmed, color: colors[existing.length % colors.length], locations: [] }];
     await savePreferences({ kanbanDepartments: next }, { silent: true });
     return trimmed;
   };
@@ -2148,7 +2319,8 @@ function Workspace() {
           ? [material?.materialFamily, materialDisplayType(material)].filter(Boolean).join(" / ")
           : "Traceable material records with fast search and filters.",
         primaryActions: [
-          materialScreen === "list" ? <button key="new-material" onClick={createNewMaterial}><Plus size={15} /> New Material</button> : null
+          materialScreen === "list" ? <button key="new-material" onClick={createNewMaterial}><Plus size={15} /> New Material</button> : null,
+          materialScreen === "detail" ? <button key="material-pdf" onClick={openMaterialPrintDialog} disabled={!material || busy}><FileDown size={16} /> PDF</button> : null
         ].filter(Boolean),
         dangerActions: [
           materialScreen === "detail" ? <button key="archive-material" className="danger" onClick={archiveCurrentMaterial} disabled={!selectedMaterialId || busy}><Archive size={16} /> Archive</button> : null
@@ -2371,11 +2543,28 @@ function Workspace() {
         open={kanbanPrintDialogOpen}
         sizes={kanbanPrintSizes(workspace?.preferences)}
         selectedSizeId={selectedKanbanPrintSizeId}
+        monochrome={selectedKanbanPrintMonochrome}
         onChange={setSelectedKanbanPrintSizeId}
+        onToggleMonochrome={setSelectedKanbanPrintMonochrome}
         onCancel={() => setKanbanPrintDialogOpen(false)}
         onConfirm={async () => {
           setKanbanPrintDialogOpen(false);
           await exportCurrentKanbanPdf();
+        }}
+      />
+      <KanbanPrintDialog
+        open={materialPrintDialogOpen}
+        title="Material Label Size"
+        description="Choose the label size and print mode for this material label."
+        sizes={kanbanPrintSizes(workspace?.preferences)}
+        selectedSizeId={selectedMaterialPrintSizeId}
+        monochrome={selectedMaterialPrintMonochrome}
+        onChange={setSelectedMaterialPrintSizeId}
+        onToggleMonochrome={setSelectedMaterialPrintMonochrome}
+        onCancel={() => setMaterialPrintDialogOpen(false)}
+        onConfirm={async () => {
+          setMaterialPrintDialogOpen(false);
+          await exportCurrentMaterialPdf();
         }}
       />
     </div>
@@ -4291,12 +4480,41 @@ function KanbanView({
   onAddCategory,
   aiState
 }) {
-  const [query, setQuery] = useState("");
+  const [filters, setFilters] = useState({
+    query: "",
+    vendor: "All",
+    category: "All",
+    department: "All",
+    storageLocation: "All",
+    status: "Active"
+  });
   const [showArchived, setShowArchived] = useState(false);
   const [importDialogOpen, setImportDialogOpen] = useState(false);
   const cards = workspace.kanbanCards || [];
+  const vendorOptions = Array.from(new Set(cards.map((item) => item.vendor).filter(Boolean))).sort((a, b) => a.localeCompare(b));
+  const categoryOptions = Array.from(new Set(cards.map((item) => item.category).filter(Boolean))).sort((a, b) => a.localeCompare(b));
+  const departmentOptions = Array.from(new Set(cards.map((item) => item.department).filter(Boolean))).sort((a, b) => a.localeCompare(b));
+  const storageLocationOptions = filters.department !== "All" && filters.department
+    ? kanbanLocationOptions(workspace.preferences, filters.department)
+    : Array.from(new Set(kanbanDepartmentList(workspace.preferences).flatMap((item) => item.locations || []).filter(Boolean))).sort((a, b) => a.localeCompare(b));
   const filteredCards = cards.filter((item) => {
+    const statusValue = item.active === false ? "Archived" : "Active";
     if (!showArchived && item.active === false) {
+      return false;
+    }
+    if (filters.status !== "All" && statusValue !== filters.status) {
+      return false;
+    }
+    if (filters.vendor !== "All" && (item.vendor || "") !== filters.vendor) {
+      return false;
+    }
+    if (filters.category !== "All" && (item.category || "") !== filters.category) {
+      return false;
+    }
+    if (filters.department !== "All" && (item.department || "") !== filters.department) {
+      return false;
+    }
+    if (filters.storageLocation !== "All" && (item.storageLocation || "") !== filters.storageLocation) {
       return false;
     }
     const haystack = [
@@ -4308,8 +4526,16 @@ function KanbanView({
       item.storageLocation,
       item.id
     ].join(" ").toLowerCase();
-    return haystack.includes(query.trim().toLowerCase());
+    return haystack.includes(filters.query.trim().toLowerCase());
   });
+  const activeFilterChips = [
+    filters.query ? `Search: ${filters.query}` : "",
+    filters.vendor !== "All" ? `Vendor: ${filters.vendor}` : "",
+    filters.category !== "All" ? `Category: ${filters.category}` : "",
+    filters.department !== "All" ? `Department: ${filters.department}` : "",
+    filters.storageLocation !== "All" ? `Location: ${filters.storageLocation}` : "",
+    filters.status !== "Active" ? `Status: ${filters.status}` : ""
+  ].filter(Boolean);
   const updateCard = (patch) => setCard((current) => current ? { ...current, ...patch } : current);
 
   return (
@@ -4334,9 +4560,17 @@ function KanbanView({
           <div className="panel-heading inline">
             <div>
               <h3>Kanban Cards</h3>
-              <span>{filteredCards.length} visible records</span>
+              <span>{filteredCards.length} matching records</span>
             </div>
             <div className="toolbar">
+              <button onClick={() => setFilters({
+                query: "",
+                vendor: "All",
+                category: "All",
+                department: "All",
+                storageLocation: "All",
+                status: "Active"
+              })}>Clear Filters</button>
               <button onClick={() => setShowArchived((current) => !current)}>
                 {showArchived ? "Hide Archived" : "Show Archived"}
               </button>
@@ -4344,12 +4578,49 @@ function KanbanView({
               <button onClick={onCreateNew}><Plus size={15} /> New Card</button>
             </div>
           </div>
-          <TextField
-            label="Search Cards"
-            value={query}
-            onChange={setQuery}
-            placeholder="Item, inventory number, vendor, category, department, location..."
-          />
+          <div className="search-grid materials-search-grid sticky-filters">
+            <TextField
+              label="Search"
+              value={filters.query}
+              onChange={(value) => setFilters((current) => ({ ...current, query: value }))}
+              placeholder="Item, inventory number, vendor, category, department, location..."
+            />
+            <SelectField
+              label="Vendor"
+              value={filters.vendor}
+              options={["All", ...vendorOptions]}
+              onChange={(value) => setFilters((current) => ({ ...current, vendor: value }))}
+            />
+            <SelectField
+              label="Category"
+              value={filters.category}
+              options={["All", ...categoryOptions]}
+              onChange={(value) => setFilters((current) => ({ ...current, category: value }))}
+            />
+            <SelectField
+              label="Department"
+              value={filters.department}
+              options={["All", ...departmentOptions]}
+              onChange={(value) => setFilters((current) => ({ ...current, department: value, storageLocation: "All" }))}
+            />
+            <SelectField
+              label="Location"
+              value={filters.storageLocation}
+              options={["All", ...storageLocationOptions]}
+              onChange={(value) => setFilters((current) => ({ ...current, storageLocation: value }))}
+            />
+            <SelectField
+              label="Status"
+              value={filters.status}
+              options={["Active", "Archived", "All"]}
+              onChange={(value) => setFilters((current) => ({ ...current, status: value }))}
+            />
+          </div>
+          {activeFilterChips.length ? (
+            <div className="inline-chip-list">
+              {activeFilterChips.map((chip) => <span key={chip} className="inline-chip">{chip}</span>)}
+            </div>
+          ) : null}
           <div className="record-list top-gap">
             {filteredCards.map((item) => (
               <button key={item.id} className="record-list-item record-list-row" onClick={() => onOpenCard(item.id)}>
@@ -4405,7 +4676,7 @@ function KanbanDetailScreen({
 }) {
   const vendorOptions = Array.from(new Set(["", ...(workspace.preferences?.kanbanVendors || []), card.vendor || ""]));
   const departmentOptions = Array.from(new Set(["", ...kanbanDepartmentOptions(workspace.preferences), card.department || ""]));
-  const locationOptions = Array.from(new Set(["", ...(workspace.preferences?.kanbanStorageLocations || []), card.storageLocation || ""]));
+  const locationOptions = Array.from(new Set(["", ...kanbanLocationOptions(workspace.preferences, card.department), card.storageLocation || ""]));
   const categoryOptions = Array.from(new Set(["", ...(workspace.preferences?.kanbanCategories || []), card.category || ""]));
   const photoUrl = kanbanPhotoSrc(card);
   const aiMessage = aiState === "filling"
@@ -4448,25 +4719,25 @@ function KanbanDetailScreen({
               onAddOption={onAddVendor}
             />
             <TextField label="Minimum Level" value={card.minimumLevel || ""} onChange={(value) => onChange({ minimumLevel: value })} />
-            <TextField label="Maximum Level" value={card.maximumLevel || ""} onChange={(value) => onChange({ maximumLevel: value })} />
             <TextField label="Order Quantity" value={card.orderQuantity || ""} onChange={(value) => onChange({ orderQuantity: value })} />
-            <SelectWithInlineAdd
-              label="Storage Location"
-              value={card.storageLocation || ""}
-              options={locationOptions}
-              emptyLabel="Choose location"
-              newPlaceholder="New location"
-              onChange={(value) => onChange({ storageLocation: value })}
-              onAddOption={onAddLocation}
-            />
             <SelectWithInlineAdd
               label="Department"
               value={card.department || ""}
               options={departmentOptions}
               emptyLabel="Choose department"
               newPlaceholder="New department"
-              onChange={(value) => onChange({ department: value })}
+              onChange={(value) => onChange({ department: value, storageLocation: value === card.department ? card.storageLocation : "" })}
               onAddOption={onAddDepartment}
+            />
+            <SelectWithInlineAdd
+              label="Storage Location"
+              value={card.storageLocation || ""}
+              options={locationOptions}
+              emptyLabel={card.department ? "Choose location" : "Choose department first"}
+              newPlaceholder="New location"
+              onChange={(value) => onChange({ storageLocation: value })}
+              onAddOption={(value) => onAddLocation(card.department, value)}
+              disabled={!card.department}
             />
             <SelectWithInlineAdd
               label="Category"
@@ -5292,8 +5563,8 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
     openaiApiKey: workspace.preferences?.openaiApiKey || ""
   });
   const [kanbanDepartments, setKanbanDepartments] = useState(workspace.preferences?.kanbanDepartments || []);
+  const [selectedKanbanDepartmentId, setSelectedKanbanDepartmentId] = useState(workspace.preferences?.kanbanDepartments?.[0]?.id || null);
   const [kanbanOptions, setKanbanOptions] = useState({
-    kanbanStorageLocations: workspace.preferences?.kanbanStorageLocations || [],
     kanbanVendors: workspace.preferences?.kanbanVendors || [],
     kanbanCategories: workspace.preferences?.kanbanCategories || []
   });
@@ -5335,9 +5606,10 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
     setAiSettings({
       openaiApiKey: workspace.preferences?.openaiApiKey || ""
     });
-    setKanbanDepartments(workspace.preferences?.kanbanDepartments || []);
+    const nextDepartments = workspace.preferences?.kanbanDepartments || [];
+    setKanbanDepartments(nextDepartments);
+    setSelectedKanbanDepartmentId((current) => nextDepartments.some((department) => department.id === current) ? current : nextDepartments[0]?.id || null);
     setKanbanOptions({
-      kanbanStorageLocations: workspace.preferences?.kanbanStorageLocations || [],
       kanbanVendors: workspace.preferences?.kanbanVendors || [],
       kanbanCategories: workspace.preferences?.kanbanCategories || []
     });
@@ -5349,7 +5621,7 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
         heightIn: String(item.heightIn ?? "")
       }))
     });
-  }, [workspace.preferences]);
+  }, [workspace.dataFolder]);
 
   const selectedFamily = materialFamilies.find((family) => family.id === selectedFamilyId) || null;
   const updateFamily = (familyId, patch) => {
@@ -5396,10 +5668,34 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
     setKanbanDepartments((current) => current.map((item) => item.id === departmentId ? { ...item, ...patch } : item));
   };
   const addKanbanDepartment = () => {
-    setKanbanDepartments((current) => [...current, blankKanbanDepartment()]);
+    const department = blankKanbanDepartment();
+    setKanbanDepartments((current) => [...current, department]);
+    setSelectedKanbanDepartmentId(department.id);
   };
   const removeKanbanDepartment = (departmentId) => {
-    setKanbanDepartments((current) => current.filter((item) => item.id !== departmentId));
+    setKanbanDepartments((current) => {
+      const next = current.filter((item) => item.id !== departmentId);
+      setSelectedKanbanDepartmentId(next[0]?.id || null);
+      return next;
+    });
+  };
+  const addKanbanDepartmentLocation = (departmentId) => {
+    setKanbanDepartments((current) => current.map((item) => item.id === departmentId
+      ? { ...item, locations: [...(item.locations || []), "New Location"] }
+      : item));
+  };
+  const updateKanbanDepartmentLocation = (departmentId, index, value) => {
+    setKanbanDepartments((current) => current.map((item) => item.id === departmentId
+      ? {
+        ...item,
+        locations: (item.locations || []).map((location, locationIndex) => locationIndex === index ? value : location)
+      }
+      : item));
+  };
+  const removeKanbanDepartmentLocation = (departmentId, index) => {
+    setKanbanDepartments((current) => current.map((item) => item.id === departmentId
+      ? { ...item, locations: (item.locations || []).filter((_location, locationIndex) => locationIndex !== index) }
+      : item));
   };
   const updateKanbanList = (key, updater) => {
     setKanbanOptions((current) => ({
@@ -5552,9 +5848,11 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
           .map((item) => ({
             id: item.id,
             name: String(item.name || "").trim(),
-            color: String(item.color || "#2563eb").trim() || "#2563eb"
+            color: String(item.color || "#2563eb").trim() || "#2563eb",
+            locations: (item.locations || []).map((location) => String(location || "").trim()).filter(Boolean)
           }))
-          .filter((item) => item.name)
+          .filter((item) => item.name),
+        kanbanStorageLocations: []
       }, { silent: true });
       return current;
     }
@@ -5563,7 +5861,6 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
   useAutoSave({
     value: kanbanOptions,
     resetKey: `kanban-settings:${workspace.dataFolder}:${JSON.stringify({
-      kanbanStorageLocations: workspace.preferences?.kanbanStorageLocations || [],
       kanbanVendors: workspace.preferences?.kanbanVendors || [],
       kanbanCategories: workspace.preferences?.kanbanCategories || []
     })}`,
@@ -5617,10 +5914,10 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
     ["metrologyStatuses", "Statuses"]
   ];
   const kanbanSections = [
-    ["kanbanStorageLocations", "Storage Locations"],
     ["kanbanVendors", "Vendors"],
     ["kanbanCategories", "Categories"]
   ];
+  const selectedKanbanDepartment = kanbanDepartments.find((department) => department.id === selectedKanbanDepartmentId) || null;
   const settingsOptionPlaceholder = (label) => {
     if (label === "Categories") {
       return "Category";
@@ -5856,24 +6153,72 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
             <span>Controlled lists used in Kanban cards.</span>
           </div>
         </div>
-        <div className="subpanel top-gap">
-          <div className="subpanel-header">
-            <div>
-              <h4>Departments</h4>
-              <span>Name and accent color used on printed Kanban cards.</span>
-            </div>
-            <button onClick={addKanbanDepartment}><Plus size={14} /> Department</button>
-          </div>
-          <div className="parameter-list">
+        <div className="catalog-layout settings-template-layout">
+          <div className="catalog-list">
+            <button className="sidebar-action" onClick={addKanbanDepartment}><Plus size={14} /> New Department</button>
             {(kanbanDepartments || []).map((department) => (
-              <div className="parameter-row kanban-department-row" key={department.id}>
-                <input value={department.name || ""} placeholder="Department name" onChange={(event) => updateKanbanDepartment(department.id, { name: event.target.value })} />
-                <input type="color" value={department.color || "#2563eb"} onChange={(event) => updateKanbanDepartment(department.id, { color: event.target.value })} />
-                <button className="danger subtle square" onClick={() => removeKanbanDepartment(department.id)}><X size={13} /></button>
-              </div>
+              <button
+                key={department.id}
+                className={`record-list-item ${selectedKanbanDepartmentId === department.id ? "selected" : ""}`}
+                onClick={() => setSelectedKanbanDepartmentId(department.id)}
+              >
+                <strong>{department.name || "Untitled Department"}</strong>
+                <span>{department.locations?.length || 0} locations</span>
+              </button>
             ))}
             {!kanbanDepartments.length && <div className="empty-inline">No departments configured yet.</div>}
           </div>
+
+          {!selectedKanbanDepartment ? (
+            <div className="subpanel">
+              <div className="empty-inline">Choose a department or create a new one.</div>
+            </div>
+          ) : (
+            <div className="subpanel">
+              <div className="subpanel-header">
+                <div>
+                  <h4>{selectedKanbanDepartment.name || "Kanban Department"}</h4>
+                  <span>{selectedKanbanDepartment.locations?.length || 0} storage locations</span>
+                </div>
+                <button className="danger subtle" onClick={() => removeKanbanDepartment(selectedKanbanDepartment.id)}><X size={14} /> Remove</button>
+              </div>
+
+              <div className="form-grid compact-2">
+                <TextField
+                  label="Department Name"
+                  value={selectedKanbanDepartment.name || ""}
+                  onChange={(value) => updateKanbanDepartment(selectedKanbanDepartment.id, { name: value })}
+                />
+                <label className="field">
+                  <span>Accent Color</span>
+                  <input
+                    type="color"
+                    value={selectedKanbanDepartment.color || "#2563eb"}
+                    onChange={(event) => updateKanbanDepartment(selectedKanbanDepartment.id, { color: event.target.value })}
+                  />
+                </label>
+              </div>
+
+              <div className="subpanel top-gap">
+                <div className="subpanel-header">
+                  <div>
+                    <h4>Storage Locations</h4>
+                    <span>Only available when this department is selected on a Kanban card.</span>
+                  </div>
+                  <button onClick={() => addKanbanDepartmentLocation(selectedKanbanDepartment.id)}><Plus size={14} /> Location</button>
+                </div>
+                <div className="parameter-list">
+                  {(selectedKanbanDepartment.locations || []).map((location, index) => (
+                    <div className="parameter-row catalog-alloy-row" key={`${selectedKanbanDepartment.id}-location-${index}`}>
+                      <input value={location || ""} placeholder="Storage location" onChange={(event) => updateKanbanDepartmentLocation(selectedKanbanDepartment.id, index, event.target.value)} />
+                      <button className="danger subtle square" onClick={() => removeKanbanDepartmentLocation(selectedKanbanDepartment.id, index)}><X size={13} /></button>
+                    </div>
+                  ))}
+                  {!selectedKanbanDepartment.locations?.length && <div className="empty-inline">No locations configured for this department yet.</div>}
+                </div>
+              </div>
+            </div>
+          )}
         </div>
         <div className="settings-metrology-grid">
           {kanbanSections.map(([key, label]) => (
@@ -5986,7 +6331,7 @@ function QrCodeImage({ value, alt }) {
   return <img className="qr-image" src={src} alt={alt} />;
 }
 
-function PrintKanbanCard({ cardId, sizeId = "" }) {
+function PrintKanbanCard({ cardId, sizeId = "", monochrome = false }) {
   const [card, setCard] = useState(null);
   const [workspaceData, setWorkspaceData] = useState(null);
   const [error, setError] = useState("");
@@ -6018,7 +6363,9 @@ function PrintKanbanCard({ cardId, sizeId = "" }) {
   const size = kanbanPrintSizes(workspaceData.preferences).find((item) => item.id === sizeId)
     || kanbanPrintSizes(workspaceData.preferences).find((item) => item.id === defaultKanbanPrintSizeId(workspaceData.preferences))
     || { name: '2" x 4"', widthIn: 2, heightIn: 4 };
-  const accentColor = kanbanDepartmentColor(workspaceData.preferences, card.department);
+  const effectiveWidth = Number(size.widthIn || 2) * 0.93;
+  const effectiveHeight = Number(size.heightIn || 4) * 0.93;
+  const accentColor = monochrome ? "#111111" : kanbanDepartmentColor(workspaceData.preferences, card.department);
   const subtitle = [card.internalInventoryNumber, card.packSize].filter(Boolean).join(" | ");
   const detailRows = [
     ["Minimum", card.minimumLevel],
@@ -6029,8 +6376,8 @@ function PrintKanbanCard({ cardId, sizeId = "" }) {
   ].filter(([, value]) => value);
 
   return (
-    <div className="print-shell">
-      <div className="print-actions screen-only kanban-label-actions" style={{ width: `${size.widthIn}in` }}>
+    <div className="print-shell kanban-print-shell">
+      <div className="print-actions screen-only kanban-label-actions" style={{ width: `${effectiveWidth}in` }}>
         <button onClick={() => { window.location.hash = "/"; }}>Back</button>
         <button onClick={() => window.print()}>Print</button>
       </div>
@@ -6038,19 +6385,17 @@ function PrintKanbanCard({ cardId, sizeId = "" }) {
       <section
         className="print-page kanban-print-page kanban-label-page"
         style={{
-          width: `${size.widthIn}in`,
-          minHeight: `${size.heightIn}in`,
+          width: `${effectiveWidth}in`,
+          height: `${effectiveHeight}in`,
+          minHeight: `${effectiveHeight}in`,
           "--kanban-accent": accentColor
         }}
       >
-        <article className="kanban-label-card">
-          <header className="kanban-label-header">
+        <article className={`kanban-label-card ${monochrome ? "kanban-label-monochrome" : ""}`}>
+          <header className="kanban-label-header front-only">
             <div className="kanban-label-title-block">
               <h1>{card.itemName || "Kanban Item"}</h1>
               {subtitle ? <p>{subtitle}</p> : null}
-            </div>
-            <div className="kanban-label-qr-small">
-              <QrCodeImage value={amerpQrValue} alt="AMERP QR code" />
             </div>
           </header>
 
@@ -6089,12 +6434,141 @@ function PrintKanbanCard({ cardId, sizeId = "" }) {
             </div>
           </div>
 
-          <footer className="kanban-label-footer">
+          <footer className="kanban-label-footer front-only">
             <div className="kanban-label-department">
-              <span>{card.department || "Kanban"}</span>
+              <span>{card.department || ""}</span>
             </div>
-            <div className="kanban-label-vendor-qr">
+          </footer>
+        </article>
+      </section>
+
+      <section
+        className="print-page kanban-print-page kanban-label-page kanban-label-back-page"
+        style={{
+          width: `${effectiveWidth}in`,
+          height: `${effectiveHeight}in`,
+          minHeight: `${effectiveHeight}in`
+        }}
+      >
+        <article className={`kanban-label-card kanban-label-card-back ${monochrome ? "kanban-label-monochrome" : ""}`}>
+          <div className="kanban-card-back-grid">
+            <div className="kanban-card-back-qr-block">
+              <span>AMERP</span>
+              <QrCodeImage value={amerpQrValue} alt="AMERP QR code" />
+            </div>
+            <div className="kanban-card-back-qr-block">
+              <span>Vendor</span>
               <QrCodeImage value={card.purchaseUrl} alt="Vendor QR code" />
+            </div>
+          </div>
+        </article>
+      </section>
+    </div>
+  );
+}
+
+function PrintMaterialLabel({ materialId, sizeId = "", monochrome = false }) {
+  const [material, setMaterial] = useState(null);
+  const [workspaceData, setWorkspaceData] = useState(null);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    const load = async () => {
+      try {
+        const [loadedMaterial, loadedWorkspace] = await Promise.all([
+          api.loadMaterial(materialId),
+          api.loadWorkspace()
+        ]);
+        if (!loadedMaterial) {
+          throw new Error("Material not found.");
+        }
+        setMaterial(syncMaterialClassification(loadedMaterial, loadedWorkspace.preferences));
+        setWorkspaceData(loadedWorkspace);
+      } catch (loadError) {
+        setError(loadError.message || String(loadError));
+      }
+    };
+    load();
+  }, [materialId]);
+
+  if (error) return <Fatal title="Print Error" message={error} />;
+  if (!material || !workspaceData) return <LoadingScreen message="Loading material label..." />;
+
+  const amerpQrValue = materialDeepLink(material.id, workspaceData);
+  const size = kanbanPrintSizes(workspaceData.preferences).find((item) => item.id === sizeId)
+    || kanbanPrintSizes(workspaceData.preferences).find((item) => item.id === defaultKanbanPrintSizeId(workspaceData.preferences))
+    || { name: '2" x 4"', widthIn: 2, heightIn: 4 };
+  const effectiveWidth = Number(size.widthIn || 2) * 0.93;
+  const effectiveHeight = Number(size.heightIn || 4) * 0.93;
+  const accentColor = monochrome ? "#111111" : "#1d6b57";
+  const titleParts = [material.materialFamily, materialDisplayType(material)].filter(Boolean);
+  const uniqueTitleParts = titleParts.filter((value, index) => titleParts.findIndex((item) => item === value) === index);
+  const title = material.serialCode || "Material";
+  const subtitle = [uniqueTitleParts.join(" / "), material.form].filter(Boolean).join(" | ");
+  const detailRows = [
+    ["Dimensions", materialDimensionsSummary(material.form, material.shapeDimensions, material.dimensions || "")],
+    ["Supplier", material.supplier],
+    ["PO", material.purchaseOrder],
+    ["Lot", material.lotNumber],
+    ["Heat", material.heatNumber],
+    ["Traceability", material.traceabilityLevel],
+    ["Location", material.storageLocation],
+    ["Received", material.dateReceived]
+  ].filter(([, value]) => value);
+  const footerLabel = material.storageLocation || material.traceabilityLevel || material.status || "";
+
+  return (
+    <div className="print-shell kanban-print-shell">
+      <div className="print-actions screen-only kanban-label-actions" style={{ width: `${effectiveWidth}in` }}>
+        <button onClick={() => { window.location.hash = "/"; }}>Back</button>
+        <button onClick={() => window.print()}>Print</button>
+      </div>
+
+      <section
+        className="print-page kanban-print-page kanban-label-page material-label-page"
+        style={{
+          width: `${effectiveWidth}in`,
+          height: `${effectiveHeight}in`,
+          minHeight: `${effectiveHeight}in`,
+          "--kanban-accent": accentColor
+        }}
+      >
+        <article className={`kanban-label-card material-label-card ${monochrome ? "kanban-label-monochrome" : ""}`}>
+          <header className="kanban-label-header front-only">
+            <div className="kanban-label-title-block">
+              <h1>{title}</h1>
+              {subtitle ? <p>{subtitle}</p> : null}
+            </div>
+          </header>
+
+          <div className="kanban-label-accent-line" />
+
+          <div className="kanban-label-body">
+            <div className="kanban-label-details">
+              {detailRows.map(([label, value]) => (
+                <div key={label} className="kanban-detail-row">
+                  <span>{label}</span>
+                  <strong>{value}</strong>
+                </div>
+              ))}
+              {material.notes ? (
+                <div className="kanban-label-copy secondary">
+                  <span>Notes</span>
+                  <p>{material.notes}</p>
+                </div>
+              ) : null}
+            </div>
+
+            <div className="kanban-label-photo-wrap">
+              <div className="kanban-label-photo material-label-qr-photo">
+                <QrCodeImage value={amerpQrValue} alt="AMERP QR code" />
+              </div>
+            </div>
+          </div>
+
+          <footer className="kanban-label-footer front-only">
+            <div className="kanban-label-department">
+              <span>{footerLabel}</span>
             </div>
           </footer>
         </article>
@@ -6240,6 +6714,251 @@ function PrintPacket({ jobId }) {
   );
 }
 
+function TravelerPrintPacket({ jobId }) {
+  const [job, setJob] = useState(null);
+  const [materials, setMaterials] = useState([]);
+  const [instruments, setInstruments] = useState([]);
+  const [libraries, setLibraries] = useState({});
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    const load = async () => {
+      try {
+        const [loadedJob, materialRows, instrumentRows, loadedLibraries] = await Promise.all([
+          api.loadJob(jobId),
+          api.listMaterials(),
+          api.listInstruments(),
+          api.loadLibraries()
+        ]);
+        if (!loadedJob) throw new Error("Job not found.");
+        setJob(loadedJob);
+        setMaterials(materialRows);
+        setInstruments(instrumentRows);
+        setLibraries(loadedLibraries || {});
+      } catch (loadError) {
+        setError(loadError.message || String(loadError));
+      }
+    };
+    load();
+  }, [jobId]);
+
+  if (error) return <Fatal title="Print Error" message={error} />;
+  if (!job) return <LoadingScreen message="Loading traveler..." />;
+
+  const materialMap = new Map(materials.map((item) => [item.id, item]));
+  const instrumentMap = new Map(instruments.map((item) => [item.instrumentId, item]));
+  const partCount = job.parts.length;
+  const operationCount = job.parts.reduce((sum, part) => sum + (part.operations || []).length, 0);
+
+  return (
+    <div className="print-shell traveler-shell">
+      <div className="print-actions screen-only">
+        <button onClick={() => { window.location.hash = "/"; }}>Back</button>
+        <button onClick={() => window.print()}>Print</button>
+      </div>
+
+      <section className="print-page traveler-page traveler-page-sheet traveler-job-sheet">
+        <div className="traveler-page-inner">
+          <header className="packet-header traveler-header">
+            <div className="traveler-header-copy">
+              <span className="traveler-kicker">Job Traveler / Setup Sheet</span>
+              <h1>{job.jobNumber || "Untitled Job"}</h1>
+              <p>{job.customer || "No customer"}</p>
+            </div>
+            <div className="traveler-header-badge">
+              <strong>{partCount} part{partCount === 1 ? "" : "s"}</strong>
+              <span>{operationCount} operation{operationCount === 1 ? "" : "s"}</span>
+            </div>
+          </header>
+
+          <section className="traveler-card traveler-job-card">
+            <div className="traveler-card-heading">
+              <div>
+                <h2>Job Details</h2>
+                <span>Job first, then part details, then operations.</span>
+              </div>
+            </div>
+            <div className="traveler-fact-stack">
+              <div className="traveler-fact-grid traveler-job-grid">
+                <PrintField label="Status" value={job.status} compact />
+                <PrintField label="Priority" value={job.priority} compact />
+                <PrintField label="Due Date" value={job.dueDate} compact />
+                <div className="traveler-grid-spacer" aria-hidden="true" />
+              </div>
+              <div className="traveler-fact-grid traveler-job-grid">
+                <PrintField label="Updated" value={formatDateTime(job.updatedAt)} compact />
+                <PrintField label="Revision" value={job.revision?.number} compact />
+                <PrintField label="Revision Date" value={job.revision?.date} compact />
+                <div className="traveler-grid-spacer" aria-hidden="true" />
+              </div>
+            </div>
+            {job.notes ? (
+              <div className="traveler-note-block">
+                <strong>Job Notes</strong>
+                <p>{job.notes}</p>
+              </div>
+            ) : null}
+          </section>
+        </div>
+      </section>
+
+      {job.parts.map((part) => (
+        <React.Fragment key={part.id}>
+          <section className="print-page traveler-page traveler-page-sheet traveler-part-block">
+            <div className="traveler-page-inner">
+            <div className="traveler-section-accent" />
+            <div className="traveler-card traveler-part-card">
+              <header className="operation-print-header traveler-section-header">
+                <div>
+                  <span className="traveler-kicker">Part</span>
+                  <h2>{part.partNumber || part.partName || part.id}</h2>
+                  {part.partName && part.partName !== part.partNumber ? <p>{part.partName}</p> : null}
+                </div>
+                <div className="traveler-part-count">{part.operations.length} operation{part.operations.length === 1 ? "" : "s"}</div>
+              </header>
+              <div className="traveler-fact-stack compact-grid">
+                <div className="traveler-fact-grid traveler-part-grid">
+                  <PrintField label="Quantity" value={part.quantity} compact />
+                  <PrintField label="Revision" value={part.revision?.number} compact />
+                  <PrintField label="Revision Date" value={part.revision?.date} compact />
+                </div>
+                <div className="traveler-fact-grid traveler-part-material-grid">
+                  <PrintField label="Material Spec" value={part.materialSpec} compact />
+                  <PrintField label="Material Lots" value={[(part.requiredMaterialLots || []).map((id) => materialMap.get(id)?.serialCode || id).join(", "), part.customMaterialText || ""].filter(Boolean).join(" / ")} compact />
+                </div>
+              </div>
+              {part.notes ? (
+                <div className="traveler-note-block">
+                  <strong>Part Notes</strong>
+                  <p>{part.notes}</p>
+                </div>
+              ) : null}
+            </div>
+            </div>
+          </section>
+
+          <div className="traveler-operation-list">
+              {part.operations.map((operation, operationIndex) => {
+                const instructionSteps = instructionStepsFromOperation(operation);
+                const libraryRows = operationLibraryRows(operation, libraries, []);
+                const parameterRows = [
+                  ...(operation.parameters || [])
+                    .filter((parameter) => parameter.label || parameter.value)
+                    .map((parameter) => ({
+                      id: parameter.id,
+                      label: parameter.label || "Parameter",
+                      value: parameter.value || "-"
+                    })),
+                  ...libraryRows.map((libraryRow, index) => ({
+                    id: `library-${operation.id}-${index}`,
+                    label: libraryRow.label,
+                    value: libraryRow.value
+                  }))
+                ];
+                const instrumentNames = (operation.requiredInstruments || [])
+                  .map((id) => instrumentMap.get(id)?.toolName || id)
+                  .filter(Boolean);
+                const showDetailedTooling = supportsDetailedTooling(operation.type);
+
+                return (
+                  <section className="print-page traveler-page traveler-page-sheet traveler-operation-card print-operation-block" key={operation.id}>
+                    <article className="traveler-page-inner traveler-card">
+                    <header className="traveler-operation-header">
+                      <div>
+                        <span className="traveler-kicker">Operation {operationIndex + 1}</span>
+                        <h3>{operation.title || "Operation"}</h3>
+                      </div>
+                      <div className="traveler-operation-type">{operation.type || "General"}</div>
+                    </header>
+
+                    <div className="traveler-fact-grid traveler-operation-grid compact-grid">
+                      <PrintField label="Work Center" value={operation.workCenter} compact />
+                      <PrintField label="Type" value={operation.type} compact />
+                      {instrumentNames.length ? <PrintField label="Instruments" value={instrumentNames.join(", ")} compact /> : null}
+                    </div>
+
+                    {parameterRows.length ? (
+                      <div className="traveler-subsection">
+                        <strong className="traveler-subsection-title">Parameters</strong>
+                        <table className="print-table compact traveler-parameter-table">
+                          <tbody>
+                            {parameterRows.map((parameter) => (
+                              <tr key={parameter.id}>
+                                <th>{parameter.label}</th>
+                                <td>{parameter.value}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    ) : null}
+
+                    {showDetailedTooling ? (
+                      <div className="traveler-subsection">
+                        <strong className="traveler-subsection-title">Tooling</strong>
+                        {(operation.tools || []).length ? (
+                          <div className="traveler-tool-grid">
+                            {(operation.tools || []).map((tool, index) => (
+                              <div key={tool.id || `${operation.id}-tool-${index}`} className="traveler-tool-card">
+                                <h4>{toolHeading(tool, index)}</h4>
+                                <div className="traveler-tool-facts">
+                                  <PrintField label="Diameter" value={tool.diameter} compact />
+                                  <PrintField label="Stickout" value={tool.length} compact />
+                                  <PrintField label="Holder" value={tool.holder} compact />
+                                  <PrintField label="Source" value={tool.source} compact />
+                                </div>
+                                {tool.details ? (
+                                  <div className="traveler-note-block compact">
+                                    <strong>Details</strong>
+                                    <p>{tool.details}</p>
+                                  </div>
+                                ) : null}
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <div className="traveler-empty-state">No tools defined.</div>
+                        )}
+                      </div>
+                    ) : null}
+
+                    {instructionSteps.length ? (
+                      <div className="traveler-subsection">
+                        <strong className="traveler-subsection-title">Operation Steps</strong>
+                        <div className="traveler-step-list">
+                          {instructionSteps.map((step, index) => (
+                            <div key={step.id || index} className="traveler-step-card print-step-block">
+                              <p className="traveler-step-text">
+                                <span>{index + 1}.</span> {step.text || ""}
+                              </p>
+                              {step.images?.length > 0 ? (
+                                <div className="print-images compact traveler-step-images">
+                                  {step.images.map((image) => <img key={image.id} src={api.assetUrl(image.relativePath)} alt={image.name || "Step"} />)}
+                                </div>
+                              ) : null}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ) : null}
+
+                    {operation.notes ? (
+                      <div className="traveler-note-block compact">
+                        <strong>Operation Notes</strong>
+                        <p>{operation.notes}</p>
+                      </div>
+                    ) : null}
+                    </article>
+                  </section>
+                );
+              })}
+            </div>
+        </React.Fragment>
+      ))}
+    </div>
+  );
+}
+
 function TextField({ label, value, onChange, type = "text", placeholder = "", readOnly = false, disabled = false }) {
   return (
     <label className="field">
@@ -6369,15 +7088,26 @@ function ConfirmDialog({ open, title, message, confirmLabel = "Confirm", onCance
   );
 }
 
-function KanbanPrintDialog({ open, sizes, selectedSizeId, onChange, onCancel, onConfirm }) {
+function KanbanPrintDialog({
+  open,
+  title = "Kanban Card Size",
+  description = "Choose the card or label size to use for this PDF.",
+  sizes,
+  selectedSizeId,
+  monochrome = false,
+  onChange,
+  onToggleMonochrome,
+  onCancel,
+  onConfirm
+}) {
   if (!open) return null;
   return (
     <div className="dialog-backdrop">
       <div className="dialog-panel narrow">
         <div className="panel-heading">
-          <h3>Kanban Card Size</h3>
+          <h3>{title}</h3>
         </div>
-        <p>Choose the card or label size to use for this PDF.</p>
+        <p>{description}</p>
         <label className="field">
           <span>Print Size</span>
           <select value={selectedSizeId || ""} onChange={(event) => onChange(event.target.value)}>
@@ -6387,6 +7117,10 @@ function KanbanPrintDialog({ open, sizes, selectedSizeId, onChange, onCancel, on
               </option>
             ))}
           </select>
+        </label>
+        <label className="checkbox-row top-gap">
+          <input type="checkbox" checked={monochrome} onChange={(event) => onToggleMonochrome?.(event.target.checked)} />
+          <span>Black and white mode</span>
         </label>
         <div className="dialog-actions">
           <button onClick={onCancel}>Cancel</button>
@@ -6423,9 +7157,9 @@ function StatCard({ label, value, accent = false }) {
   );
 }
 
-function PrintField({ label, value, compact = false }) {
+function PrintField({ label, value, compact = false, className = "" }) {
   return (
-    <div className={`print-field ${compact ? "compact" : ""}`}>
+    <div className={`print-field ${compact ? "compact" : ""} ${className}`.trim()}>
       <span>{label}</span>
       <strong>{value || "-"}</strong>
     </div>

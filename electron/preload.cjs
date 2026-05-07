@@ -28,7 +28,7 @@ contextBridge.exposeInMainWorld("amerp", {
   importKanbanFromUrl: (url) => invoke("import-kanban-from-url", url),
   aiFillKanbanCard: (card) => invoke("ai-fill-kanban-card", card),
   generateKanbanImage: (card) => invoke("generate-kanban-image", card),
-  exportKanbanPdf: (cardId, destinationPath, sizeId) => invoke("export-kanban-pdf", cardId, destinationPath, sizeId),
+  exportKanbanPdf: (cardId, destinationPath, sizeId, options) => invoke("export-kanban-pdf", cardId, destinationPath, sizeId, options),
   generateNextJobNumber: () => invoke("generate-next-job-number"),
   generateNextKanbanInventoryNumber: () => invoke("generate-next-kanban-inventory-number"),
   listCustomers: () => invoke("list-customers"),
@@ -71,6 +71,7 @@ contextBridge.exposeInMainWorld("amerp", {
   unarchiveMaterialAttachment: (materialId, attachmentId) => invoke("unarchive-material-attachment", materialId, attachmentId),
   reviseMaterialAttachment: (materialId, attachmentId) => invoke("revise-material-attachment", materialId, attachmentId),
   deleteMaterialAttachment: (materialId, attachmentId) => invoke("delete-material-attachment", materialId, attachmentId),
+  exportMaterialPdf: (materialId, destinationPath, sizeId, options) => invoke("export-material-pdf", materialId, destinationPath, sizeId, options),
 
   listInstruments: () => invoke("list-instruments"),
   loadInstrument: (id, options) => invoke("load-instrument", id, options),

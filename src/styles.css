@@ -1028,6 +1028,338 @@ button:disabled:hover {
   gap: 0.5rem;
 }
 
+.traveler-shell {
+  background:
+    linear-gradient(180deg, #efe9de 0%, #f7f3eb 100%);
+}
+
+.traveler-page {
+  display: block;
+  padding: 0;
+}
+
+.traveler-page-inner {
+  padding: 0.48in;
+  box-sizing: border-box;
+}
+
+.traveler-header {
+  border: 1px solid #d9cdb7;
+  border-radius: 24px;
+  padding: 0.18in 0.22in;
+  background:
+    linear-gradient(140deg, rgba(29, 107, 87, 0.08), rgba(217, 119, 6, 0.04)),
+    #fffdf8;
+  align-items: stretch;
+  margin-bottom: 0.18in;
+}
+
+.traveler-header-copy {
+  display: grid;
+  gap: 0.04in;
+}
+
+.traveler-kicker {
+  font-size: 0.11in;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #1d6b57;
+}
+
+.traveler-header-copy h1 {
+  margin: 0;
+  font-size: 0.34in;
+  line-height: 1;
+}
+
+.traveler-header-copy p {
+  margin: 0;
+  font-size: 0.16in;
+  color: #45556b;
+}
+
+.traveler-header-badge {
+  min-width: 1.45in;
+  border: 1px solid #d9cdb7;
+  border-radius: 18px;
+  background: #ffffff;
+  padding: 0.12in 0.14in;
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  gap: 0.03in;
+  text-align: center;
+}
+
+.traveler-header-badge strong {
+  font-size: 0.15in;
+}
+
+.traveler-header-badge span {
+  font-size: 0.11in;
+  color: #5d6b7c;
+}
+
+.traveler-card {
+  border: 1px solid #d9cdb7;
+  border-radius: 22px;
+  background: #ffffff;
+  padding: 0.16in 0.18in;
+  display: grid;
+  gap: 0.12in;
+  break-inside: auto;
+}
+
+.traveler-card-heading,
+.traveler-section-header,
+.traveler-operation-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.16in;
+  align-items: flex-start;
+}
+
+.traveler-card-heading > div,
+.traveler-section-header > div:first-child,
+.traveler-operation-header > div:first-child {
+  min-width: 0;
+}
+
+.traveler-card-heading h2,
+.traveler-section-header h2,
+.traveler-operation-header h3 {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.traveler-card-heading span,
+.traveler-section-header p {
+  color: #5d6b7c;
+}
+
+.traveler-card-heading span,
+.traveler-part-count,
+.traveler-operation-type {
+  font-size: 0.11in;
+  font-weight: 700;
+}
+
+.traveler-fact-grid {
+  display: grid;
+  gap: 0.08in;
+}
+
+.traveler-fact-grid > * {
+  min-width: 0;
+}
+
+.traveler-fact-stack {
+  display: grid;
+  gap: 0.08in;
+}
+
+.traveler-job-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.traveler-part-grid,
+.traveler-operation-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.traveler-part-material-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.traveler-grid-spacer {
+  visibility: hidden;
+}
+
+.traveler-page .print-field {
+  min-height: 0.5in;
+  min-width: 0;
+  padding: 0.11in 0.12in;
+  border-radius: 16px;
+  border-color: #dacdb7;
+  background: #fcfaf5;
+  gap: 0.03in;
+  align-content: start;
+}
+
+.traveler-page .print-field span {
+  font-size: 0.095in;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #6d7a8a;
+}
+
+.traveler-page .print-field strong {
+  font-size: 0.14in;
+  line-height: 1.18;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.traveler-note-block {
+  display: grid;
+  gap: 0.04in;
+  padding: 0.11in 0.13in;
+  border: 1px solid #eadfcb;
+  border-radius: 16px;
+  background: #fffcf7;
+}
+
+.traveler-note-block strong,
+.traveler-subsection-title {
+  font-size: 0.105in;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #6d7a8a;
+}
+
+.traveler-note-block p {
+  margin: 0;
+  white-space: pre-wrap;
+  line-height: 1.28;
+  font-size: 0.12in;
+}
+
+.traveler-job-card {
+  margin-bottom: 0.18in;
+}
+
+.traveler-part-block {
+  margin-bottom: 0.16in;
+}
+
+.traveler-section-accent {
+  display: none;
+}
+
+.traveler-operation-list {
+  display: grid;
+  gap: 0.1in;
+}
+
+.traveler-operation-card {
+  gap: 0.1in;
+  break-inside: auto;
+}
+
+.traveler-operation-type,
+.traveler-part-count {
+  padding: 0.04in 0.08in;
+  border-radius: 999px;
+  background: #edf4ff;
+  border: 1px solid #d4deef;
+  color: #25445f;
+  white-space: nowrap;
+}
+
+.traveler-subsection {
+  display: grid;
+  gap: 0.06in;
+}
+
+.traveler-parameter-table {
+  margin-top: 0;
+}
+
+.traveler-parameter-table th {
+  width: 32%;
+  background: #f6f2ea;
+  font-size: 0.11in;
+}
+
+.traveler-parameter-table td {
+  font-size: 0.115in;
+}
+
+.traveler-tool-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.09in;
+}
+
+.traveler-tool-card {
+  border: 1px solid #e0d5c1;
+  border-radius: 16px;
+  background: #fcfaf6;
+  padding: 0.11in 0.12in;
+  display: grid;
+  gap: 0.08in;
+  break-inside: avoid;
+}
+
+.traveler-tool-card h4 {
+  margin: 0;
+  font-size: 0.13in;
+  line-height: 1.2;
+}
+
+.traveler-tool-facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.07in;
+}
+
+.traveler-tool-facts .print-field {
+  min-height: 0.42in;
+}
+
+.traveler-empty-state {
+  border: 1px dashed #d3c6b0;
+  border-radius: 14px;
+  padding: 0.12in;
+  background: #fffdf9;
+  color: #6d7a8a;
+  font-size: 0.12in;
+}
+
+.traveler-step-list {
+  display: grid;
+  gap: 0.08in;
+}
+
+.traveler-step-card {
+  border: 1px solid #e7dcc9;
+  border-radius: 14px;
+  background: #fffdf8;
+  padding: 0.1in 0.11in;
+  display: grid;
+  gap: 0.06in;
+  break-inside: avoid;
+}
+
+.traveler-step-text {
+  margin: 0;
+  font-size: 0.118in;
+  line-height: 1.3;
+}
+
+.traveler-step-text span {
+  font-weight: 800;
+  color: #1d6b57;
+}
+
+.traveler-step-images {
+  margin-top: 0;
+}
+
+.traveler-step-images img,
+.traveler-page .print-images.compact img {
+  max-width: 1.65in;
+  max-height: 1.2in;
+  border-radius: 10px;
+  border-color: #d8ccb7;
+  object-fit: contain;
+  background: #fff;
+}
+
 .materials-screen {
   display: grid;
   gap: 1rem;
@@ -1211,8 +1543,8 @@ button:disabled:hover {
 
 .kanban-label-qr-small .qr-image,
 .kanban-label-qr-small .qr-placeholder {
-  width: 0.52in;
-  height: 0.52in;
+  width: 0.62in;
+  height: 0.62in;
   border-radius: 0.08in;
 }
 
@@ -1276,7 +1608,7 @@ button:disabled:hover {
   display: flex;
   align-items: center;
   justify-content: center;
-  min-height: 1.1in;
+  min-height: 1.25in;
 }
 
 .kanban-label-photo {
@@ -1285,7 +1617,9 @@ button:disabled:hover {
   background: #f8f5ef;
   width: 100%;
   height: 100%;
-  min-height: 1.1in;
+  min-height: 1.25in;
+  padding: 0.08in;
+  box-sizing: border-box;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1294,14 +1628,16 @@ button:disabled:hover {
 
 .kanban-label-photo img {
   display: block;
-  width: 100%;
-  height: 100%;
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  max-height: 100%;
   object-fit: contain;
 }
 
 .kanban-label-footer {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 0.9in;
+  grid-template-columns: minmax(0, 1fr) 1.05in;
   gap: 0.1in;
   align-items: end;
 }
@@ -1331,8 +1667,8 @@ button:disabled:hover {
 
 .kanban-label-vendor-qr .qr-image,
 .kanban-label-vendor-qr .qr-placeholder {
-  width: 0.82in;
-  height: 0.82in;
+  width: 0.96in;
+  height: 0.96in;
   border-radius: 0.08in;
 }
 
@@ -1552,13 +1888,25 @@ button:disabled:hover {
 }
 
 .kanban-label-page {
-  padding: 0.08in;
+  padding: 0;
   background: transparent;
+  box-shadow: none;
+  overflow: hidden;
+  break-inside: avoid-page;
+  page-break-inside: avoid;
+  break-after: auto;
+  page-break-after: auto;
+}
+
+.kanban-label-page:not(.kanban-label-back-page) {
+  break-after: page;
+  page-break-after: always;
 }
 
 .kanban-label-card {
   width: 100%;
-  min-height: calc(100% - 0.02in);
+  height: 100%;
+  min-height: 100%;
   border: 1px solid #d9d1c2;
   border-radius: 0.18in;
   background: #ffffff;
@@ -1663,23 +2011,38 @@ button:disabled:hover {
 }
 
 .kanban-label-photo-wrap {
-  display: grid;
-  align-items: end;
-}
-
-.kanban-label-photo {
-  min-height: 1.08in;
-  border-radius: 0.14in;
-  background: #f7f5ef;
-  display: grid;
-  place-items: center;
+  display: flex;
+  align-items: stretch;
+  justify-content: center;
+  min-height: 0;
   overflow: hidden;
 }
 
-.kanban-label-photo img {
+.kanban-label-photo {
+  flex: 1 1 auto;
   width: 100%;
   height: 100%;
+  min-height: 0;
+  max-height: 100%;
+  border-radius: 0.14in;
+  background: #f7f5ef;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  padding: 0.06in;
+  box-sizing: border-box;
+}
+
+.kanban-label-photo img {
+  display: block;
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  max-height: 100%;
   object-fit: contain;
+  object-position: center center;
+  margin: auto;
 }
 
 .kanban-label-footer {
@@ -1701,9 +2064,11 @@ button:disabled:hover {
 }
 
 .kanban-label-department span {
-  font-size: 0.105in;
-  font-weight: 700;
-  letter-spacing: 0.02em;
+  font-size: 0.135in;
+  font-weight: 800;
+  letter-spacing: 0.01em;
+  line-height: 1;
+  text-transform: none;
 }
 
 .kanban-label-vendor-qr {
@@ -1715,6 +2080,145 @@ button:disabled:hover {
 .kanban-label-vendor-qr .qr-placeholder {
   width: 0.68in;
   height: 0.68in;
+}
+
+.kanban-print-shell {
+  width: 100%;
+  min-height: 100vh;
+  display: grid;
+  justify-content: center;
+  gap: 0.12in;
+}
+
+.kanban-label-card-back {
+  padding: 0.12in;
+  display: grid;
+  place-items: center;
+}
+
+.kanban-card-back-grid {
+  width: 100%;
+  height: 100%;
+  display: grid;
+  grid-template-columns: 1fr;
+  grid-template-rows: repeat(2, minmax(0, 1fr));
+  gap: 0.08in;
+  align-items: stretch;
+  justify-items: stretch;
+  align-content: center;
+}
+
+.kanban-card-back-qr-block {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  gap: 0.06in;
+  text-align: center;
+  padding: 0.02in 0;
+  box-sizing: border-box;
+}
+
+.kanban-card-back-qr-block span {
+  color: #1c2b27;
+  font-size: 0.12in;
+  font-weight: 800;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.kanban-card-back-qr-block .qr-image,
+.kanban-card-back-qr-block .qr-placeholder {
+  width: 100%;
+  height: 100%;
+  max-width: 1.55in;
+  max-height: 1.55in;
+  aspect-ratio: 1 / 1;
+  object-fit: contain;
+}
+
+.material-card-back-grid {
+  width: 100%;
+  height: 100%;
+  display: grid;
+  place-items: center;
+}
+
+.material-label-qr-photo .qr-image,
+.material-label-qr-photo .qr-placeholder {
+  width: 100%;
+  height: 100%;
+  max-width: 100%;
+  max-height: 100%;
+  aspect-ratio: 1 / 1;
+  object-fit: contain;
+}
+
+.material-label-qr-photo {
+  background: transparent;
+  border-radius: 0;
+  padding: 0;
+}
+
+.kanban-label-monochrome .kanban-label-accent-line {
+  background: #111111;
+}
+
+.kanban-label-monochrome .kanban-label-title-block h1 {
+  font-size: 0.28in;
+  font-weight: 900;
+  line-height: 1.02;
+}
+
+.kanban-label-monochrome .kanban-label-title-block p {
+  color: #111111;
+  font-size: 0.115in;
+  font-weight: 800;
+}
+
+.kanban-label-monochrome .kanban-detail-row span,
+.kanban-label-monochrome .kanban-label-copy span,
+.kanban-label-monochrome .kanban-card-back-qr-block span {
+  color: #111111;
+  font-size: 0.095in;
+  font-weight: 900;
+}
+
+.kanban-label-monochrome .kanban-label-photo img {
+  filter: grayscale(1) contrast(1.05);
+}
+
+.kanban-label-monochrome .kanban-detail-row strong {
+  font-size: 0.14in;
+  font-weight: 900;
+  color: #111111;
+}
+
+.kanban-label-monochrome .kanban-label-copy p,
+.kanban-label-monochrome .kanban-label-copy.secondary p {
+  color: #111111;
+  font-size: 0.108in;
+  line-height: 1.28;
+  font-weight: 700;
+}
+
+.kanban-label-monochrome .kanban-label-department {
+  background: #111111;
+  color: #ffffff !important;
+}
+
+.kanban-label-monochrome .kanban-label-department,
+.kanban-label-monochrome .kanban-label-department * {
+  color: #ffffff !important;
+}
+
+.kanban-label-monochrome .kanban-label-department span {
+  color: #ffffff !important;
+  font-size: 0.15in;
+  font-weight: 900;
 }
 
 @media (max-width: 1200px) {
@@ -1773,9 +2277,24 @@ button:disabled:hover {
   .kanban-qr-grid {
     grid-template-columns: 1fr;
   }
+
 }
 
 @media print {
+  @page {
+    margin: 0;
+  }
+
+  html,
+  body,
+  #root {
+    margin: 0 !important;
+    padding: 0 !important;
+    width: auto !important;
+    height: auto !important;
+    overflow: visible !important;
+  }
+
   .screen-only {
     display: none !important;
   }
@@ -1790,5 +2309,92 @@ button:disabled:hover {
     margin: 0;
     width: auto;
     padding: 0.2in 0.22in;
+  }
+
+  .traveler-page.print-page {
+    width: 8.5in;
+    min-height: 11in;
+    box-sizing: border-box;
+    padding: 0;
+  }
+
+  .traveler-page-sheet {
+    break-after: page;
+    page-break-after: always;
+  }
+
+  .traveler-page-sheet:last-child {
+    break-after: auto;
+    page-break-after: auto;
+  }
+
+  .traveler-page-inner {
+    padding: 0.52in;
+  }
+
+  .traveler-part-block {
+    margin: 0;
+  }
+
+  .traveler-part-card {
+    margin-bottom: 0;
+  }
+
+  .traveler-operation-list {
+    display: block;
+  }
+
+  .traveler-operation-card {
+    break-inside: auto;
+    page-break-inside: auto;
+    margin: 0;
+  }
+
+  .traveler-card,
+  .traveler-step-card,
+  .traveler-tool-card {
+    page-break-inside: avoid;
+  }
+
+  .kanban-print-shell {
+    width: auto !important;
+    height: auto !important;
+    min-height: 0 !important;
+    padding: 0;
+    margin: 0 !important;
+    display: block !important;
+    overflow: visible !important;
+  }
+
+  .kanban-print-page.print-page {
+    min-height: 0 !important;
+    max-height: none !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    background: white;
+    overflow: hidden !important;
+    box-sizing: border-box;
+    break-inside: avoid-page;
+    page-break-inside: avoid;
+    break-after: auto;
+    page-break-after: auto;
+  }
+
+  .kanban-label-card {
+    height: 100%;
+    min-height: 100%;
+    max-height: 100%;
+  }
+
+  .kanban-label-page:not(.kanban-label-back-page).print-page {
+    break-after: page !important;
+    page-break-after: always !important;
+  }
+
+  .kanban-label-back-page.print-page {
+    break-before: page !important;
+    page-break-before: always !important;
+    break-after: auto !important;
+    page-break-after: auto !important;
   }
 }
