@@ -6861,12 +6861,17 @@ function TravelerPrintPacket({ jobId }) {
                 const showDetailedTooling = supportsDetailedTooling(operation.type);
 
                 return (
-                  <section className="print-page traveler-page traveler-page-sheet traveler-operation-card print-operation-block" key={operation.id}>
-                    <article className="traveler-page-inner traveler-card">
-                    <header className="traveler-operation-header">
+                  <section className="print-page traveler-page traveler-page-sheet traveler-operation-block print-operation-block" key={operation.id}>
+                    <div className="traveler-page-inner">
+                    <article className="traveler-card traveler-operation-card">
+                    <header className="operation-print-header traveler-section-header">
                       <div>
                         <span className="traveler-kicker">Operation {operationIndex + 1}</span>
-                        <h3>{operation.title || "Operation"}</h3>
+                        <h2>{operation.title || "Operation"}</h2>
+                        <p>
+                          Part: {part.partNumber || part.partName || part.id}
+                          {part.partName && part.partName !== part.partNumber ? ` / ${part.partName}` : ""}
+                        </p>
                       </div>
                       <div className="traveler-operation-type">{operation.type || "General"}</div>
                     </header>
@@ -6949,6 +6954,7 @@ function TravelerPrintPacket({ jobId }) {
                       </div>
                     ) : null}
                     </article>
+                    </div>
                   </section>
                 );
               })}
