@@ -71,6 +71,12 @@ const DEFAULT_KANBAN_PRINT_SIZES = [
   { id: "kanban-size-3x5", name: '3" x 5"', widthIn: 3, heightIn: 5 },
   { id: "kanban-size-4x6", name: '4" x 6"', widthIn: 4, heightIn: 6 }
 ];
+const DEFAULT_ENABLED_MODULES = {
+  jobs: true,
+  kanban: true,
+  materials: true,
+  metrology: true
+};
 
 function mergeKanbanOrderingNotes(notes, vendorPartNumber) {
   const trimmedNotes = String(notes || "").trim();
@@ -308,6 +314,12 @@ class ERPBackend {
     const legacyKanbanStorageLocations = listPreference(preferences?.kanbanStorageLocations, ["Stock Room", "Tool Crib", "Receiving", "Maintenance Bench"]);
     const kanbanDepartments = normalizeKanbanDepartments(preferences?.kanbanDepartments, legacyKanbanStorageLocations);
     const kanbanPrintSizes = normalizeKanbanPrintSizes(preferences?.kanbanPrintSizes);
+    const enabledModules = Object.fromEntries(Object.entries(DEFAULT_ENABLED_MODULES).map(([key, fallback]) => [
+      key,
+      preferences?.enabledModules && Object.prototype.hasOwnProperty.call(preferences.enabledModules, key)
+        ? Boolean(preferences.enabledModules[key])
+        : fallback
+    ]));
     const defaultKanbanPrintSizeId = kanbanPrintSizes.some((item) => item.id === preferences?.defaultKanbanPrintSizeId)
       ? preferences.defaultKanbanPrintSizeId
       : (kanbanPrintSizes[0]?.id || DEFAULT_KANBAN_PRINT_SIZES[0].id);
@@ -316,6 +328,7 @@ class ERPBackend {
       appTagline: String(preferences?.appTagline || "Operator ERP").trim() || "Operator ERP",
       windowTitle: String(preferences?.windowTitle || "AMERP").trim() || "AMERP",
       appIconPath: String(preferences?.appIconPath || "").trim(),
+      enabledModules,
       dueSoonDays: Number.isFinite(Number(preferences?.dueSoonDays)) ? Number(preferences.dueSoonDays) : 14,
       jobPrefix: String(preferences?.jobPrefix || "J03C").trim(),
       startingJobNumber: Number.isFinite(Number(preferences?.startingJobNumber)) ? Number(preferences.startingJobNumber) : 600,

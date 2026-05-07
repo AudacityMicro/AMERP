@@ -614,6 +614,37 @@ button:disabled:hover {
   padding: 0.3rem;
 }
 
+.module-toggle-list {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.module-toggle-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 0.65rem;
+  align-items: center;
+  min-height: 44px;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--panel-2);
+}
+
+.module-toggle-row input {
+  width: 18px;
+  height: 18px;
+}
+
+.module-toggle-row span {
+  display: grid;
+  gap: 0.1rem;
+}
+
+.module-toggle-row small {
+  color: var(--muted);
+}
+
 .panel-heading.inline {
   align-items: flex-start;
 }

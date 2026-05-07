@@ -22,6 +22,18 @@ import "./styles.css";
 
 const api = window.amerp;
 
+const PRIMARY_MODULES = [
+  { id: "jobs", label: "Jobs", icon: Package },
+  { id: "kanban", label: "Kanban", icon: ClipboardList },
+  { id: "materials", label: "Materials", icon: Database },
+  { id: "metrology", label: "Gages", icon: Gauge }
+];
+const normalizeEnabledModules = (value = {}) => Object.fromEntries(PRIMARY_MODULES.map((module) => [
+  module.id,
+  Object.prototype.hasOwnProperty.call(value || {}, module.id) ? Boolean(value[module.id]) : true
+]));
+const firstEnabledModuleId = (enabledModules) => PRIMARY_MODULES.find((module) => enabledModules[module.id])?.id || "settings";
+
 const nowIso = () => new Date().toISOString();
 const today = () => new Date().toISOString().slice(0, 10);
 const uid = (prefix) => `${prefix}-${crypto.randomUUID()}`;
@@ -848,6 +860,9 @@ function Workspace() {
 
   const [selectedTemplateId, setSelectedTemplateId] = useState(null);
   const [lastIndexMaintenance, setLastIndexMaintenance] = useState(0);
+  const enabledModules = normalizeEnabledModules(workspace?.preferences?.enabledModules);
+  const moduleIsEnabled = (moduleId) => moduleId === "settings" || enabledModules[moduleId] !== false;
+  const firstAvailableView = firstEnabledModuleId(enabledModules);
 
   const showStatus = (message) => {
     setStatus(message);
@@ -942,6 +957,13 @@ useEffect(() => api.onDeepLink?.((payload) => {
   useEffect(() => {
     document.title = String(workspace?.preferences?.windowTitle || workspace?.preferences?.appTitle || "AMERP");
   }, [workspace?.preferences?.windowTitle, workspace?.preferences?.appTitle]);
+
+  useEffect(() => {
+    if (!workspace || moduleIsEnabled(view)) {
+      return;
+    }
+    setView(firstAvailableView);
+  }, [workspace?.preferences?.enabledModules, view]);
 
   useEffect(() => {
     if ((view === "jobs" && jobScreen === "list")
@@ -2373,10 +2395,23 @@ useEffect(() => api.onDeepLink?.((payload) => {
         </div>
 
         <nav className="nav-tabs">
-          <NavButton icon={Package} active={view === "jobs"} label="Jobs" onClick={showJobList} />
-          <NavButton icon={ClipboardList} active={view === "kanban"} label="Kanban" onClick={showKanbanList} />
-          <NavButton icon={Database} active={view === "materials"} label="Materials" onClick={showMaterialsList} />
-          <NavButton icon={Gauge} active={view === "metrology"} label="Gages" onClick={showMetrologyList} />
+          {PRIMARY_MODULES.filter((module) => moduleIsEnabled(module.id)).map((module) => {
+            const handlers = {
+              jobs: showJobList,
+              kanban: showKanbanList,
+              materials: showMaterialsList,
+              metrology: showMetrologyList
+            };
+            return (
+              <NavButton
+                key={module.id}
+                icon={module.icon}
+                active={view === module.id}
+                label={module.label}
+                onClick={handlers[module.id]}
+              />
+            );
+          })}
           <NavButton icon={Settings} active={view === "settings"} label="Settings" onClick={() => setView("settings")} />
         </nav>
       </aside>
@@ -2408,7 +2443,7 @@ useEffect(() => api.onDeepLink?.((payload) => {
         </header>
 
         {status && <div className="status-banner">{status}</div>}
-        {view === "jobs" && (
+        {view === "jobs" && moduleIsEnabled("jobs") && (
           <JobsView
             busy={busy}
             jobScreen={jobScreen}
@@ -2450,7 +2485,7 @@ useEffect(() => api.onDeepLink?.((payload) => {
             onAddMaterialAlloy={addMaterialAlloyOption}
           />
         )}
-        {view === "kanban" && (
+        {view === "kanban" && moduleIsEnabled("kanban") && (
           <KanbanView
             workspace={workspace}
             screen={kanbanScreen}
@@ -2470,7 +2505,7 @@ useEffect(() => api.onDeepLink?.((payload) => {
             aiState={kanbanAiState}
           />
         )}
-        {view === "materials" && (
+        {view === "materials" && moduleIsEnabled("materials") && (
           <MaterialsView
             workspace={workspace}
             materialScreen={materialScreen}
@@ -2491,7 +2526,7 @@ useEffect(() => api.onDeepLink?.((payload) => {
             onAddMaterialAlloy={addMaterialAlloyOption}
           />
         )}
-        {view === "metrology" && (
+        {view === "metrology" && moduleIsEnabled("metrology") && (
           <MetrologyView
             workspace={workspace}
             screen={metrologyScreen}
@@ -5543,6 +5578,7 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
     windowTitle: workspace.preferences?.windowTitle || "AMERP",
     appIconPath: workspace.preferences?.appIconPath || ""
   });
+  const [moduleSettings, setModuleSettings] = useState(normalizeEnabledModules(workspace.preferences?.enabledModules));
   const [jobSettings, setJobSettings] = useState({
     jobPrefix: workspace.preferences?.jobPrefix || "J03C",
     startingJobNumber: String(workspace.preferences?.startingJobNumber ?? 600)
@@ -5587,6 +5623,7 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
       windowTitle: workspace.preferences?.windowTitle || "AMERP",
       appIconPath: workspace.preferences?.appIconPath || ""
     });
+    setModuleSettings(normalizeEnabledModules(workspace.preferences?.enabledModules));
     setJobSettings({
       jobPrefix: workspace.preferences?.jobPrefix || "J03C",
       startingJobNumber: String(workspace.preferences?.startingJobNumber ?? 600)
@@ -5754,6 +5791,19 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
         appTagline: String(current.appTagline || "").trim() || "Operator ERP",
         windowTitle: String(current.windowTitle || "").trim() || "AMERP",
         appIconPath: String(current.appIconPath || "").trim()
+      }, { silent: true });
+      return current;
+    }
+  });
+
+  useAutoSave({
+    value: moduleSettings,
+    resetKey: `module-settings:${workspace.dataFolder}:${JSON.stringify(workspace.preferences?.enabledModules || {})}`,
+    enabled: true,
+    isReady: (current) => Boolean(current),
+    save: async (current) => {
+      await onSavePreferences({
+        enabledModules: normalizeEnabledModules(current)
       }, { silent: true });
       return current;
     }
@@ -6011,6 +6061,32 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
                 onChange={(value) => setAiSettings((current) => ({ ...current, openaiApiKey: value }))}
                 placeholder="sk-..."
               />
+            </div>
+          </div>
+          <div className="subpanel">
+            <div className="subpanel-header">
+              <div>
+                <h4>Modules</h4>
+                <span>Turn major workspaces on or off in the left navigation.</span>
+              </div>
+            </div>
+            <div className="module-toggle-list">
+              {PRIMARY_MODULES.map((module) => (
+                <label className="module-toggle-row" key={module.id}>
+                  <input
+                    type="checkbox"
+                    checked={moduleSettings[module.id] !== false}
+                    onChange={(event) => setModuleSettings((current) => ({
+                      ...normalizeEnabledModules(current),
+                      [module.id]: event.target.checked
+                    }))}
+                  />
+                  <span>
+                    <strong>{module.label}</strong>
+                    <small>{module.id === "metrology" ? "Gage records and calibration tracking." : `${module.label} workspace.`}</small>
+                  </span>
+                </label>
+              ))}
             </div>
           </div>
         </div>
