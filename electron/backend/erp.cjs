@@ -75,8 +75,11 @@ const DEFAULT_KANBAN_PRINT_SIZES = [
   { id: "kanban-size-3x5", name: '3" x 5"', widthIn: 3, heightIn: 5 },
   { id: "kanban-size-4x6", name: '4" x 6"', widthIn: 4, heightIn: 6 }
 ];
+const NONCONFORMANCE_STATUS_OPTIONS = ["Open", "Review", "Dispositioned", "Closed"];
+const DEFAULT_NONCONFORMANCE_DISPOSITIONS = ["Use As-Is", "Rework", "Scrap", "Return"];
 const DEFAULT_ENABLED_MODULES = {
   jobs: true,
+  nonconformance: true,
   kanban: true,
   materials: true,
   metrology: true
@@ -138,6 +141,7 @@ class ERPBackend {
       "config",
       "customers",
       "jobs",
+      "nonconformances",
       "kanban",
       "materials",
       "metrology/instruments",
@@ -186,10 +190,11 @@ class ERPBackend {
     if (!(await pathExists(indexPath))) {
       await writeJson(indexPath, {
         generatedAt: nowIso(),
-        jobs: [],
-        kanbanCards: [],
-        materials: [],
-        instruments: []
+      jobs: [],
+      nonconformances: [],
+      kanbanCards: [],
+      materials: [],
+      instruments: []
       });
     }
   }
@@ -336,6 +341,8 @@ class ERPBackend {
       dueSoonDays: Number.isFinite(Number(preferences?.dueSoonDays)) ? Number(preferences.dueSoonDays) : 14,
       jobPrefix: String(preferences?.jobPrefix || "J03C").trim(),
       startingJobNumber: Number.isFinite(Number(preferences?.startingJobNumber)) ? Number(preferences.startingJobNumber) : 600,
+      nonconformancePrefix: String(preferences?.nonconformancePrefix || "NCR").trim(),
+      startingNonconformanceNumber: Number.isFinite(Number(preferences?.startingNonconformanceNumber)) ? Number(preferences.startingNonconformanceNumber) : 1,
       kanbanInventoryPrefix: String(preferences?.kanbanInventoryPrefix || "J03C").trim(),
       kanbanStartingInventoryNumber: Number.isFinite(Number(preferences?.kanbanStartingInventoryNumber)) ? Number(preferences.kanbanStartingInventoryNumber) : 600,
       resultsColumns: Array.from(new Set(resultsColumns)),
@@ -350,6 +357,7 @@ class ERPBackend {
       kanbanStorageLocations: Array.from(new Set(kanbanDepartments.flatMap((item) => item.locations || []).filter(Boolean))),
       kanbanVendors: listPreference(preferences?.kanbanVendors, ["McMaster-Carr", "MSC", "Amazon"]),
       kanbanCategories: listPreference(preferences?.kanbanCategories, DEFAULT_KANBAN_CATEGORIES),
+      nonconformanceDispositions: listPreference(preferences?.nonconformanceDispositions, DEFAULT_NONCONFORMANCE_DISPOSITIONS),
       kanbanPrintSizes,
       defaultKanbanPrintSizeId,
       openaiApiKey: String(preferences?.openaiApiKey || "").trim(),
@@ -1448,6 +1456,14 @@ class ERPBackend {
     return path.join(dataRoot, "jobs", safeFileName(jobId));
   }
 
+  getNonconformanceRoot(dataRoot, ncrId) {
+    return path.join(dataRoot, "nonconformances", safeFileName(ncrId));
+  }
+
+  getNonconformanceAttachmentsRoot(dataRoot, ncrId) {
+    return path.join(this.getNonconformanceRoot(dataRoot, ncrId), "attachments");
+  }
+
   getKanbanRoot(dataRoot, cardId) {
     return path.join(dataRoot, "kanban", safeFileName(cardId));
   }
@@ -1643,6 +1659,422 @@ class ERPBackend {
       "",
       card.orderingNotes || "No ordering notes."
     ].join("\n");
+  }
+
+  normalizeNonconformance(record) {
+    return {
+      id: record?.id || randomId("ncr"),
+      ncrNumber: String(record?.ncrNumber || "").trim(),
+      status: NONCONFORMANCE_STATUS_OPTIONS.includes(String(record?.status || "").trim())
+        ? String(record?.status || "").trim()
+        : "Open",
+      jobId: String(record?.jobId || "").trim(),
+      jobNumber: String(record?.jobNumber || "").trim(),
+      partId: String(record?.partId || "").trim(),
+      partNumber: String(record?.partNumber || "").trim(),
+      partName: String(record?.partName || "").trim(),
+      inspectionCharacteristicId: String(record?.inspectionCharacteristicId || "").trim(),
+      inspectionInstanceId: String(record?.inspectionInstanceId || "").trim(),
+      reportedAt: String(record?.reportedAt || nowIso()).trim() || nowIso(),
+      reportedBy: String(record?.reportedBy || "").trim(),
+      quantityAffected: String(record?.quantityAffected || "").trim(),
+      issueSummary: String(record?.issueSummary || "").trim(),
+      issueDescription: String(record?.issueDescription || "").trim(),
+      containmentAction: String(record?.containmentAction || "").trim(),
+      disposition: String(record?.disposition || "").trim(),
+      owner: String(record?.owner || "").trim(),
+      dueDate: String(record?.dueDate || "").trim(),
+      closureNotes: String(record?.closureNotes || "").trim(),
+      rootCauseNotes: String(record?.rootCauseNotes || "").trim(),
+      active: record?.active !== false,
+      archivedAt: String(record?.archivedAt || "").trim(),
+      createdAt: String(record?.createdAt || nowIso()).trim() || nowIso(),
+      updatedAt: String(record?.updatedAt || nowIso()).trim() || nowIso(),
+      attachments: (Array.isArray(record?.attachments) ? record.attachments : []).map((attachment) => this.normalizeDocument(attachment))
+    };
+  }
+
+  nonconformanceHistoryMarkdown(record) {
+    return [
+      `# Nonconformance Report: ${record.ncrNumber || record.id}`,
+      "",
+      `Generated: ${nowIso()}`,
+      "",
+      `- Status: ${record.status || "-"}`,
+      `- Job: ${record.jobNumber || record.jobId || "-"}`,
+      `- Part: ${record.partNumber || record.partName || record.partId || "-"}`,
+      `- Reported At: ${record.reportedAt || "-"}`,
+      `- Reported By: ${record.reportedBy || "-"}`,
+      `- Quantity Affected: ${record.quantityAffected || "-"}`,
+      `- Disposition: ${record.disposition || "-"}`,
+      `- Owner: ${record.owner || "-"}`,
+      `- Due Date: ${record.dueDate || "-"}`,
+      `- Active: ${record.active !== false ? "Yes" : "No"}`,
+      "",
+      "## Issue Summary",
+      "",
+      record.issueSummary || "No issue summary.",
+      "",
+      "## Issue Description",
+      "",
+      record.issueDescription || "No issue description.",
+      "",
+      "## Containment Action",
+      "",
+      record.containmentAction || "No containment action.",
+      "",
+      "## Root Cause Notes",
+      "",
+      record.rootCauseNotes || "No root cause notes.",
+      "",
+      "## Closure Notes",
+      "",
+      record.closureNotes || "No closure notes."
+    ].join("\n");
+  }
+
+  async buildNonconformanceInspectionContext(record) {
+    if (!record?.jobId || !record?.partId) {
+      return null;
+    }
+    const job = await this.loadJob(record.jobId);
+    const part = job?.parts?.find((item) => item.id === record.partId);
+    if (!part) {
+      return null;
+    }
+    const inspection = this.normalizeInspection(part.inspection);
+    const characteristic = inspection.characteristics.find((item) => item.id === record.inspectionCharacteristicId) || null;
+    const instance = inspection.instances.find((item) => item.id === record.inspectionInstanceId) || null;
+    return {
+      characteristic: characteristic ? {
+        id: characteristic.id,
+        number: characteristic.number,
+        type: characteristic.type,
+        nominal: characteristic.nominal,
+        plusTolerance: characteristic.plusTolerance,
+        minusTolerance: characteristic.minusTolerance,
+        lowerLimit: characteristic.lowerLimit,
+        upperLimit: characteristic.upperLimit,
+        gageId: characteristic.gageId
+      } : null,
+      instance: instance ? {
+        id: instance.id,
+        label: instance.label,
+        inspector: instance.inspector,
+        inspectedAt: instance.inspectedAt
+      } : null
+    };
+  }
+
+  buildNonconformanceSummary(record) {
+    return {
+      id: record.id,
+      ncrNumber: record.ncrNumber,
+      status: record.status,
+      disposition: record.disposition,
+      jobId: record.jobId,
+      jobNumber: record.jobNumber,
+      partId: record.partId,
+      partNumber: record.partNumber,
+      partName: record.partName,
+      reportedAt: record.reportedAt,
+      reportedBy: record.reportedBy,
+      quantityAffected: record.quantityAffected,
+      issueSummary: record.issueSummary,
+      owner: record.owner,
+      active: record.active !== false,
+      archivedAt: record.archivedAt,
+      updatedAt: record.updatedAt
+    };
+  }
+
+  async listNonconformances(filters = {}) {
+    const dataRoot = await this.requireDataFolder();
+    const root = path.join(dataRoot, "nonconformances");
+    const entries = await fs.readdir(root, { withFileTypes: true });
+    const records = [];
+    for (const entry of entries) {
+      if (!entry.isDirectory()) {
+        continue;
+      }
+      const record = await readJson(path.join(root, entry.name, "ncr.json"), null);
+      if (!record?.id) {
+        continue;
+      }
+      const normalized = this.normalizeNonconformance(record);
+      records.push(this.buildNonconformanceSummary(normalized));
+    }
+    const filtered = records.filter((record) => {
+      if (filters?.active === true && record.active === false) return false;
+      if (filters?.active === false && record.active !== false) return false;
+      if (filters?.jobId && record.jobId !== filters.jobId) return false;
+      if (filters?.partId && record.partId !== filters.partId) return false;
+      if (filters?.status && record.status !== filters.status) return false;
+      if (filters?.disposition && record.disposition !== filters.disposition) return false;
+      return true;
+    });
+    return filtered.sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
+  }
+
+  async loadNonconformance(ncrId, options = {}) {
+    const dataRoot = await this.requireDataFolder();
+    const root = this.getNonconformanceRoot(dataRoot, ncrId);
+    const record = await readJson(path.join(root, "ncr.json"), null);
+    if (!record) {
+      return null;
+    }
+    if (options.acquireLock) {
+      await this.acquireLock("nonconformance", ncrId, path.join(root, "ncr.json"));
+    }
+    const normalized = this.normalizeNonconformance(record);
+    return {
+      ...normalized,
+      inspectionContext: await this.buildNonconformanceInspectionContext(normalized)
+    };
+  }
+
+  async saveNonconformance(record) {
+    const dataRoot = await this.requireDataFolder();
+    const timestamp = nowIso();
+    const normalized = this.normalizeNonconformance({
+      ...record,
+      createdAt: record?.createdAt || timestamp,
+      updatedAt: timestamp
+    });
+    const nextNumber = normalizeText(normalized.ncrNumber);
+    if (nextNumber) {
+      const existingRecords = await this.listNonconformances();
+      const duplicate = existingRecords.find((item) => item.id !== normalized.id && normalizeText(item.ncrNumber) === nextNumber);
+      if (duplicate) {
+        throw new Error(`NCR number already exists: ${normalized.ncrNumber}`);
+      }
+    }
+    const root = this.getNonconformanceRoot(dataRoot, normalized.id);
+    await ensureDir(path.join(root, "attachments"));
+    await writeJson(path.join(root, "ncr.json"), normalized);
+    await writeText(path.join(root, "history.md"), this.nonconformanceHistoryMarkdown(normalized));
+    await this.appendAudit("nonconformance_saved", normalized.id, `Saved NCR ${normalized.ncrNumber || normalized.id}.`);
+    await this.rebuildIndex();
+    return this.loadNonconformance(normalized.id);
+  }
+
+  async archiveNonconformance(ncrId) {
+    const record = await this.loadNonconformance(ncrId);
+    if (!record) {
+      throw new Error(`Nonconformance record not found: ${ncrId}`);
+    }
+    const saved = await this.saveNonconformance({
+      ...record,
+      active: false,
+      archivedAt: nowIso()
+    });
+    await this.appendAudit("nonconformance_archived", ncrId, `Archived NCR ${record.ncrNumber || ncrId}.`);
+    return saved;
+  }
+
+  async unarchiveNonconformance(ncrId) {
+    const record = await this.loadNonconformance(ncrId);
+    if (!record) {
+      throw new Error(`Nonconformance record not found: ${ncrId}`);
+    }
+    const saved = await this.saveNonconformance({
+      ...record,
+      active: true,
+      archivedAt: ""
+    });
+    await this.appendAudit("nonconformance_unarchived", ncrId, `Unarchived NCR ${record.ncrNumber || ncrId}.`);
+    return saved;
+  }
+
+  async copyNonconformanceAttachment(ncrId, sourcePath) {
+    const dataRoot = await this.requireDataFolder();
+    const record = await this.loadNonconformance(ncrId);
+    if (!record) {
+      throw new Error("Nonconformance record not found.");
+    }
+    const destination = await copyFileUnique(sourcePath, this.getNonconformanceAttachmentsRoot(dataRoot, ncrId), "");
+    return this.normalizeDocument({
+      originalFilename: path.basename(sourcePath),
+      storedFilename: path.basename(destination),
+      storedPath: path.relative(dataRoot, destination).replaceAll("\\", "/"),
+      originalPath: sourcePath,
+      fileType: path.extname(sourcePath).slice(1).toUpperCase()
+    });
+  }
+
+  async chooseNonconformanceAttachments(ncrId, mainWindow) {
+    const result = await dialog.showOpenDialog(mainWindow || null, {
+      title: "Choose NCR Attachments",
+      properties: ["openFile", "multiSelections"]
+    });
+    if (result.canceled) {
+      return [];
+    }
+    const copied = [];
+    for (const sourcePath of result.filePaths) {
+      copied.push(await this.copyNonconformanceAttachment(ncrId, sourcePath));
+    }
+    return copied;
+  }
+
+  async openNonconformanceAttachment(ncrId, attachmentId) {
+    const dataRoot = await this.requireDataFolder();
+    const record = await this.loadNonconformance(ncrId);
+    const attachment = (record?.attachments || []).find((item) => item.id === attachmentId);
+    if (!attachment) {
+      throw new Error("Attachment not found.");
+    }
+    const targetPath = attachment.storedPath ? path.join(dataRoot, attachment.storedPath) : attachment.originalPath;
+    if (!targetPath || !(await pathExists(targetPath))) {
+      throw new Error("Attachment file could not be found.");
+    }
+    const openError = await shell.openPath(targetPath);
+    if (openError) {
+      throw new Error(openError);
+    }
+    return true;
+  }
+
+  async openNonconformanceAttachmentRevision(ncrId, attachmentId, revisionIndex) {
+    const dataRoot = await this.requireDataFolder();
+    const record = await this.loadNonconformance(ncrId);
+    const attachment = (record?.attachments || []).find((item) => item.id === attachmentId);
+    const revision = Array.isArray(attachment?.revisions) ? attachment.revisions[Number(revisionIndex)] : null;
+    if (!revision) {
+      throw new Error("Revision not found.");
+    }
+    const targetPath = revision.storedPath ? path.join(dataRoot, revision.storedPath) : revision.originalPath;
+    if (!targetPath || !(await pathExists(targetPath))) {
+      throw new Error("Revision file could not be found.");
+    }
+    const openError = await shell.openPath(targetPath);
+    if (openError) {
+      throw new Error(openError);
+    }
+    return true;
+  }
+
+  async updateNonconformanceAttachmentState(ncrId, attachmentId, patch) {
+    const record = await this.loadNonconformance(ncrId);
+    if (!record) {
+      throw new Error("Nonconformance record not found.");
+    }
+    const attachments = Array.isArray(record.attachments) ? record.attachments : [];
+    const index = attachments.findIndex((item) => item.id === attachmentId);
+    if (index < 0) {
+      throw new Error("Attachment not found.");
+    }
+    attachments[index] = this.normalizeDocument({ ...attachments[index], ...patch });
+    record.attachments = attachments;
+    return this.saveNonconformance(record);
+  }
+
+  async archiveNonconformanceAttachment(ncrId, attachmentId) {
+    return this.updateNonconformanceAttachmentState(ncrId, attachmentId, { active: false, archivedAt: nowIso() });
+  }
+
+  async unarchiveNonconformanceAttachment(ncrId, attachmentId) {
+    return this.updateNonconformanceAttachmentState(ncrId, attachmentId, { active: true, archivedAt: "" });
+  }
+
+  async reviseNonconformanceAttachment(ncrId, attachmentId, mainWindow = null) {
+    const result = await dialog.showOpenDialog(mainWindow || null, {
+      title: "Choose New NCR Attachment Revision",
+      properties: ["openFile"]
+    });
+    if (result.canceled || !result.filePaths?.[0]) {
+      return null;
+    }
+    const dataRoot = await this.requireDataFolder();
+    const record = await this.loadNonconformance(ncrId);
+    if (!record) {
+      throw new Error("Nonconformance record not found.");
+    }
+    const attachment = (record.attachments || []).find((item) => item.id === attachmentId);
+    if (!attachment) {
+      throw new Error("Attachment not found.");
+    }
+    const destination = await copyFileUnique(result.filePaths[0], this.getNonconformanceAttachmentsRoot(dataRoot, ncrId), "");
+    const revisionTimestamp = nowIso();
+    attachment.revisions = [
+      ...(attachment.revisions || []),
+      {
+        originalFilename: attachment.originalFilename,
+        storedFilename: attachment.storedFilename,
+        storedPath: attachment.storedPath,
+        originalPath: attachment.originalPath,
+        fileType: attachment.fileType,
+        attachedAt: attachment.attachedAt,
+        revisedAt: revisionTimestamp,
+        revisionNumber: attachment.revisionNumber || 1
+      }
+    ];
+    attachment.originalFilename = path.basename(result.filePaths[0]);
+    attachment.storedFilename = path.basename(destination);
+    attachment.storedPath = path.relative(dataRoot, destination).replaceAll("\\", "/");
+    attachment.originalPath = result.filePaths[0];
+    attachment.fileType = path.extname(result.filePaths[0]).slice(1).toUpperCase();
+    attachment.displayName = attachment.originalFilename;
+    attachment.active = true;
+    attachment.archivedAt = "";
+    attachment.revisedAt = revisionTimestamp;
+    attachment.revisionNumber = Number(attachment.revisionNumber || 1) + 1;
+    return this.saveNonconformance(record);
+  }
+
+  async deleteNonconformanceAttachment(ncrId, attachmentId) {
+    const dataRoot = await this.requireDataFolder();
+    const record = await this.loadNonconformance(ncrId);
+    if (!record) {
+      throw new Error("Nonconformance record not found.");
+    }
+    const attachments = Array.isArray(record.attachments) ? record.attachments : [];
+    const attachmentIndex = attachments.findIndex((item) => item.id === attachmentId);
+    if (attachmentIndex < 0) {
+      throw new Error("Attachment not found.");
+    }
+    const attachment = attachments[attachmentIndex];
+    if (attachment.active !== false) {
+      throw new Error("Only archived attachments can be deleted.");
+    }
+    await this.deleteDocumentFiles(dataRoot, attachment);
+    attachments.splice(attachmentIndex, 1);
+    record.attachments = attachments;
+    return this.saveNonconformance(record);
+  }
+
+  async generateNextNonconformanceNumber() {
+    const records = await this.listNonconformances();
+    const preferences = await this.loadPreferences();
+    const configuredPrefix = String(preferences.nonconformancePrefix || "").trim();
+    const startingNumber = Number.isFinite(Number(preferences.startingNonconformanceNumber))
+      ? Number(preferences.startingNonconformanceNumber)
+      : 1;
+    const candidates = records
+      .map((record) => {
+        const value = String(record.ncrNumber || "").trim();
+        const match = value.match(/^(.*?)(\d+)$/);
+        if (!match) {
+          return null;
+        }
+        return {
+          prefix: match[1],
+          digits: match[2],
+          number: Number(match[2]),
+          updatedAt: String(record.updatedAt || "")
+        };
+      })
+      .filter(Boolean)
+      .sort((a, b) => b.number - a.number || String(b.updatedAt).localeCompare(String(a.updatedAt)));
+    const preferredCandidates = configuredPrefix
+      ? candidates.filter((candidate) => candidate.prefix === configuredPrefix)
+      : candidates;
+    if (!preferredCandidates.length) {
+      const digits = Math.max(String(startingNumber).length, 4);
+      return `${configuredPrefix}${String(startingNumber).padStart(digits, "0")}`;
+    }
+    const next = preferredCandidates[0];
+    return `${next.prefix}${String(next.number + 1).padStart(next.digits.length, "0")}`;
   }
 
   normalizeParameter(parameter) {
@@ -3364,8 +3796,9 @@ class ERPBackend {
 
   async rebuildIndex() {
     const dataRoot = await this.requireDataFolder();
-    const [jobs, kanbanCards, materials, instruments] = await Promise.all([
+    const [jobs, nonconformances, kanbanCards, materials, instruments] = await Promise.all([
       this.listJobSummaries(),
+      this.listNonconformances(),
       this.listKanbanCards(),
       this.listMaterials(),
       this.listInstruments()
@@ -3376,6 +3809,11 @@ class ERPBackend {
         id: job.id,
         label: `${job.jobNumber || job.id} ${job.customer || ""}`.trim(),
         searchText: `${job.jobNumber} ${job.customer} ${job.routeSummary}`.toLowerCase()
+      })),
+      nonconformances: nonconformances.map((record) => ({
+        id: record.id,
+        label: `${record.ncrNumber || record.id} ${record.jobNumber || ""} ${record.partNumber || record.partName || ""}`.trim(),
+        searchText: `${record.ncrNumber} ${record.jobNumber} ${record.partNumber} ${record.partName} ${record.issueSummary || ""} ${record.owner || ""} ${record.disposition || ""}`.toLowerCase()
       })),
       kanbanCards: kanbanCards.map((card) => ({
         id: card.id,
@@ -3418,9 +3856,10 @@ class ERPBackend {
 
   async loadWorkspace() {
     const dataFolder = await this.requireDataFolder();
-    const [dashboard, jobs, kanbanCards, customers, materials, instruments, templates, libraries, standards, preferences] = await Promise.all([
+    const [dashboard, jobs, nonconformances, kanbanCards, customers, materials, instruments, templates, libraries, standards, preferences] = await Promise.all([
       this.getDashboardState(),
       this.listJobSummaries(),
+      this.listNonconformances(),
       this.listKanbanCards(),
       this.listCustomers(),
       this.listMaterials(),
@@ -3434,6 +3873,7 @@ class ERPBackend {
       dataFolder,
       dashboard,
       jobs,
+      nonconformances,
       kanbanCards,
       customers,
       materials,
@@ -3448,6 +3888,7 @@ class ERPBackend {
           jobStatuses: ["Open", "In Process", "On Hold", "Complete", "Archived"],
           priorities: ["Low", "Normal", "High", "Hot"],
           instrumentStatuses: ["In service", "Due for calibration", "Overdue", "Retired"],
+          nonconformanceStatuses: NONCONFORMANCE_STATUS_OPTIONS,
           kanbanDeepLinkPrefix: KANBAN_DEEP_LINK_PREFIX,
           materialDeepLinkPrefix: MATERIAL_DEEP_LINK_PREFIX
         }
@@ -4398,6 +4839,57 @@ class ERPBackend {
       });
     }
     await this.waitForPrintSelector(printWindow, ".inspection-print-ready");
+    const pdf = await printWindow.webContents.printToPDF({
+      pageSize: "Letter",
+      printBackground: true,
+      margins: { marginType: "default" }
+    });
+    await fs.writeFile(outputPath, pdf);
+    printWindow.close();
+    const openError = await shell.openPath(outputPath);
+    if (openError) {
+      console.warn(`Unable to open exported PDF: ${openError}`);
+    }
+    return outputPath;
+  }
+
+  async exportNonconformancePdf(ncrId, destinationPath) {
+    const dataRoot = await this.requireDataFolder();
+    const record = await this.loadNonconformance(ncrId);
+    if (!record) {
+      throw new Error("Nonconformance record not found.");
+    }
+    let outputPath = destinationPath;
+    if (!outputPath) {
+      const result = await dialog.showSaveDialog({
+        title: "Export NCR PDF",
+        defaultPath: path.join(dataRoot, `${safeFileName(record.ncrNumber || record.id)}-nonconformance.pdf`),
+        filters: [{ name: "PDF", extensions: ["pdf"] }]
+      });
+      if (result.canceled || !result.filePath) {
+        return null;
+      }
+      outputPath = result.filePath;
+    }
+    const printWindow = new BrowserWindow({
+      show: false,
+      width: 1200,
+      height: 1500,
+      webPreferences: {
+        preload: path.join(__dirname, "..", "preload.cjs"),
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: false
+      }
+    });
+    if (this.devServerUrl) {
+      await printWindow.loadURL(`${this.devServerUrl}#/print/nonconformance/${encodeURIComponent(ncrId)}`);
+    } else {
+      await printWindow.loadFile(path.join(this.app.getAppPath(), "dist", "index.html"), {
+        hash: `/print/nonconformance/${encodeURIComponent(ncrId)}`
+      });
+    }
+    await this.waitForPrintSelector(printWindow, ".nonconformance-print-ready");
     const pdf = await printWindow.webContents.printToPDF({
       pageSize: "Letter",
       printBackground: true,

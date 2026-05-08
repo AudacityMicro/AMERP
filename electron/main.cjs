@@ -165,6 +165,20 @@ app.whenReady().then(async () => {
   });
 
   ipcMain.handle("list-jobs", () => backend.listJobSummaries());
+  ipcMain.handle("list-nonconformances", (_event, filters) => backend.listNonconformances(filters || {}));
+  ipcMain.handle("load-nonconformance", (_event, id, options) => backend.loadNonconformance(id, options || {}));
+  ipcMain.handle("save-nonconformance", (_event, record) => backend.saveNonconformance(record));
+  ipcMain.handle("archive-nonconformance", (_event, id) => backend.archiveNonconformance(id));
+  ipcMain.handle("unarchive-nonconformance", (_event, id) => backend.unarchiveNonconformance(id));
+  ipcMain.handle("export-nonconformance-pdf", (_event, id, destinationPath) => backend.exportNonconformancePdf(id, destinationPath));
+  ipcMain.handle("choose-nonconformance-attachments", (_event, id) => backend.chooseNonconformanceAttachments(id, mainWindow));
+  ipcMain.handle("open-nonconformance-attachment", (_event, id, attachmentId) => backend.openNonconformanceAttachment(id, attachmentId));
+  ipcMain.handle("open-nonconformance-attachment-revision", (_event, id, attachmentId, revisionIndex) => backend.openNonconformanceAttachmentRevision(id, attachmentId, revisionIndex));
+  ipcMain.handle("archive-nonconformance-attachment", (_event, id, attachmentId) => backend.archiveNonconformanceAttachment(id, attachmentId));
+  ipcMain.handle("unarchive-nonconformance-attachment", (_event, id, attachmentId) => backend.unarchiveNonconformanceAttachment(id, attachmentId));
+  ipcMain.handle("revise-nonconformance-attachment", (_event, id, attachmentId) => backend.reviseNonconformanceAttachment(id, attachmentId, mainWindow));
+  ipcMain.handle("delete-nonconformance-attachment", (_event, id, attachmentId) => backend.deleteNonconformanceAttachment(id, attachmentId));
+  ipcMain.handle("generate-next-nonconformance-number", () => backend.generateNextNonconformanceNumber());
   ipcMain.handle("list-kanban-cards", () => backend.listKanbanCards());
   ipcMain.handle("load-kanban-card", (_event, id, options) => backend.loadKanbanCard(id, options || {}));
   ipcMain.handle("save-kanban-card", (_event, card) => backend.saveKanbanCard(card));

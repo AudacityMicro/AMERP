@@ -17,6 +17,7 @@ import {
   Package,
   Plus,
   Settings,
+  ShieldAlert,
   Trash2,
   X
 } from "lucide-react";
@@ -27,6 +28,7 @@ GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
 const PRIMARY_MODULES = [
   { id: "jobs", label: "Jobs", icon: Package },
+  { id: "nonconformance", label: "Nonconformance", icon: ShieldAlert },
   { id: "kanban", label: "Kanban", icon: ClipboardList },
   { id: "materials", label: "Materials", icon: Database },
   { id: "metrology", label: "Gages", icon: Gauge }
@@ -239,6 +241,35 @@ const blankKanbanCard = (defaults = {}) => ({
   archivedAt: "",
   createdAt: nowIso(),
   updatedAt: nowIso()
+});
+
+const blankNonconformance = (seed = {}) => ({
+  id: uid("ncr"),
+  ncrNumber: "",
+  status: "Open",
+  jobId: seed.jobId || "",
+  jobNumber: seed.jobNumber || "",
+  partId: seed.partId || "",
+  partNumber: seed.partNumber || "",
+  partName: seed.partName || "",
+  inspectionCharacteristicId: "",
+  inspectionInstanceId: "",
+  reportedAt: nowIso(),
+  reportedBy: "",
+  quantityAffected: "",
+  issueSummary: "",
+  issueDescription: "",
+  containmentAction: "",
+  disposition: "",
+  owner: "",
+  dueDate: "",
+  closureNotes: "",
+  rootCauseNotes: "",
+  active: true,
+  archivedAt: "",
+  updatedAt: nowIso(),
+  attachments: [],
+  inspectionContext: null
 });
 
 const blankInstrumentPayload = () => ({
@@ -990,6 +1021,10 @@ function App() {
     const [jobId, partId] = route.replace("/print/inspection/", "").split("/").map(decodeURIComponent);
     return <PrintInspectionReport jobId={jobId} partId={partId} />;
   }
+  if (route.startsWith("/print/nonconformance/")) {
+    const ncrId = decodeURIComponent(route.replace("/print/nonconformance/", "").split("?")[0]);
+    return <PrintNonconformanceReport ncrId={ncrId} />;
+  }
   if (route.startsWith("/print/ballooned-drawing/")) {
     const [jobId, partId, drawingDocumentId] = route.replace("/print/ballooned-drawing/", "").split("/").map(decodeURIComponent);
     return <PrintBalloonedDrawing jobId={jobId} partId={partId} drawingDocumentId={drawingDocumentId} />;
@@ -1047,6 +1082,10 @@ function Workspace() {
   const [selectedPartId, setSelectedPartId] = useState(null);
   const [selectedOperationId, setSelectedOperationId] = useState(null);
 
+  const [selectedNonconformanceId, setSelectedNonconformanceId] = useState(null);
+  const [nonconformanceRecord, setNonconformanceRecord] = useState(null);
+  const [nonconformanceScreen, setNonconformanceScreen] = useState("list");
+
   const [selectedKanbanId, setSelectedKanbanId] = useState(null);
   const [kanbanCard, setKanbanCard] = useState(null);
   const [kanbanScreen, setKanbanScreen] = useState("list");
@@ -1094,6 +1133,9 @@ function Workspace() {
         setJobScreen("list");
         setSelectedPartId(null);
         setSelectedOperationId(null);
+        setSelectedNonconformanceId(null);
+        setNonconformanceRecord(null);
+        setNonconformanceScreen("list");
         setSelectedKanbanId(null);
         setKanbanCard(null);
         setKanbanScreen("list");
@@ -1175,18 +1217,22 @@ useEffect(() => api.onDeepLink?.((payload) => {
 
   useEffect(() => {
     if ((view === "jobs" && jobScreen === "list")
+      || (view === "nonconformance" && nonconformanceScreen === "list")
       || (view === "kanban" && kanbanScreen === "list")
       || (view === "materials" && materialScreen === "list")
       || (view === "metrology" && metrologyScreen === "list")
       || view === "settings") {
       setSaveState("saved");
     }
-  }, [view, jobScreen, kanbanScreen, materialScreen, metrologyScreen]);
+  }, [view, jobScreen, nonconformanceScreen, kanbanScreen, materialScreen, metrologyScreen]);
 
   useEffect(() => {
     const activeLocks = [];
     if (selectedJobId && jobScreen !== "list") {
       activeLocks.push({ kind: "job", id: selectedJobId });
+    }
+    if (selectedNonconformanceId && ((view === "nonconformance" && nonconformanceScreen === "detail") || (view === "jobs" && jobScreen === "nonconformance"))) {
+      activeLocks.push({ kind: "nonconformance", id: selectedNonconformanceId });
     }
     if (selectedKanbanId && kanbanScreen === "detail") {
       activeLocks.push({ kind: "kanban", id: selectedKanbanId });
@@ -1208,7 +1254,7 @@ useEffect(() => api.onDeepLink?.((payload) => {
     renewLocks();
     const timer = window.setInterval(renewLocks, 60 * 1000);
     return () => window.clearInterval(timer);
-  }, [selectedJobId, jobScreen, selectedKanbanId, kanbanScreen, selectedMaterialId, materialScreen, selectedInstrumentId, metrologyScreen]);
+  }, [selectedJobId, jobScreen, selectedNonconformanceId, nonconformanceScreen, view, selectedKanbanId, kanbanScreen, selectedMaterialId, materialScreen, selectedInstrumentId, metrologyScreen]);
 
   const openJob = async (jobId) => {
     setBusy(true);
@@ -1252,6 +1298,33 @@ useEffect(() => api.onDeepLink?.((payload) => {
   };
   openKanbanCardRef.current = openKanbanCard;
 
+  const openNonconformance = async (ncrId, { sourceView = "nonconformance", partId = null } = {}) => {
+    setBusy(true);
+    try {
+      if (selectedNonconformanceId && selectedNonconformanceId !== ncrId) {
+        await api.releaseLock("nonconformance", selectedNonconformanceId);
+      }
+      const loaded = await api.loadNonconformance(ncrId, { acquireLock: true });
+      setSelectedNonconformanceId(ncrId);
+      setNonconformanceRecord(loaded);
+      setNonconformanceScreen("detail");
+      if (sourceView === "jobs") {
+        if (partId) {
+          setSelectedPartId(partId);
+        }
+        setJobScreen("nonconformance");
+        setView("jobs");
+      } else {
+        setView("nonconformance");
+      }
+      setSaveState("saved");
+    } catch (error) {
+      showStatus(error.message || String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const openMaterial = async (materialId) => {
     setBusy(true);
     try {
@@ -1292,17 +1365,21 @@ useEffect(() => api.onDeepLink?.((payload) => {
   };
 
   const createNewJob = () => {
+    if (selectedNonconformanceId) api.releaseLock("nonconformance", selectedNonconformanceId).catch(() => {});
     if (selectedJobId) api.releaseLock("job", selectedJobId).catch(() => {});
     setSelectedJobId(null);
     setJob(blankJob());
     setSelectedPartId(null);
     setSelectedOperationId(null);
+    setSelectedNonconformanceId(null);
+    setNonconformanceRecord(null);
     setJobScreen("job");
     setView("jobs");
     setSaveState("saved");
   };
 
   const createNewKanbanCard = (draft = null) => {
+    if (selectedNonconformanceId) api.releaseLock("nonconformance", selectedNonconformanceId).catch(() => {});
     if (selectedKanbanId) api.releaseLock("kanban", selectedKanbanId).catch(() => {});
     setSelectedKanbanId(null);
     setKanbanCard(draft || blankKanbanCard());
@@ -1312,9 +1389,44 @@ useEffect(() => api.onDeepLink?.((payload) => {
     setSaveState("saved");
   };
 
+  const createPartNonconformance = async (part) => {
+    if (!job || !part) {
+      return;
+    }
+    try {
+      const nextNumber = await api.generateNextNonconformanceNumber().catch(() => "");
+      if (selectedNonconformanceId) {
+        await api.releaseLock("nonconformance", selectedNonconformanceId).catch(() => {});
+      }
+      const draft = blankNonconformance({
+        jobId: job.id,
+        jobNumber: job.jobNumber,
+        partId: part.id,
+        partNumber: part.partNumber,
+        partName: part.partName
+      });
+      draft.ncrNumber = nextNumber;
+      setSelectedNonconformanceId(null);
+      setNonconformanceRecord(draft);
+      setNonconformanceScreen("detail");
+      setSelectedPartId(part.id);
+      setJobScreen("nonconformance");
+      setView("jobs");
+      setSaveState("saved");
+      if (nextNumber) {
+        showStatus(`Assigned NCR number ${nextNumber}.`);
+      }
+    } catch (error) {
+      showStatus(error.message || String(error));
+    }
+  };
+
   const showJobList = () => {
     if (selectedJobId) {
       api.releaseLock("job", selectedJobId).catch(() => {});
+    }
+    if (selectedNonconformanceId) {
+      api.releaseLock("nonconformance", selectedNonconformanceId).catch(() => {});
     }
     setSelectedJobId(null);
     setJob(null);
@@ -1322,10 +1434,17 @@ useEffect(() => api.onDeepLink?.((payload) => {
     setJobScreen("list");
     setSelectedPartId(null);
     setSelectedOperationId(null);
+    setSelectedNonconformanceId(null);
+    setNonconformanceRecord(null);
     setSaveState("saved");
   };
 
   const showKanbanList = () => {
+    if (selectedNonconformanceId) {
+      api.releaseLock("nonconformance", selectedNonconformanceId).catch(() => {});
+      setSelectedNonconformanceId(null);
+      setNonconformanceRecord(null);
+    }
     if (selectedKanbanId) {
       api.releaseLock("kanban", selectedKanbanId).catch(() => {});
     }
@@ -1334,6 +1453,17 @@ useEffect(() => api.onDeepLink?.((payload) => {
     setView("kanban");
     setKanbanScreen("list");
     setKanbanAiState("idle");
+    setSaveState("saved");
+  };
+
+  const showNonconformanceList = () => {
+    if (selectedNonconformanceId) {
+      api.releaseLock("nonconformance", selectedNonconformanceId).catch(() => {});
+    }
+    setSelectedNonconformanceId(null);
+    setNonconformanceRecord(null);
+    setView("nonconformance");
+    setNonconformanceScreen("list");
     setSaveState("saved");
   };
 
@@ -1365,7 +1495,19 @@ useEffect(() => api.onDeepLink?.((payload) => {
     setSaveState("saved");
   };
 
+  const openPartNonconformance = (partId) => {
+    setSelectedPartId(partId);
+    setSelectedOperationId(null);
+    setJobScreen("nonconformance");
+    setSaveState("saved");
+  };
+
   const backToJob = () => {
+    if (selectedNonconformanceId && jobScreen === "nonconformance") {
+      api.releaseLock("nonconformance", selectedNonconformanceId).catch(() => {});
+      setSelectedNonconformanceId(null);
+      setNonconformanceRecord(null);
+    }
     setSelectedPartId(null);
     setSelectedOperationId(null);
     setJobScreen("job");
@@ -1373,6 +1515,11 @@ useEffect(() => api.onDeepLink?.((payload) => {
   };
 
   const backToPart = () => {
+    if (selectedNonconformanceId && jobScreen === "nonconformance") {
+      api.releaseLock("nonconformance", selectedNonconformanceId).catch(() => {});
+      setSelectedNonconformanceId(null);
+      setNonconformanceRecord(null);
+    }
     setSelectedOperationId(null);
     setJobScreen("part");
     setSaveState("saved");
@@ -1856,6 +2003,148 @@ useEffect(() => api.onDeepLink?.((payload) => {
     await refreshWorkspace();
   };
 
+  const applySavedNonconformance = async (saved) => {
+    setNonconformanceRecord(saved);
+    setSelectedNonconformanceId(saved.id);
+    await refreshWorkspace();
+  };
+
+  const exportCurrentNonconformancePdf = async () => {
+    if (!nonconformanceRecord?.id) return;
+    setBusy(true);
+    try {
+      const saved = await api.saveNonconformance(nonconformanceRecord);
+      await applySavedNonconformance(saved);
+      await api.exportNonconformancePdf(saved.id);
+      showStatus("NCR PDF created.");
+    } catch (error) {
+      showStatus(error.message || String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const archiveCurrentNonconformance = async () => {
+    if (!selectedNonconformanceId) return;
+    setBusy(true);
+    try {
+      const saved = await api.archiveNonconformance(selectedNonconformanceId);
+      await applySavedNonconformance(saved);
+      showStatus("NCR archived.");
+    } catch (error) {
+      showStatus(error.message || String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const unarchiveCurrentNonconformance = async () => {
+    if (!selectedNonconformanceId) return;
+    setBusy(true);
+    try {
+      const saved = await api.unarchiveNonconformance(selectedNonconformanceId);
+      await applySavedNonconformance(saved);
+      showStatus("NCR unarchived.");
+    } catch (error) {
+      showStatus(error.message || String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const addNonconformanceAttachments = async () => {
+    if (!nonconformanceRecord?.id) {
+      showStatus("Wait for the NCR to autosave before adding attachments.");
+      return;
+    }
+    setBusy(true);
+    try {
+      const attachments = await api.chooseNonconformanceAttachments(nonconformanceRecord.id);
+      if (!attachments.length) return;
+      setNonconformanceRecord((current) => current ? { ...current, attachments: [...(current.attachments || []), ...attachments] } : current);
+      showStatus(`Added ${attachments.length} NCR attachment${attachments.length === 1 ? "" : "s"}.`);
+    } catch (error) {
+      showStatus(error.message || String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const openNonconformanceAttachment = async (attachmentId) => {
+    if (!nonconformanceRecord?.id || !attachmentId) return;
+    try {
+      await api.openNonconformanceAttachment(nonconformanceRecord.id, attachmentId);
+    } catch (error) {
+      showStatus(error.message || String(error));
+    }
+  };
+
+  const openNonconformanceAttachmentRevision = async (attachmentId, revisionIndex) => {
+    if (!nonconformanceRecord?.id || !attachmentId) return;
+    try {
+      await api.openNonconformanceAttachmentRevision(nonconformanceRecord.id, attachmentId, revisionIndex);
+    } catch (error) {
+      showStatus(error.message || String(error));
+    }
+  };
+
+  const archiveNonconformanceAttachment = async (attachmentId) => {
+    if (!nonconformanceRecord?.id || !attachmentId) return;
+    setBusy(true);
+    try {
+      const saved = await api.archiveNonconformanceAttachment(nonconformanceRecord.id, attachmentId);
+      await applySavedNonconformance(saved);
+      showStatus("NCR attachment archived.");
+    } catch (error) {
+      showStatus(error.message || String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const unarchiveNonconformanceAttachment = async (attachmentId) => {
+    if (!nonconformanceRecord?.id || !attachmentId) return;
+    setBusy(true);
+    try {
+      const saved = await api.unarchiveNonconformanceAttachment(nonconformanceRecord.id, attachmentId);
+      await applySavedNonconformance(saved);
+      showStatus("NCR attachment unarchived.");
+    } catch (error) {
+      showStatus(error.message || String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const reviseNonconformanceAttachment = async (attachmentId) => {
+    if (!nonconformanceRecord?.id || !attachmentId) return;
+    setBusy(true);
+    try {
+      const saved = await api.reviseNonconformanceAttachment(nonconformanceRecord.id, attachmentId);
+      if (!saved) return;
+      await applySavedNonconformance(saved);
+      showStatus("NCR attachment revised.");
+    } catch (error) {
+      showStatus(error.message || String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const deleteNonconformanceAttachment = async (attachmentId) => {
+    if (!nonconformanceRecord?.id || !attachmentId) return;
+    setBusy(true);
+    try {
+      const saved = await api.deleteNonconformanceAttachment(nonconformanceRecord.id, attachmentId);
+      await applySavedNonconformance(saved);
+      showStatus("Archived NCR attachment deleted.");
+    } catch (error) {
+      showStatus(error.message || String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const generateCurrentKanbanImage = async () => {
     if (!kanbanCard) return;
     setKanbanAiState("imaging");
@@ -2063,6 +2352,7 @@ useEffect(() => api.onDeepLink?.((payload) => {
   };
 
   const createNewMaterial = async () => {
+    if (selectedNonconformanceId) api.releaseLock("nonconformance", selectedNonconformanceId).catch(() => {});
     if (selectedMaterialId) api.releaseLock("material", selectedMaterialId).catch(() => {});
     const serial = await api.generateMaterialSerial().catch(() => "");
     setSelectedMaterialId(null);
@@ -2192,6 +2482,7 @@ useEffect(() => api.onDeepLink?.((payload) => {
   };
 
   const createNewInstrument = () => {
+    if (selectedNonconformanceId) api.releaseLock("nonconformance", selectedNonconformanceId).catch(() => {});
     if (selectedInstrumentId) api.releaseLock("instrument", selectedInstrumentId).catch(() => {});
     setSelectedInstrumentId(null);
     const draft = blankInstrumentPayload();
@@ -2255,6 +2546,11 @@ useEffect(() => api.onDeepLink?.((payload) => {
   };
 
   const showMaterialsList = () => {
+    if (selectedNonconformanceId) {
+      api.releaseLock("nonconformance", selectedNonconformanceId).catch(() => {});
+      setSelectedNonconformanceId(null);
+      setNonconformanceRecord(null);
+    }
     if (selectedMaterialId) {
       api.releaseLock("material", selectedMaterialId).catch(() => {});
     }
@@ -2266,6 +2562,11 @@ useEffect(() => api.onDeepLink?.((payload) => {
   };
 
   const showMetrologyList = () => {
+    if (selectedNonconformanceId) {
+      api.releaseLock("nonconformance", selectedNonconformanceId).catch(() => {});
+      setSelectedNonconformanceId(null);
+      setNonconformanceRecord(null);
+    }
     if (selectedInstrumentId) {
       api.releaseLock("instrument", selectedInstrumentId).catch(() => {});
     }
@@ -2494,6 +2795,21 @@ useEffect(() => api.onDeepLink?.((payload) => {
   });
 
   useAutoSave({
+    value: nonconformanceRecord,
+    resetKey: `nonconformance:${nonconformanceRecord?.id || "none"}`,
+    enabled: Boolean(nonconformanceRecord),
+    isReady: (current) => Boolean(current?.jobId && current?.partId && current?.ncrNumber),
+    save: (current) => api.saveNonconformance(current),
+    onSaved: applySavedNonconformance,
+    onError: (error) => showStatus(error.message || String(error)),
+    onStateChange: (next) => {
+      if ((view === "nonconformance" && nonconformanceScreen === "detail") || (view === "jobs" && jobScreen === "nonconformance")) {
+        setSaveState(next);
+      }
+    }
+  });
+
+  useAutoSave({
     value: kanbanCard,
     resetKey: `kanban:${kanbanCard?.id || "none"}`,
     enabled: Boolean(kanbanCard),
@@ -2554,7 +2870,7 @@ useEffect(() => api.onDeepLink?.((payload) => {
       if (jobScreen !== "list" && job) {
         crumbs.push({ label: job.jobNumber || "New Job", onClick: backToJob, active: jobScreen === "job" });
       }
-      if (jobScreen === "part" || jobScreen === "operation" || jobScreen === "inspection-setup" || jobScreen === "inspection-results") {
+      if (jobScreen === "part" || jobScreen === "operation" || jobScreen === "inspection-setup" || jobScreen === "inspection-results" || jobScreen === "nonconformance") {
         crumbs.push({ label: selectedPart?.partNumber || selectedPart?.partName || "Part", onClick: backToPart, active: jobScreen === "part" });
       }
       if (jobScreen === "operation") {
@@ -2565,6 +2881,9 @@ useEffect(() => api.onDeepLink?.((payload) => {
       }
       if (jobScreen === "inspection-results") {
         crumbs.push({ label: "Inspection Results", onClick: null, active: true });
+      }
+      if (jobScreen === "nonconformance") {
+        crumbs.push({ label: "Nonconformance", onClick: null, active: true });
       }
       return {
         breadcrumbs: crumbs,
@@ -2578,6 +2897,8 @@ useEffect(() => api.onDeepLink?.((payload) => {
                 ? "Inspection Setup"
               : jobScreen === "inspection-results"
                 ? "Inspection Results"
+              : jobScreen === "nonconformance"
+                ? (nonconformanceRecord?.ncrNumber || "Nonconformance")
               : (selectedOperation?.title || "Operation"),
         subtitle: jobScreen === "list"
           ? "Build and run jobs from part to operation."
@@ -2587,17 +2908,29 @@ useEffect(() => api.onDeepLink?.((payload) => {
               ? `${selectedPart?.operations?.length || 0} operations`
               : jobScreen === "inspection-setup" || jobScreen === "inspection-results"
                 ? `${selectedPart?.inspection?.characteristics?.length || 0} characteristics`
+              : jobScreen === "nonconformance"
+                ? `${(workspace.nonconformances || []).filter((item) => item.partId === selectedPart?.id).length} NCRs`
               : `${job?.jobNumber || ""}${selectedPart ? ` / ${selectedPart.partNumber || selectedPart.partName || "Part"}` : ""}`,
         primaryActions: [
           jobScreen === "list" ? <button key="new-job" onClick={createNewJob}><Plus size={15} /> New Job</button> : null,
           jobScreen !== "list" ? <button key="pdf" onClick={exportCurrentJobPdf} disabled={!job || busy}><FileDown size={16} /> PDF</button> : null,
           jobScreen === "part" ? <button key="inspection-setup" onClick={() => selectedPart && openInspectionSetup(selectedPart.id)} disabled={!job || !selectedPart || busy}>Inspection Setup</button> : null,
           jobScreen === "part" ? <button key="inspection-results" onClick={() => selectedPart && openInspectionResults(selectedPart.id)} disabled={!job || !selectedPart || busy}>Inspection Results</button> : null,
+          jobScreen === "part" ? <button key="part-ncr" onClick={() => selectedPart && openPartNonconformance(selectedPart.id)} disabled={!job || !selectedPart || busy}>Nonconformance</button> : null,
           jobScreen === "inspection-setup" || jobScreen === "inspection-results"
             ? <button key="inspection-pdf" onClick={() => exportCurrentInspectionPdf()} disabled={!job || !selectedPart || busy}><FileDown size={16} /> Inspection PDF</button>
+            : null,
+          jobScreen === "nonconformance" && nonconformanceRecord
+            ? <button key="ncr-pdf" onClick={exportCurrentNonconformancePdf} disabled={!nonconformanceRecord || busy}><FileDown size={16} /> NCR PDF</button>
             : null
         ].filter(Boolean),
         dangerActions: [
+          jobScreen === "nonconformance" && nonconformanceRecord?.active !== false
+            ? <button key="archive-ncr" className="danger" onClick={archiveCurrentNonconformance} disabled={!selectedNonconformanceId || busy}><Archive size={16} /> Archive</button>
+            : null,
+          jobScreen === "nonconformance" && nonconformanceRecord?.active === false
+            ? <button key="unarchive-ncr" onClick={unarchiveCurrentNonconformance} disabled={!selectedNonconformanceId || busy}><ArchiveRestore size={16} /> Unarchive</button>
+            : null,
           jobScreen !== "list" && job?.active !== false
             ? <button key="archive-job" className="danger" onClick={archiveCurrentJob} disabled={!selectedJobId || busy}><Archive size={16} /> Archive</button>
             : null,
@@ -2606,6 +2939,31 @@ useEffect(() => api.onDeepLink?.((payload) => {
             : null,
           jobScreen !== "list" && job?.active === false
             ? <button key="delete-job" className="danger" onClick={openDeleteJobConfirm} disabled={!selectedJobId || busy}><Trash2 size={16} /> Delete</button>
+            : null
+        ].filter(Boolean)
+      };
+    }
+    if (view === "nonconformance") {
+      return {
+        breadcrumbs: [
+          { label: "Nonconformance", onClick: showNonconformanceList, active: nonconformanceScreen === "list" },
+          ...(nonconformanceScreen === "detail" && nonconformanceRecord ? [{ label: nonconformanceRecord.ncrNumber || "New NCR", onClick: null, active: true }] : [])
+        ],
+        title: nonconformanceScreen === "detail" ? (nonconformanceRecord?.ncrNumber || "New NCR") : "Nonconformance",
+        subtitle: nonconformanceScreen === "detail"
+          ? [nonconformanceRecord?.jobNumber, nonconformanceRecord?.partNumber || nonconformanceRecord?.partName, nonconformanceRecord?.status].filter(Boolean).join(" / ")
+          : "Part-linked nonconformance reports across the workspace.",
+        primaryActions: [
+          nonconformanceScreen === "detail" && nonconformanceRecord
+            ? <button key="ncr-top-pdf" onClick={exportCurrentNonconformancePdf} disabled={!nonconformanceRecord || busy}><FileDown size={16} /> PDF</button>
+            : null
+        ].filter(Boolean),
+        dangerActions: [
+          nonconformanceScreen === "detail" && nonconformanceRecord?.active !== false
+            ? <button key="ncr-top-archive" className="danger" onClick={archiveCurrentNonconformance} disabled={!selectedNonconformanceId || busy}><Archive size={16} /> Archive</button>
+            : null,
+          nonconformanceScreen === "detail" && nonconformanceRecord?.active === false
+            ? <button key="ncr-top-unarchive" onClick={unarchiveCurrentNonconformance} disabled={!selectedNonconformanceId || busy}><ArchiveRestore size={16} /> Unarchive</button>
             : null
         ].filter(Boolean)
       };
@@ -2706,6 +3064,7 @@ useEffect(() => api.onDeepLink?.((payload) => {
           {PRIMARY_MODULES.filter((module) => moduleIsEnabled(module.id)).map((module) => {
             const handlers = {
               jobs: showJobList,
+              nonconformance: showNonconformanceList,
               kanban: showKanbanList,
               materials: showMaterialsList,
               metrology: showMetrologyList
@@ -2766,6 +3125,7 @@ useEffect(() => api.onDeepLink?.((payload) => {
             onOpenOperation={openOperation}
             onOpenInspectionSetup={openInspectionSetup}
             onOpenInspectionResults={openInspectionResults}
+            onOpenPartNonconformance={openPartNonconformance}
             onBackToJobList={showJobList}
             onBackToJob={backToJob}
             onBackToPart={backToPart}
@@ -2795,6 +3155,37 @@ useEffect(() => api.onDeepLink?.((payload) => {
             onCreateInlineMaterial={createInlineMaterial}
             onAddMaterialFamily={addMaterialFamilyOption}
             onAddMaterialAlloy={addMaterialAlloyOption}
+            nonconformances={workspace.nonconformances || []}
+            nonconformanceRecord={nonconformanceRecord}
+            onCreatePartNonconformance={createPartNonconformance}
+            onOpenNonconformance={(ncrId, partId) => openNonconformance(ncrId, { sourceView: "jobs", partId })}
+            onUpdateNonconformance={setNonconformanceRecord}
+            onAddNonconformanceAttachments={addNonconformanceAttachments}
+            onOpenNonconformanceAttachment={openNonconformanceAttachment}
+            onOpenNonconformanceAttachmentRevision={openNonconformanceAttachmentRevision}
+            onArchiveNonconformanceAttachment={archiveNonconformanceAttachment}
+            onUnarchiveNonconformanceAttachment={unarchiveNonconformanceAttachment}
+            onReviseNonconformanceAttachment={reviseNonconformanceAttachment}
+            onDeleteNonconformanceAttachment={deleteNonconformanceAttachment}
+          />
+        )}
+        {view === "nonconformance" && moduleIsEnabled("nonconformance") && (
+          <NonconformanceView
+            workspace={workspace}
+            screen={nonconformanceScreen}
+            record={nonconformanceRecord}
+            setRecord={setNonconformanceRecord}
+            onOpenRecord={(ncrId) => openNonconformance(ncrId, { sourceView: "nonconformance" })}
+            onShowList={showNonconformanceList}
+            onAddAttachments={addNonconformanceAttachments}
+            onOpenAttachment={openNonconformanceAttachment}
+            onOpenAttachmentRevision={openNonconformanceAttachmentRevision}
+            onArchiveAttachment={archiveNonconformanceAttachment}
+            onUnarchiveAttachment={unarchiveNonconformanceAttachment}
+            onReviseAttachment={reviseNonconformanceAttachment}
+            onDeleteAttachment={deleteNonconformanceAttachment}
+            instruments={workspace.instruments || []}
+            preferences={workspace.preferences}
           />
         )}
         {view === "kanban" && moduleIsEnabled("kanban") && (
@@ -3422,6 +3813,7 @@ function JobsView({
   onOpenOperation,
   onOpenInspectionSetup,
   onOpenInspectionResults,
+  onOpenPartNonconformance,
   onBackToJobList,
   onBackToJob,
   onBackToPart,
@@ -3450,7 +3842,19 @@ function JobsView({
   onGenerateBalloonedDrawingPdf,
   onCreateInlineMaterial,
   onAddMaterialFamily,
-  onAddMaterialAlloy
+  onAddMaterialAlloy,
+  nonconformances,
+  nonconformanceRecord,
+  onCreatePartNonconformance,
+  onOpenNonconformance,
+  onUpdateNonconformance,
+  onAddNonconformanceAttachments,
+  onOpenNonconformanceAttachment,
+  onOpenNonconformanceAttachmentRevision,
+  onArchiveNonconformanceAttachment,
+  onUnarchiveNonconformanceAttachment,
+  onReviseNonconformanceAttachment,
+  onDeleteNonconformanceAttachment
 }) {
   const materials = workspace.materials || [];
   const instruments = workspace.instruments || [];
@@ -3543,6 +3947,28 @@ function JobsView({
         part={selectedPart}
         instruments={instruments}
         onUpdate={(inspection) => updatePart(selectedPart.id, { inspection })}
+      />
+    );
+  }
+
+  if (jobScreen === "nonconformance" && selectedPart) {
+    return (
+      <PartNonconformanceScreen
+        part={selectedPart}
+        instruments={instruments}
+        preferences={workspace.preferences}
+        nonconformances={nonconformances || []}
+        record={nonconformanceRecord}
+        onCreateRecord={() => onCreatePartNonconformance(selectedPart)}
+        onOpenRecord={(ncrId) => onOpenNonconformance(ncrId, selectedPart.id)}
+        onChangeRecord={onUpdateNonconformance}
+        onAddAttachments={onAddNonconformanceAttachments}
+        onOpenAttachment={onOpenNonconformanceAttachment}
+        onOpenAttachmentRevision={onOpenNonconformanceAttachmentRevision}
+        onArchiveAttachment={onArchiveNonconformanceAttachment}
+        onUnarchiveAttachment={onUnarchiveNonconformanceAttachment}
+        onReviseAttachment={onReviseNonconformanceAttachment}
+        onDeleteAttachment={onDeleteNonconformanceAttachment}
       />
     );
   }
@@ -4588,6 +5014,315 @@ function PartInspectionResultsScreen({ busy, part, instruments, onUpdate }) {
         onRemoveInstance={removeInstance}
       />
     </div>
+  );
+}
+
+function nonconformanceAttachmentImageSrc(attachment) {
+  return attachment?.storedPath ? api.assetUrl(attachment.storedPath) : "";
+}
+
+function inspectionCharacteristicContextText(context, instruments = []) {
+  if (!context?.characteristic) {
+    return "No linked inspection characteristic.";
+  }
+  const characteristic = context.characteristic;
+  const lower = characteristic.lowerLimit || "-";
+  const upper = characteristic.upperLimit || "-";
+  const instrumentOptions = normalizeInstrumentOptions(instruments);
+  const tool = characteristic.gageId ? (measurementToolLabel(characteristic, instrumentOptions) || "No linked gage") : "No linked gage";
+  return `Dim ${characteristic.number || "?"} | Lower ${lower} | Upper ${upper} | Tool ${tool}`;
+}
+
+function NonconformanceDetailScreen({
+  record,
+  onChange,
+  instruments,
+  preferences,
+  characteristicOptions = [],
+  instanceOptions = [],
+  onAddAttachments,
+  onOpenAttachment,
+  onOpenAttachmentRevision,
+  onArchiveAttachment,
+  onUnarchiveAttachment,
+  onReviseAttachment,
+  onDeleteAttachment
+}) {
+  const dispositions = Array.from(new Set(["", ...(preferences?.nonconformanceDispositions || []), record.disposition || ""])).filter((item, index, array) => item || index === 0);
+  const statusOptions = ["Open", "Review", "Dispositioned", "Closed"];
+  const linkedCharacteristicOptions = Array.from(new Map([
+    ...characteristicOptions.map((item) => [item.value, item]),
+    ...(record.inspectionContext?.characteristic ? [[record.inspectionCharacteristicId || "", { value: record.inspectionCharacteristicId || "", label: `Dimension ${record.inspectionContext.characteristic.number || "?"}` }]] : [])
+  ]).values());
+  const linkedInstanceOptions = Array.from(new Map([
+    ...instanceOptions.map((item) => [item.value, item]),
+    ...(record.inspectionContext?.instance ? [[record.inspectionInstanceId || "", { value: record.inspectionInstanceId || "", label: record.inspectionContext.instance.label || "Linked instance" }]] : [])
+  ]).values());
+  const photoAttachments = (record.attachments || []).filter((attachment) => {
+    const filename = String(attachment.storedFilename || attachment.originalFilename || "").toLowerCase();
+    return [".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"].some((extension) => filename.endsWith(extension));
+  });
+  return (
+    <div className="workflow-stack">
+      <section className="panel">
+        <div className="panel-heading">
+          <div>
+            <h3>NCR Detail</h3>
+            <span>{record.jobNumber || "-"} / {record.partNumber || record.partName || "-"}</span>
+          </div>
+        </div>
+        <div className="form-grid compact-3">
+          <TextField label="NCR Number" value={record.ncrNumber || ""} onChange={(value) => onChange({ ...record, ncrNumber: value })} />
+          <SelectField label="Status" value={record.status || "Open"} options={statusOptions} onChange={(value) => onChange({ ...record, status: value })} />
+          <TextField label="Reported At" type="datetime-local" value={String(record.reportedAt || "").slice(0, 16)} onChange={(value) => onChange({ ...record, reportedAt: value })} />
+          <TextField label="Reported By" value={record.reportedBy || ""} onChange={(value) => onChange({ ...record, reportedBy: value })} />
+          <TextField label="Quantity Affected" value={record.quantityAffected || ""} onChange={(value) => onChange({ ...record, quantityAffected: value })} />
+          <TextField label="Owner" value={record.owner || ""} onChange={(value) => onChange({ ...record, owner: value })} />
+          <SelectField label="Disposition" value={record.disposition || ""} options={dispositions} onChange={(value) => onChange({ ...record, disposition: value })} />
+          <TextField label="Due Date" type="date" value={record.dueDate || ""} onChange={(value) => onChange({ ...record, dueDate: value })} />
+          <div className="field">
+            <span>Linked Characteristic</span>
+            <select value={record.inspectionCharacteristicId || ""} onChange={(event) => onChange({ ...record, inspectionCharacteristicId: event.target.value })}>
+              <option value="">No linked characteristic</option>
+              {linkedCharacteristicOptions.map((option) => <option key={option.value || "linked-characteristic"} value={option.value}>{option.label}</option>)}
+            </select>
+          </div>
+          <div className="field">
+            <span>Linked Instance</span>
+            <select value={record.inspectionInstanceId || ""} onChange={(event) => onChange({ ...record, inspectionInstanceId: event.target.value })}>
+              <option value="">No linked instance</option>
+              {linkedInstanceOptions.map((option) => <option key={option.value || "linked-instance"} value={option.value}>{option.label}</option>)}
+            </select>
+          </div>
+          <div className="field field-span-2">
+            <span>Inspection Context</span>
+            <div className="static-field">{inspectionCharacteristicContextText(record.inspectionContext, instruments)}</div>
+          </div>
+        </div>
+        <TextArea label="Issue Summary" value={record.issueSummary || ""} onChange={(value) => onChange({ ...record, issueSummary: value })} rows={2} />
+        <TextArea label="Issue Description" value={record.issueDescription || ""} onChange={(value) => onChange({ ...record, issueDescription: value })} rows={4} />
+        <TextArea label="Containment Action" value={record.containmentAction || ""} onChange={(value) => onChange({ ...record, containmentAction: value })} rows={3} />
+        <TextArea label="Root Cause Notes" value={record.rootCauseNotes || ""} onChange={(value) => onChange({ ...record, rootCauseNotes: value })} rows={3} />
+        <TextArea label="Closure Notes" value={record.closureNotes || ""} onChange={(value) => onChange({ ...record, closureNotes: value })} rows={3} />
+      </section>
+
+      <div className="record-grid job-detail-columns">
+        <DocumentsPanel
+          title="NCR Attachments"
+          documents={record.attachments || []}
+          onAddDocuments={onAddAttachments}
+          onOpenDocument={onOpenAttachment}
+          onOpenRevision={onOpenAttachmentRevision}
+          onArchiveDocument={(attachmentId, _filename, archived) => {
+            if (archived) {
+              void onUnarchiveAttachment(attachmentId);
+              return;
+            }
+            void onArchiveAttachment(attachmentId);
+          }}
+          onDeleteDocument={(attachmentId, filename) => {
+            if (window.confirm(`Delete archived attachment ${filename}? This cannot be undone.`)) {
+              void onDeleteAttachment(attachmentId);
+            }
+          }}
+          onReviseDocument={onReviseAttachment}
+          emptyText="No NCR attachments attached yet."
+        />
+        <section className="panel">
+          <div className="panel-heading">
+            <div>
+              <h3>Photos</h3>
+              <span>{photoAttachments.length} image attachments</span>
+            </div>
+          </div>
+          <div className="document-list">
+            {photoAttachments.map((attachment) => (
+              <div key={attachment.id} className="document-card">
+                <strong>{attachment.originalFilename}</strong>
+                <img className="ncr-photo-preview" src={nonconformanceAttachmentImageSrc(attachment)} alt={attachment.originalFilename} />
+              </div>
+            ))}
+            {!photoAttachments.length && <div className="empty-inline">No image attachments attached yet.</div>}
+          </div>
+        </section>
+      </div>
+    </div>
+  );
+}
+
+function PartNonconformanceScreen({
+  part,
+  instruments,
+  preferences,
+  nonconformances,
+  record,
+  onCreateRecord,
+  onOpenRecord,
+  onChangeRecord,
+  onAddAttachments,
+  onOpenAttachment,
+  onOpenAttachmentRevision,
+  onArchiveAttachment,
+  onUnarchiveAttachment,
+  onReviseAttachment,
+  onDeleteAttachment
+}) {
+  const partRecords = (nonconformances || []).filter((item) => item.partId === part.id);
+  const inspection = renumberInspectionPayload(normalizeInspectionPayload(part.inspection));
+  const characteristicOptions = inspection.characteristics.map((item) => ({ value: item.id, label: `Dimension ${item.number || "?"}` }));
+  const instanceOptions = inspection.instances.map((item) => ({ value: item.id, label: item.label || "Instance" }));
+  return (
+    <div className="workflow-stack">
+      <div className="record-grid job-detail-columns">
+        <section className="panel">
+          <div className="panel-heading inline">
+            <div>
+              <h3>Part NCRs</h3>
+              <span>{partRecords.length} records</span>
+            </div>
+            <button onClick={onCreateRecord}><Plus size={14} /> New NCR</button>
+          </div>
+          <div className="record-list">
+            {partRecords.map((item) => (
+              <button key={item.id} className={`record-list-item ${record?.id === item.id ? "selected" : ""}`} onClick={() => onOpenRecord(item.id)}>
+                <strong>{item.ncrNumber || item.id}</strong>
+                <span>{item.issueSummary || "No issue summary"}</span>
+                <small>{[item.status, item.disposition || "No disposition", item.quantityAffected ? `Qty ${item.quantityAffected}` : ""].filter(Boolean).join(" | ")}</small>
+              </button>
+            ))}
+            {!partRecords.length && <div className="empty-inline">No NCRs have been created for this part.</div>}
+          </div>
+        </section>
+        {!record ? (
+          <section className="panel">
+            <div className="empty-inline">Choose an NCR or create a new NCR for this part.</div>
+          </section>
+        ) : (
+          <NonconformanceDetailScreen
+            record={record}
+            onChange={onChangeRecord}
+            instruments={instruments}
+            preferences={preferences}
+            characteristicOptions={characteristicOptions}
+            instanceOptions={instanceOptions}
+            onAddAttachments={onAddAttachments}
+            onOpenAttachment={onOpenAttachment}
+            onOpenAttachmentRevision={onOpenAttachmentRevision}
+            onArchiveAttachment={onArchiveAttachment}
+            onUnarchiveAttachment={onUnarchiveAttachment}
+            onReviseAttachment={onReviseAttachment}
+            onDeleteAttachment={onDeleteAttachment}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function NonconformanceView({
+  workspace,
+  screen,
+  record,
+  setRecord,
+  onOpenRecord,
+  onShowList,
+  onAddAttachments,
+  onOpenAttachment,
+  onOpenAttachmentRevision,
+  onArchiveAttachment,
+  onUnarchiveAttachment,
+  onReviseAttachment,
+  onDeleteAttachment,
+  instruments,
+  preferences
+}) {
+  const [filters, setFilters] = useState({
+    query: "",
+    status: "All",
+    disposition: "All",
+    owner: "",
+    job: "",
+    part: "",
+    reportedDate: ""
+  });
+  const [showArchived, setShowArchived] = useState(false);
+  const records = workspace.nonconformances || [];
+  const dispositionOptions = Array.from(new Set(records.map((item) => item.disposition).filter(Boolean))).sort((a, b) => a.localeCompare(b));
+  const ownerOptions = Array.from(new Set(records.map((item) => item.owner).filter(Boolean))).sort((a, b) => a.localeCompare(b));
+  const jobOptions = Array.from(new Set(records.map((item) => item.jobNumber).filter(Boolean))).sort((a, b) => a.localeCompare(b));
+  const partOptions = Array.from(new Set(records.map((item) => item.partNumber || item.partName).filter(Boolean))).sort((a, b) => a.localeCompare(b));
+  const filteredRecords = records.filter((item) => {
+    if (!showArchived && item.active === false) return false;
+    if (filters.status !== "All" && item.status !== filters.status) return false;
+    if (filters.disposition !== "All" && (item.disposition || "") !== filters.disposition) return false;
+    if (filters.owner && (item.owner || "") !== filters.owner) return false;
+    if (filters.job && (item.jobNumber || "") !== filters.job) return false;
+    if (filters.part && ((item.partNumber || item.partName || "") !== filters.part)) return false;
+    if (filters.reportedDate && String(item.reportedAt || "").slice(0, 10) !== filters.reportedDate) return false;
+    const haystack = [item.ncrNumber, item.jobNumber, item.partNumber, item.partName, item.issueSummary, item.owner, item.disposition].join(" ").toLowerCase();
+    return haystack.includes(filters.query.trim().toLowerCase());
+  });
+  const updateRecord = (patch) => setRecord((current) => current ? { ...current, ...patch } : current);
+
+  if (screen === "detail" && record) {
+    return (
+      <NonconformanceDetailScreen
+        record={record}
+        onChange={updateRecord}
+        instruments={instruments}
+        preferences={preferences}
+        characteristicOptions={[]}
+        instanceOptions={[]}
+        onAddAttachments={onAddAttachments}
+        onOpenAttachment={onOpenAttachment}
+        onOpenAttachmentRevision={onOpenAttachmentRevision}
+        onArchiveAttachment={onArchiveAttachment}
+        onUnarchiveAttachment={onUnarchiveAttachment}
+        onReviseAttachment={onReviseAttachment}
+        onDeleteAttachment={onDeleteAttachment}
+      />
+    );
+  }
+
+  return (
+    <section className="panel">
+      <div className="panel-heading inline">
+        <div>
+          <h3>Nonconformance Records</h3>
+          <span>{filteredRecords.length} matching records</span>
+        </div>
+        <div className="toolbar">
+          <button onClick={() => setFilters({ query: "", status: "All", disposition: "All", owner: "", job: "", part: "", reportedDate: "" })}>Clear Filters</button>
+          <button onClick={() => setShowArchived((current) => !current)}>{showArchived ? "Hide Archived" : "Show Archived"}</button>
+        </div>
+      </div>
+      <div className="search-grid materials-search-grid sticky-filters">
+        <TextField label="Search" value={filters.query} onChange={(value) => setFilters((current) => ({ ...current, query: value }))} placeholder="NCR, job, part, issue, owner..." />
+        <SelectField label="Status" value={filters.status} options={["All", "Open", "Review", "Dispositioned", "Closed"]} onChange={(value) => setFilters((current) => ({ ...current, status: value }))} />
+        <SelectField label="Disposition" value={filters.disposition} options={["All", ...dispositionOptions]} onChange={(value) => setFilters((current) => ({ ...current, disposition: value }))} />
+        <SelectField label="Owner" value={filters.owner} options={["", ...ownerOptions]} onChange={(value) => setFilters((current) => ({ ...current, owner: value }))} />
+        <SelectField label="Job" value={filters.job} options={["", ...jobOptions]} onChange={(value) => setFilters((current) => ({ ...current, job: value }))} />
+        <SelectField label="Part" value={filters.part} options={["", ...partOptions]} onChange={(value) => setFilters((current) => ({ ...current, part: value }))} />
+        <TextField label="Reported Date" type="date" value={filters.reportedDate} onChange={(value) => setFilters((current) => ({ ...current, reportedDate: value }))} />
+      </div>
+      <div className="record-list top-gap">
+        {filteredRecords.map((item) => (
+          <button key={item.id} className="record-list-item record-list-row" onClick={() => onOpenRecord(item.id)}>
+            <div className="record-row-primary">
+              <strong>{item.ncrNumber || item.id}</strong>
+              <span>{item.issueSummary || "No issue summary"}</span>
+            </div>
+            <div className="record-row-meta">
+              <small>{item.jobNumber || "-"}</small>
+              <small>{item.partNumber || item.partName || "-"}</small>
+              <small>{item.status || "-"}</small>
+              <small>{item.disposition || "-"}</small>
+            </div>
+          </button>
+        ))}
+        {!filteredRecords.length && <div className="empty-inline">No NCRs matched the current filters.</div>}
+      </div>
+    </section>
   );
 }
 
@@ -6644,6 +7379,10 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
     jobPrefix: workspace.preferences?.jobPrefix || "J03C",
     startingJobNumber: String(workspace.preferences?.startingJobNumber ?? 600)
   });
+  const [nonconformanceNumberSettings, setNonconformanceNumberSettings] = useState({
+    nonconformancePrefix: workspace.preferences?.nonconformancePrefix || "NCR",
+    startingNonconformanceNumber: String(workspace.preferences?.startingNonconformanceNumber ?? 1)
+  });
   const [kanbanNumberSettings, setKanbanNumberSettings] = useState({
     kanbanInventoryPrefix: workspace.preferences?.kanbanInventoryPrefix || "J03C",
     kanbanStartingInventoryNumber: String(workspace.preferences?.kanbanStartingInventoryNumber ?? 600)
@@ -6664,6 +7403,9 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
   const [kanbanOptions, setKanbanOptions] = useState({
     kanbanVendors: workspace.preferences?.kanbanVendors || [],
     kanbanCategories: workspace.preferences?.kanbanCategories || []
+  });
+  const [nonconformanceOptions, setNonconformanceOptions] = useState({
+    nonconformanceDispositions: workspace.preferences?.nonconformanceDispositions || []
   });
   const [kanbanPrintSettings, setKanbanPrintSettings] = useState({
     defaultKanbanPrintSizeId: workspace.preferences?.defaultKanbanPrintSizeId || defaultKanbanPrintSizeId(workspace.preferences),
@@ -6689,6 +7431,10 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
       jobPrefix: workspace.preferences?.jobPrefix || "J03C",
       startingJobNumber: String(workspace.preferences?.startingJobNumber ?? 600)
     });
+    setNonconformanceNumberSettings({
+      nonconformancePrefix: workspace.preferences?.nonconformancePrefix || "NCR",
+      startingNonconformanceNumber: String(workspace.preferences?.startingNonconformanceNumber ?? 1)
+    });
     setKanbanNumberSettings({
       kanbanInventoryPrefix: workspace.preferences?.kanbanInventoryPrefix || "J03C",
       kanbanStartingInventoryNumber: String(workspace.preferences?.kanbanStartingInventoryNumber ?? 600)
@@ -6710,6 +7456,9 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
     setKanbanOptions({
       kanbanVendors: workspace.preferences?.kanbanVendors || [],
       kanbanCategories: workspace.preferences?.kanbanCategories || []
+    });
+    setNonconformanceOptions({
+      nonconformanceDispositions: workspace.preferences?.nonconformanceDispositions || []
     });
     setKanbanPrintSettings({
       defaultKanbanPrintSizeId: workspace.preferences?.defaultKanbanPrintSizeId || defaultKanbanPrintSizeId(workspace.preferences),
@@ -6902,6 +7651,20 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
   });
 
   useAutoSave({
+    value: nonconformanceNumberSettings,
+    resetKey: `ncr-number-settings:${workspace.dataFolder}:${workspace.preferences?.nonconformancePrefix || ""}:${workspace.preferences?.startingNonconformanceNumber ?? ""}`,
+    enabled: true,
+    isReady: (current) => Boolean(current),
+    save: async (current) => {
+      await onSavePreferences({
+        nonconformancePrefix: String(current.nonconformancePrefix || "").trim(),
+        startingNonconformanceNumber: Number(current.startingNonconformanceNumber || 0) || 1
+      }, { silent: true });
+      return current;
+    }
+  });
+
+  useAutoSave({
     value: kanbanNumberSettings,
     resetKey: `kanban-number-settings:${workspace.dataFolder}:${workspace.preferences?.kanbanInventoryPrefix || ""}:${workspace.preferences?.kanbanStartingInventoryNumber ?? ""}`,
     enabled: true,
@@ -6986,6 +7749,21 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
   });
 
   useAutoSave({
+    value: nonconformanceOptions,
+    resetKey: `ncr-options:${workspace.dataFolder}:${JSON.stringify({
+      nonconformanceDispositions: workspace.preferences?.nonconformanceDispositions || []
+    })}`,
+    enabled: true,
+    isReady: (current) => Boolean(current),
+    save: async (current) => {
+      await onSavePreferences({
+        nonconformanceDispositions: (current.nonconformanceDispositions || []).map((value) => String(value || "").trim()).filter(Boolean)
+      }, { silent: true });
+      return current;
+    }
+  });
+
+  useAutoSave({
     value: kanbanPrintSettings,
     resetKey: `kanban-print-settings:${workspace.dataFolder}:${JSON.stringify({
       kanbanPrintSizes: workspace.preferences?.kanbanPrintSizes || [],
@@ -7027,6 +7805,9 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
   const kanbanSections = [
     ["kanbanVendors", "Vendors"],
     ["kanbanCategories", "Categories"]
+  ];
+  const nonconformanceSections = [
+    ["nonconformanceDispositions", "Dispositions"]
   ];
   const selectedKanbanDepartment = kanbanDepartments.find((department) => department.id === selectedKanbanDepartmentId) || null;
   const settingsOptionPlaceholder = (label) => {
@@ -7105,6 +7886,18 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
             <div className="form-grid compact-2">
               <TextField label="Inventory Prefix" value={kanbanNumberSettings.kanbanInventoryPrefix} onChange={(value) => setKanbanNumberSettings((current) => ({ ...current, kanbanInventoryPrefix: value }))} />
               <TextField label="Starting Inventory Number" value={kanbanNumberSettings.kanbanStartingInventoryNumber} onChange={(value) => setKanbanNumberSettings((current) => ({ ...current, kanbanStartingInventoryNumber: value }))} />
+            </div>
+          </div>
+          <div className="subpanel">
+            <div className="subpanel-header">
+              <div>
+                <h4>NCR Numbering</h4>
+                <span>Defaults for new nonconformance reports.</span>
+              </div>
+            </div>
+            <div className="form-grid compact-2">
+              <TextField label="NCR Prefix" value={nonconformanceNumberSettings.nonconformancePrefix} onChange={(value) => setNonconformanceNumberSettings((current) => ({ ...current, nonconformancePrefix: value }))} />
+              <TextField label="Starting NCR Number" value={nonconformanceNumberSettings.startingNonconformanceNumber} onChange={(value) => setNonconformanceNumberSettings((current) => ({ ...current, startingNonconformanceNumber: value }))} />
             </div>
           </div>
           <div className="subpanel">
@@ -7375,6 +8168,37 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
                   </div>
                 ))}
                 {!kanbanOptions[key]?.length && <div className="empty-inline">No options configured yet.</div>}
+              </div>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      <section className="panel">
+        <div className="panel-heading inline">
+          <div>
+            <h3>Nonconformance Options</h3>
+            <span>Controlled lists used in NCR records.</span>
+          </div>
+        </div>
+        <div className="settings-metrology-grid">
+          {nonconformanceSections.map(([key, label]) => (
+            <div key={key} className="subpanel">
+              <div className="subpanel-header">
+                <div>
+                  <h4>{label}</h4>
+                  <span>{nonconformanceOptions[key]?.length || 0} options</span>
+                </div>
+                <button onClick={() => setNonconformanceOptions((current) => ({ ...current, [key]: [...(current[key] || []), ""] }))}><Plus size={14} /> Option</button>
+              </div>
+              <div className="parameter-list">
+                {(nonconformanceOptions[key] || []).map((value, index) => (
+                  <div className="parameter-row catalog-alloy-row" key={`${key}-${index}`}>
+                    <input value={value || ""} placeholder={`${settingsOptionPlaceholder(label)} option`} onChange={(event) => setNonconformanceOptions((current) => ({ ...current, [key]: (current[key] || []).map((item, itemIndex) => itemIndex === index ? event.target.value : item) }))} />
+                    <button className="danger subtle square" onClick={() => setNonconformanceOptions((current) => ({ ...current, [key]: (current[key] || []).filter((_item, itemIndex) => itemIndex !== index) }))}><X size={13} /></button>
+                  </div>
+                ))}
+                {!nonconformanceOptions[key]?.length && <div className="empty-inline">No options configured yet.</div>}
               </div>
             </div>
           ))}
@@ -8098,6 +8922,105 @@ function TravelerPrintPacket({ jobId }) {
             </div>
         </React.Fragment>
       ))}
+    </div>
+  );
+}
+
+function PrintNonconformanceReport({ ncrId }) {
+  const [payload, setPayload] = useState(null);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    Promise.all([api.loadNonconformance(ncrId), api.loadWorkspace()]).then(([record, workspace]) => {
+      setPayload({
+        record,
+        instruments: workspace?.instruments || []
+      });
+    }).catch((err) => setError(err.message || String(err)));
+  }, [ncrId]);
+  if (error) return <Fatal title="NCR Print Error" message={error} />;
+  if (!payload?.record) return <LoadingScreen message="Preparing NCR report..." />;
+  const { record, instruments } = payload;
+  const photoAttachments = (record.attachments || []).filter((attachment) => {
+    const filename = String(attachment.storedFilename || attachment.originalFilename || "").toLowerCase();
+    return [".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"].some((extension) => filename.endsWith(extension));
+  });
+  return (
+    <div className="print-shell inspection-print-shell nonconformance-print-ready">
+      <section className="print-page inspection-report-page">
+        <header className="inspection-report-header">
+          <div>
+            <span>Nonconformance Report</span>
+            <h1>{record.ncrNumber || record.id}</h1>
+            <p>{record.issueSummary || "No issue summary."}</p>
+          </div>
+          <div className="inspection-report-job">
+            <strong>{record.jobNumber || record.jobId || "-"}</strong>
+            <span>{record.partNumber || record.partName || record.partId || "-"}</span>
+          </div>
+        </header>
+        <div className="traveler-fact-grid traveler-job-grid">
+          <PrintField label="Status" value={record.status} compact />
+          <PrintField label="Reported By" value={record.reportedBy} compact />
+          <PrintField label="Reported At" value={formatDateTime(record.reportedAt)} compact />
+          <PrintField label="Quantity Affected" value={record.quantityAffected} compact />
+          <PrintField label="Disposition" value={record.disposition} compact />
+          <PrintField label="Owner" value={record.owner} compact />
+          <PrintField label="Due Date" value={record.dueDate} compact />
+        </div>
+        <section className="inspection-print-section">
+          <h2>Issue</h2>
+          <p>{record.issueDescription || "No issue description."}</p>
+        </section>
+        <section className="inspection-print-section">
+          <h2>Inspection Context</h2>
+          <p>{inspectionCharacteristicContextText(record.inspectionContext, instruments)}</p>
+          {record.inspectionContext?.instance ? <p>Instance: {record.inspectionContext.instance.label || "-"}</p> : null}
+        </section>
+        <section className="inspection-print-section">
+          <h2>Containment Action</h2>
+          <p>{record.containmentAction || "No containment action."}</p>
+        </section>
+        <section className="inspection-print-section">
+          <h2>Root Cause Notes</h2>
+          <p>{record.rootCauseNotes || "No root cause notes."}</p>
+        </section>
+        <section className="inspection-print-section">
+          <h2>Closure Notes</h2>
+          <p>{record.closureNotes || "No closure notes."}</p>
+        </section>
+        <section className="inspection-print-section">
+          <h2>Attachments</h2>
+          <table className="print-table compact">
+            <thead>
+              <tr><th>Filename</th><th>Type</th><th>Revision</th><th>Status</th></tr>
+            </thead>
+            <tbody>
+              {(record.attachments || []).map((attachment) => (
+                <tr key={attachment.id}>
+                  <td>{attachment.originalFilename || "-"}</td>
+                  <td>{attachment.fileType || "-"}</td>
+                  <td>{attachment.revisionNumber || 1}</td>
+                  <td>{attachment.active === false ? "Archived" : "Current"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {!record.attachments?.length && <div className="empty-inline">No attachments.</div>}
+        </section>
+        {photoAttachments.length ? (
+          <section className="inspection-print-section">
+            <h2>Attached Photos</h2>
+            <div className="ncr-print-photo-grid">
+              {photoAttachments.map((attachment) => (
+                <figure key={attachment.id} className="ncr-print-photo-card">
+                  <img src={nonconformanceAttachmentImageSrc(attachment)} alt={attachment.originalFilename} />
+                  <figcaption>{attachment.originalFilename}</figcaption>
+                </figure>
+              ))}
+            </div>
+          </section>
+        ) : null}
+      </section>
     </div>
   );
 }
