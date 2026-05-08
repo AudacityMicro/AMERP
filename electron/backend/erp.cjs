@@ -6,6 +6,7 @@ const path = require("node:path");
 const crypto = require("node:crypto");
 const { spawn } = require("node:child_process");
 const { pathToFileURL } = require("node:url");
+const { PDFDocument, StandardFonts, rgb } = require("pdf-lib");
 
 const {
   DEFAULT_LIBRARY_DEFINITIONS,
@@ -40,6 +41,9 @@ const {
   enrichKanbanCardDraft,
   generateKanbanReferenceImage
 } = require("./kanban-ai.cjs");
+const {
+  extractInspectionFromDrawing
+} = require("./inspection-ai.cjs");
 
 const CONFIG_FILE = "amerp-config.json";
 const LOCK_TTL_MS = 15 * 60 * 1000;
@@ -1788,7 +1792,71 @@ class ERPBackend {
       notes: String(part?.notes || "").trim(),
       active: part?.active !== false,
       documents: (Array.isArray(part?.documents) ? part.documents : []).map((document) => this.normalizeDocument(document)),
+      inspection: this.normalizeInspection(part?.inspection),
       operations
+    };
+  }
+
+  normalizeInspection(inspection) {
+    const normalizedCoordinate = (value) => {
+      const numeric = Number(value);
+      return Number.isFinite(numeric) ? Math.max(0, Math.min(1, numeric)) : 0.5;
+    };
+    const normalizeCharacteristic = (item, index) => ({
+      id: item?.id || randomId("characteristic"),
+      number: String(item?.number || index + 1).trim(),
+      type: String(item?.type || "Dimension").trim(),
+      units: String(item?.units || inspection?.units || "in").trim(),
+      nominal: String(item?.nominal || "").trim(),
+      toleranceType: String(item?.toleranceType || "plusMinus").trim(),
+      plusTolerance: String(item?.plusTolerance || "").trim(),
+      minusTolerance: String(item?.minusTolerance || "").trim(),
+      lowerLimit: String(item?.lowerLimit || "").trim(),
+      upperLimit: String(item?.upperLimit || "").trim(),
+      gdTolerance: String(item?.gdTolerance || "").trim(),
+      gageId: String(item?.gageId || "").trim(),
+      gageText: String(item?.gageText || "").trim(),
+      notes: String(item?.notes || "").trim(),
+      sourceDrawingDocumentId: String(item?.sourceDrawingDocumentId || "").trim(),
+      confidence: String(item?.confidence || "").trim(),
+      active: item?.active !== false
+    });
+    const normalizeInstance = (item, index) => ({
+      id: item?.id || randomId("inspection-instance"),
+      label: String(item?.label || `Part ${index + 1}`).trim(),
+      inspector: String(item?.inspector || "").trim(),
+      inspectedAt: String(item?.inspectedAt || nowIso()).trim(),
+      status: String(item?.status || "Open").trim(),
+      results: Object.fromEntries(Object.entries(item?.results || {}).map(([key, value]) => [key, String(value || "").trim()]))
+    });
+    return {
+      units: String(inspection?.units || "in").trim() || "in",
+      characteristics: (Array.isArray(inspection?.characteristics) ? inspection.characteristics : []).map(normalizeCharacteristic),
+      instances: (Array.isArray(inspection?.instances) ? inspection.instances : []).map(normalizeInstance),
+      balloons: (Array.isArray(inspection?.balloons) ? inspection.balloons : []).map((item) => ({
+        id: item?.id || randomId("balloon"),
+        characteristicId: String(item?.characteristicId || "").trim(),
+        sourceDrawingDocumentId: String(item?.sourceDrawingDocumentId || "").trim(),
+        pageNumber: Number(item?.pageNumber || 1) || 1,
+        x: normalizedCoordinate(item?.x),
+        y: normalizedCoordinate(item?.y),
+        labelText: String(item?.labelText || "").trim(),
+        confidence: String(item?.confidence || "").trim(),
+        placementSource: String(item?.placementSource || "manual").trim()
+      })).filter((item) => item.characteristicId),
+      extractionRuns: (Array.isArray(inspection?.extractionRuns) ? inspection.extractionRuns : []).map((item) => ({
+        id: item?.id || randomId("inspection-extraction"),
+        sourceDrawingDocumentId: String(item?.sourceDrawingDocumentId || "").trim(),
+        sourceFilename: String(item?.sourceFilename || "").trim(),
+        extractedAt: String(item?.extractedAt || nowIso()).trim(),
+        acceptedCount: Number(item?.acceptedCount || 0) || 0,
+        queuedCount: Number(item?.queuedCount || 0) || 0,
+        rejectedCount: Number(item?.rejectedCount || 0) || 0,
+        balloonedCount: Number(item?.balloonedCount || 0) || 0,
+        warnings: toDisplayList(item?.warnings),
+        errors: toDisplayList(item?.errors)
+      })),
+      reviewQueue: (Array.isArray(inspection?.reviewQueue) ? inspection.reviewQueue : []).map(normalizeCharacteristic)
     };
   }
 
@@ -1997,6 +2065,18 @@ class ERPBackend {
     return copied;
   }
 
+  async chooseInspectionDrawing(jobId, partId, mainWindow) {
+    const result = await dialog.showOpenDialog(mainWindow || null, {
+      title: "Choose Inspection Drawing PDF",
+      properties: ["openFile"],
+      filters: [{ name: "PDF Drawings", extensions: ["pdf"] }]
+    });
+    if (result.canceled || !result.filePaths?.[0]) {
+      return null;
+    }
+    return this.copyPartDocument(jobId, partId, result.filePaths[0], "Drawing", "Inspection drawing");
+  }
+
   async copyJobDocument(jobId, sourcePath, category = "Other", description = "") {
     const dataRoot = await this.requireDataFolder();
     const destination = await copyFileUnique(sourcePath, this.getJobDocumentsRoot(dataRoot, jobId), "");
@@ -2025,6 +2105,11 @@ class ERPBackend {
       description,
       displayName: path.basename(sourcePath)
     }, category);
+  }
+
+  getStoredDocumentPath(dataRoot, document) {
+    const storedPath = String(document?.storedPath || "").replaceAll("\\", "/");
+    return storedPath ? path.join(dataRoot, storedPath) : "";
   }
 
   async openDocumentByStoredPath(targetPath) {
@@ -2328,6 +2413,103 @@ class ERPBackend {
     const saved = await this.saveJob(job);
     await this.appendAudit("part_document_deleted", partId, `Deleted archived part attachment ${document.originalFilename}.`);
     return saved;
+  }
+
+  async savePartInspection(jobId, partId, inspection) {
+    const job = await this.loadJob(jobId);
+    const part = job?.parts?.find((item) => item.id === partId);
+    if (!part) {
+      throw new Error("Part not found.");
+    }
+    part.inspection = this.normalizeInspection(inspection);
+    const saved = await this.saveJob(job);
+    await this.appendAudit("part_inspection_saved", partId, `Saved inspection data for ${part.partNumber || part.partName || partId}.`);
+    return saved;
+  }
+
+  async extractPartInspectionFromDrawing(jobId, partId, source = {}, mainWindow = null) {
+    const dataRoot = await this.requireDataFolder();
+    const preferences = await this.loadPreferences(dataRoot);
+    const job = await this.loadJob(jobId);
+    const part = job?.parts?.find((item) => item.id === partId);
+    if (!part) {
+      throw new Error("Part not found.");
+    }
+    let document = null;
+    if (source?.upload) {
+      document = await this.chooseInspectionDrawing(jobId, partId, mainWindow);
+      if (!document) {
+        return null;
+      }
+      part.documents = [...(part.documents || []), document];
+    } else {
+      document = (part.documents || []).find((item) => item.id === source?.documentId);
+    }
+    if (!document) {
+      throw new Error("Choose a PDF drawing before extracting inspection dimensions.");
+    }
+    if (String(document.fileType || "").toUpperCase() !== "PDF") {
+      throw new Error("Inspection drawing extraction currently supports PDF drawings only.");
+    }
+    const drawingPath = this.getStoredDocumentPath(dataRoot, document);
+    if (!drawingPath || !(await pathExists(drawingPath))) {
+      throw new Error("Drawing PDF file could not be found.");
+    }
+    const extraction = await extractInspectionFromDrawing({
+      apiKey: preferences.openaiApiKey,
+      filePath: drawingPath,
+      filename: document.originalFilename || document.storedFilename
+    });
+    const inspection = this.normalizeInspection(part.inspection);
+    const existingNumbers = new Set(inspection.characteristics.map((item) => String(item.number || "").toLowerCase()));
+    const accepted = [];
+    const queued = [];
+    const balloons = [];
+    for (const extracted of extraction.characteristics || []) {
+      const characteristic = this.normalizeInspection({ characteristics: [{ ...extracted, sourceDrawingDocumentId: document.id }] }).characteristics[0];
+      const highConfidence = characteristic.confidence === "high"
+        && characteristic.nominal
+        && characteristic.units
+        && (characteristic.gdTolerance || characteristic.plusTolerance || characteristic.minusTolerance || characteristic.lowerLimit || characteristic.upperLimit);
+      if (highConfidence && !existingNumbers.has(String(characteristic.number || "").toLowerCase())) {
+        accepted.push(characteristic);
+        existingNumbers.add(String(characteristic.number || "").toLowerCase());
+        balloons.push({
+          id: randomId("balloon"),
+          characteristicId: characteristic.id,
+          sourceDrawingDocumentId: document.id,
+          pageNumber: extracted.balloon?.pageNumber || 1,
+          x: extracted.balloon?.x ?? 0.5,
+          y: extracted.balloon?.y ?? 0.5,
+          labelText: characteristic.number,
+          confidence: characteristic.confidence,
+          placementSource: "ai"
+        });
+      } else {
+        queued.push(characteristic);
+      }
+    }
+    inspection.characteristics = [...inspection.characteristics, ...accepted];
+    inspection.reviewQueue = [...(inspection.reviewQueue || []), ...queued];
+    inspection.balloons = [...inspection.balloons, ...this.normalizeInspection({ balloons }).balloons];
+    inspection.extractionRuns = [
+      ...(inspection.extractionRuns || []),
+      {
+        id: randomId("inspection-extraction"),
+        sourceDrawingDocumentId: document.id,
+        sourceFilename: document.originalFilename || document.storedFilename,
+        extractedAt: nowIso(),
+        acceptedCount: accepted.length,
+        queuedCount: queued.length,
+        rejectedCount: 0,
+        balloonedCount: balloons.length,
+        warnings: extraction.warnings || [],
+        errors: []
+      }
+    ];
+    part.inspection = this.normalizeInspection(inspection);
+    const saved = await this.saveJob(job);
+    return { job: saved, accepted, queued, warnings: extraction.warnings || [], document };
   }
 
   async deleteDocumentFiles(dataRoot, document) {
@@ -4176,6 +4358,147 @@ class ERPBackend {
       console.warn(`Unable to open exported PDF: ${openError}`);
     }
     return outputPath;
+  }
+
+  async exportPartInspectionPdf(jobId, partId, destinationPath) {
+    const dataRoot = await this.requireDataFolder();
+    const job = await this.loadJob(jobId);
+    const part = job?.parts?.find((item) => item.id === partId);
+    if (!part) {
+      throw new Error("Part not found.");
+    }
+    let outputPath = destinationPath;
+    if (!outputPath) {
+      const result = await dialog.showSaveDialog({
+        title: "Export Inspection Results PDF",
+        defaultPath: path.join(dataRoot, `${safeFileName(job.jobNumber || job.id)}-${safeFileName(part.partNumber || part.partName || part.id)}-inspection.pdf`),
+        filters: [{ name: "PDF", extensions: ["pdf"] }]
+      });
+      if (result.canceled || !result.filePath) {
+        return null;
+      }
+      outputPath = result.filePath;
+    }
+    const printWindow = new BrowserWindow({
+      show: false,
+      width: 1200,
+      height: 1500,
+      webPreferences: {
+        preload: path.join(__dirname, "..", "preload.cjs"),
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: false
+      }
+    });
+    if (this.devServerUrl) {
+      await printWindow.loadURL(`${this.devServerUrl}#/print/inspection/${encodeURIComponent(jobId)}/${encodeURIComponent(partId)}`);
+    } else {
+      await printWindow.loadFile(path.join(this.app.getAppPath(), "dist", "index.html"), {
+        hash: `/print/inspection/${encodeURIComponent(jobId)}/${encodeURIComponent(partId)}`
+      });
+    }
+    await this.waitForPrintSelector(printWindow, ".inspection-print-ready");
+    const pdf = await printWindow.webContents.printToPDF({
+      pageSize: "Letter",
+      printBackground: true,
+      margins: { marginType: "default" }
+    });
+    await fs.writeFile(outputPath, pdf);
+    printWindow.close();
+    const openError = await shell.openPath(outputPath);
+    if (openError) {
+      console.warn(`Unable to open exported PDF: ${openError}`);
+    }
+    return outputPath;
+  }
+
+  async generatePartBalloonedDrawingPdf(jobId, partId, drawingDocumentId) {
+    const dataRoot = await this.requireDataFolder();
+    const job = await this.loadJob(jobId);
+    const part = job?.parts?.find((item) => item.id === partId);
+    if (!part) {
+      throw new Error("Part not found.");
+    }
+    const document = (part.documents || []).find((item) => item.id === drawingDocumentId);
+    if (!document) {
+      throw new Error("Drawing document not found.");
+    }
+    const sourcePath = this.getStoredDocumentPath(dataRoot, document);
+    if (!sourcePath || !(await pathExists(sourcePath))) {
+      throw new Error("Source drawing PDF could not be found.");
+    }
+    const outputFilename = `${safeFileName(part.partNumber || part.partName || part.id)}-ballooned-${safeFileName(document.originalFilename || document.storedFilename || "drawing.pdf").replace(/\.pdf$/i, "")}.pdf`;
+    const outputPath = path.join(this.getPartDocumentsRoot(dataRoot, jobId, partId), outputFilename);
+    const sourceBytes = await fs.readFile(sourcePath);
+    const pdfDoc = await PDFDocument.load(sourceBytes);
+    const font = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
+    const inspection = this.normalizeInspection(part.inspection);
+    const balloons = inspection.balloons.filter((item) => item.sourceDrawingDocumentId === drawingDocumentId);
+    const pages = pdfDoc.getPages();
+    for (const balloon of balloons) {
+      const pageIndex = Math.max(0, Math.min(pages.length - 1, Number(balloon.pageNumber || 1) - 1));
+      const page = pages[pageIndex];
+      const { width, height } = page.getSize();
+      const centerX = Number(balloon.x || 0.5) * width;
+      const centerY = (1 - Number(balloon.y || 0.5)) * height;
+      const label = String(balloon.labelText || "?").trim() || "?";
+      const radius = Math.max(14, Math.min(width, height) * 0.018);
+      const borderColor = balloon.placementSource === "manual" ? rgb(0.96, 0.62, 0.04) : rgb(0.15, 0.39, 0.92);
+      page.drawCircle({
+        x: centerX,
+        y: centerY,
+        size: radius,
+        borderColor,
+        borderWidth: 3,
+        color: rgb(1, 1, 1),
+        opacity: 1
+      });
+      const fontSize = Math.max(10, radius * 0.9);
+      const textWidth = font.widthOfTextAtSize(label, fontSize);
+      page.drawText(label, {
+        x: centerX - (textWidth / 2),
+        y: centerY - (fontSize * 0.33),
+        size: fontSize,
+        font,
+        color: rgb(0.07, 0.09, 0.13)
+      });
+    }
+    const pdfBytes = await pdfDoc.save();
+    await fs.writeFile(outputPath, pdfBytes);
+    const attachment = this.normalizeDocument({
+      originalFilename: outputFilename,
+      storedFilename: outputFilename,
+      storedPath: path.relative(dataRoot, outputPath),
+      originalPath: "",
+      fileType: "PDF",
+      category: "Drawing",
+      description: `Ballooned drawing generated from ${document.originalFilename || document.storedFilename}`,
+      displayName: outputFilename
+    }, "Drawing");
+    part.documents = [...(part.documents || []), attachment];
+    const updatedInspection = this.normalizeInspection(part.inspection);
+    updatedInspection.extractionRuns = [
+      ...(updatedInspection.extractionRuns || []),
+      {
+        id: randomId("inspection-extraction"),
+        sourceDrawingDocumentId: drawingDocumentId,
+        sourceFilename: document.originalFilename || document.storedFilename,
+        extractedAt: nowIso(),
+        acceptedCount: 0,
+        queuedCount: 0,
+        rejectedCount: 0,
+        balloonedCount: updatedInspection.balloons.filter((item) => item.sourceDrawingDocumentId === drawingDocumentId).length,
+        warnings: [`Generated ballooned drawing attachment: ${outputFilename}`],
+        errors: []
+      }
+    ];
+    part.inspection = updatedInspection;
+    const saved = await this.saveJob(job);
+    const openError = await shell.openPath(outputPath);
+    if (openError) {
+      console.warn(`Unable to open ballooned PDF: ${openError}`);
+    }
+    return { job: saved, document: attachment, outputPath };
   }
 }
 

@@ -58,6 +58,10 @@ contextBridge.exposeInMainWorld("amerp", {
   revisePartDocument: (jobId, partId, documentId) => invoke("revise-part-document", jobId, partId, documentId),
   chooseOperationImages: (jobId, partId, operationId) => invoke("choose-operation-images", jobId, partId, operationId),
   exportJobPdf: (jobId, destinationPath) => invoke("export-job-pdf", jobId, destinationPath),
+  savePartInspection: (jobId, partId, inspection) => invoke("save-part-inspection", jobId, partId, inspection),
+  extractPartInspectionFromDrawing: (jobId, partId, source) => invoke("extract-part-inspection-from-drawing", jobId, partId, source),
+  generatePartBalloonedDrawingPdf: (jobId, partId, drawingDocumentId) => invoke("generate-part-ballooned-drawing-pdf", jobId, partId, drawingDocumentId),
+  exportPartInspectionPdf: (jobId, partId, destinationPath) => invoke("export-part-inspection-pdf", jobId, partId, destinationPath),
 
   listMaterials: () => invoke("list-materials"),
   loadMaterial: (id, options) => invoke("load-material", id, options),

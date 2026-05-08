@@ -1,6 +1,8 @@
 import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import QRCode from "qrcode";
+import { getDocument, GlobalWorkerOptions } from "pdfjs-dist/legacy/build/pdf.mjs";
+import pdfWorkerUrl from "pdfjs-dist/legacy/build/pdf.worker.min.mjs?url";
 import {
   Archive,
   ArchiveRestore,
@@ -21,6 +23,7 @@ import {
 import "./styles.css";
 
 const api = window.amerp;
+GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
 const PRIMARY_MODULES = [
   { id: "jobs", label: "Jobs", icon: Package },
@@ -87,6 +90,7 @@ const blankPart = () => ({
   },
   notes: "",
   documents: [],
+  inspection: blankInspection(),
   operations: []
 });
 
@@ -134,6 +138,41 @@ const blankOperationTool = () => ({
   details: "",
   fusionToolNumber: "",
   source: ""
+});
+
+const blankInspectionCharacteristic = (number = "") => ({
+  id: uid("characteristic"),
+  number,
+  type: "Dimension",
+  nominal: "",
+  toleranceType: "plusMinus",
+  plusTolerance: "",
+  minusTolerance: "",
+  lowerLimit: "",
+  upperLimit: "",
+  gdTolerance: "",
+  gageId: "",
+  sourceDrawingDocumentId: "",
+  confidence: "",
+  active: true
+});
+
+const blankInspectionInstance = (index = 1) => ({
+  id: uid("inspection-instance"),
+  label: `Part ${index}`,
+  inspector: "",
+  inspectedAt: nowIso(),
+  status: "Open",
+  results: {}
+});
+
+const blankInspection = () => ({
+  units: "in",
+  characteristics: [],
+  instances: [],
+  balloons: [],
+  extractionRuns: [],
+  reviewQueue: []
 });
 
 const blankMaterial = () => ({
@@ -603,6 +642,52 @@ function toolHeading(tool, index) {
   return toolName ? `${toolNumber} - ${toolName}` : toolNumber;
 }
 
+function normalizeInspectionPayload(inspection) {
+  return {
+    units: String(inspection?.units || "in").trim() || "in",
+    characteristics: Array.isArray(inspection?.characteristics) ? inspection.characteristics : [],
+    instances: Array.isArray(inspection?.instances) ? inspection.instances : [],
+    balloons: Array.isArray(inspection?.balloons) ? inspection.balloons : [],
+    extractionRuns: Array.isArray(inspection?.extractionRuns) ? inspection.extractionRuns : [],
+    reviewQueue: Array.isArray(inspection?.reviewQueue) ? inspection.reviewQueue : []
+  };
+}
+
+function characteristicLimits(characteristic) {
+  if (String(characteristic?.toleranceType || "") === "limits") {
+    const lower = Number(characteristic?.lowerLimit);
+    const upper = Number(characteristic?.upperLimit);
+    return {
+      lower: Number.isFinite(lower) ? lower : null,
+      upper: Number.isFinite(upper) ? upper : null
+    };
+  }
+  const nominal = Number(characteristic?.nominal);
+  const plus = Number(characteristic?.plusTolerance);
+  const minus = Number(characteristic?.minusTolerance || characteristic?.plusTolerance);
+  return {
+    lower: Number.isFinite(nominal) && Number.isFinite(minus) ? nominal - Math.abs(minus) : null,
+    upper: Number.isFinite(nominal) && Number.isFinite(plus) ? nominal + Math.abs(plus) : null
+  };
+}
+
+function inspectionResultStatus(characteristic, value) {
+  const result = String(value || "").trim();
+  if (!result) return "";
+  if (["pass", "fail"].includes(result.toLowerCase())) {
+    return result.toLowerCase() === "pass" ? "Pass" : "Fail";
+  }
+  const numeric = Number(result);
+  if (!Number.isFinite(numeric)) {
+    return "";
+  }
+  const { lower, upper } = characteristicLimits(characteristic);
+  if (lower === null && upper === null) {
+    return "";
+  }
+  return (lower !== null && numeric < lower) || (upper !== null && numeric > upper) ? "Fail" : "Pass";
+}
+
 function instructionStepsFromOperation(operation) {
   if (Array.isArray(operation?.instructionSteps) && operation.instructionSteps.length) {
     return operation.instructionSteps;
@@ -785,6 +870,14 @@ function App() {
     const materialId = decodeURIComponent(pathPart);
     const params = new URLSearchParams(queryPart);
     return <PrintMaterialLabel materialId={materialId} sizeId={params.get("size") || ""} monochrome={params.get("bw") === "1"} />;
+  }
+  if (route.startsWith("/print/inspection/")) {
+    const [jobId, partId] = route.replace("/print/inspection/", "").split("/").map(decodeURIComponent);
+    return <PrintInspectionReport jobId={jobId} partId={partId} />;
+  }
+  if (route.startsWith("/print/ballooned-drawing/")) {
+    const [jobId, partId, drawingDocumentId] = route.replace("/print/ballooned-drawing/", "").split("/").map(decodeURIComponent);
+    return <PrintBalloonedDrawing jobId={jobId} partId={partId} drawingDocumentId={drawingDocumentId} />;
   }
   if (route.startsWith("/print/")) {
     const jobId = decodeURIComponent(route.replace("/print/", "").split("?")[0]);
@@ -1143,6 +1236,13 @@ useEffect(() => api.onDeepLink?.((payload) => {
     setSaveState("saved");
   };
 
+  const openInspection = (partId) => {
+    setSelectedPartId(partId);
+    setSelectedOperationId(null);
+    setJobScreen("inspection");
+    setSaveState("saved");
+  };
+
   const backToJob = () => {
     setSelectedPartId(null);
     setSelectedOperationId(null);
@@ -1175,6 +1275,60 @@ useEffect(() => api.onDeepLink?.((payload) => {
       showStatus(error.message || String(error));
     } finally {
       fusionImportInFlight.current = false;
+      setBusy(false);
+    }
+  };
+
+  const savePartInspection = async (partId, inspection) => {
+    if (!job?.id || !partId) return;
+    const saved = await api.savePartInspection(job.id, partId, inspection);
+    await applySavedJob(saved);
+  };
+
+  const extractInspectionFromDrawing = async (partId, source) => {
+    if (!job?.id || !partId) return;
+    setBusy(true);
+    try {
+      const result = await api.extractPartInspectionFromDrawing(job.id, partId, source);
+      if (!result) {
+        return;
+      }
+      await applySavedJob(result.job);
+      showStatus(`Inspection extraction complete: ${result.accepted?.length || 0} added, ${result.queued?.length || 0} queued for review.`);
+    } catch (error) {
+      showStatus(error.message || String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const generateBalloonedDrawingPdf = async (partId, drawingDocumentId) => {
+    if (!job?.id || !partId || !drawingDocumentId) return;
+    setBusy(true);
+    try {
+      const result = await api.generatePartBalloonedDrawingPdf(job.id, partId, drawingDocumentId);
+      if (result?.job) {
+        await applySavedJob(result.job);
+      }
+      showStatus("Generated ballooned drawing PDF.");
+    } catch (error) {
+      showStatus(error.message || String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const exportCurrentInspectionPdf = async () => {
+    if (!job?.id || !selectedPartId) return;
+    setBusy(true);
+    try {
+      const output = await api.exportPartInspectionPdf(job.id, selectedPartId);
+      if (output) {
+        showStatus(`Exported inspection PDF: ${output}`);
+      }
+    } catch (error) {
+      showStatus(error.message || String(error));
+    } finally {
       setBusy(false);
     }
   };
@@ -2263,11 +2417,14 @@ useEffect(() => api.onDeepLink?.((payload) => {
       if (jobScreen !== "list" && job) {
         crumbs.push({ label: job.jobNumber || "New Job", onClick: backToJob, active: jobScreen === "job" });
       }
-      if (jobScreen === "part" || jobScreen === "operation") {
+      if (jobScreen === "part" || jobScreen === "operation" || jobScreen === "inspection") {
         crumbs.push({ label: selectedPart?.partNumber || selectedPart?.partName || "Part", onClick: backToPart, active: jobScreen === "part" });
       }
       if (jobScreen === "operation") {
         crumbs.push({ label: selectedOperation?.title || `Operation ${selectedOperation?.sequence || ""}`.trim(), onClick: null, active: true });
+      }
+      if (jobScreen === "inspection") {
+        crumbs.push({ label: "Inspection", onClick: null, active: true });
       }
       return {
         breadcrumbs: crumbs,
@@ -2277,6 +2434,8 @@ useEffect(() => api.onDeepLink?.((payload) => {
             ? (job?.jobNumber || "New Job")
             : jobScreen === "part"
               ? (selectedPart?.partNumber || selectedPart?.partName || "Part")
+              : jobScreen === "inspection"
+                ? "Inspection"
               : (selectedOperation?.title || "Operation"),
         subtitle: jobScreen === "list"
           ? "Build and run jobs from part to operation."
@@ -2284,10 +2443,13 @@ useEffect(() => api.onDeepLink?.((payload) => {
             ? `${job?.parts?.length || 0} parts`
             : jobScreen === "part"
               ? `${selectedPart?.operations?.length || 0} operations`
+              : jobScreen === "inspection"
+                ? `${selectedPart?.inspection?.characteristics?.length || 0} characteristics`
               : `${job?.jobNumber || ""}${selectedPart ? ` / ${selectedPart.partNumber || selectedPart.partName || "Part"}` : ""}`,
         primaryActions: [
           jobScreen === "list" ? <button key="new-job" onClick={createNewJob}><Plus size={15} /> New Job</button> : null,
-          jobScreen !== "list" ? <button key="pdf" onClick={exportCurrentJobPdf} disabled={!job || busy}><FileDown size={16} /> PDF</button> : null
+          jobScreen !== "list" ? <button key="pdf" onClick={exportCurrentJobPdf} disabled={!job || busy}><FileDown size={16} /> PDF</button> : null,
+          jobScreen === "inspection" ? <button key="inspection-pdf" onClick={() => exportCurrentInspectionPdf()} disabled={!job || !selectedPart || busy}><FileDown size={16} /> Inspection PDF</button> : null
         ].filter(Boolean),
         dangerActions: [
           jobScreen !== "list" && job?.active !== false
@@ -2456,6 +2618,7 @@ useEffect(() => api.onDeepLink?.((payload) => {
             onCreateJob={createNewJob}
             onOpenPart={openPart}
             onOpenOperation={openOperation}
+            onOpenInspection={openInspection}
             onBackToJobList={showJobList}
             onBackToJob={backToJob}
             onBackToPart={backToPart}
@@ -2480,6 +2643,9 @@ useEffect(() => api.onDeepLink?.((payload) => {
         onDeletePartDocument={deletePartDocument}
         onSaveCustomer={saveCustomer}
             onChooseOperationImages={async (jobId, partId, operationId) => api.chooseOperationImages(jobId, partId, operationId)}
+            onSavePartInspection={savePartInspection}
+            onExtractInspectionFromDrawing={extractInspectionFromDrawing}
+            onGenerateBalloonedDrawingPdf={generateBalloonedDrawingPdf}
             onCreateInlineMaterial={createInlineMaterial}
             onAddMaterialFamily={addMaterialFamilyOption}
             onAddMaterialAlloy={addMaterialAlloyOption}
@@ -3108,6 +3274,7 @@ function JobsView({
   onCreateJob,
   onOpenPart,
   onOpenOperation,
+  onOpenInspection,
   onBackToJobList,
   onBackToJob,
   onBackToPart,
@@ -3132,6 +3299,9 @@ function JobsView({
   onDeleteJobDocument,
   onDeletePartDocument,
   onSaveCustomer,
+  onSavePartInspection,
+  onExtractInspectionFromDrawing,
+  onGenerateBalloonedDrawingPdf,
   onCreateInlineMaterial,
   onAddMaterialFamily,
   onAddMaterialAlloy
@@ -3206,6 +3376,21 @@ function JobsView({
     return <EmptyState icon={Package} title="No job selected" text="Choose a job from the list or create a new one." actionLabel="New Job" onAction={onCreateJob} />;
   }
 
+  if (jobScreen === "inspection" && selectedPart) {
+    return (
+      <PartInspectionScreen
+        busy={busy}
+        job={job}
+        part={selectedPart}
+        instruments={instruments}
+        onUpdate={(inspection) => updatePart(selectedPart.id, { inspection })}
+        onSaveInspection={(inspection) => onSavePartInspection(selectedPart.id, inspection)}
+        onExtract={(source) => onExtractInspectionFromDrawing(selectedPart.id, source)}
+        onGenerateBalloonedPdf={(drawingDocumentId) => onGenerateBalloonedDrawingPdf(selectedPart.id, drawingDocumentId)}
+      />
+    );
+  }
+
   if (jobScreen === "operation" && selectedPart && selectedOperation) {
     return (
       <OperationDetailScreen
@@ -3256,6 +3441,7 @@ function JobsView({
         onAddOperation={addOperation}
         onImportFusion={onImportFusionToPart}
         onOpenOperation={(operationId) => onOpenOperation(selectedPart.id, operationId)}
+        onOpenInspection={() => onOpenInspection(selectedPart.id)}
         onMoveOperation={(operationId, direction) => moveOperation(selectedPart.id, operationId, direction)}
         materials={materials}
         constants={workspace.constants}
@@ -3528,6 +3714,7 @@ function PartDetailScreen({
   onAddOperation,
   onImportFusion,
   onOpenOperation,
+  onOpenInspection,
   onMoveOperation,
   onCreateInlineMaterial,
   onAddMaterialFamily,
@@ -3585,6 +3772,7 @@ function PartDetailScreen({
               <span>{part.operations.length} total</span>
             </div>
             <div className="toolbar">
+              <button onClick={onOpenInspection} disabled={busy}>Inspection</button>
               <button onClick={() => onImportFusion(part.id)} disabled={busy}><Import size={14} /> From Fusion</button>
               <select className="compact-select" defaultValue="" disabled={busy} onChange={(event) => event.target.value && onAddOperation(part.id, event.target.value)}>
                 <option value="">Add From Template</option>
@@ -3663,6 +3851,376 @@ function PartDetailScreen({
         onAddMaterialFamily={onAddMaterialFamily}
         onAddMaterialAlloy={onAddMaterialAlloy}
       />
+    </div>
+  );
+}
+
+function PdfPagePreview({ fileUrl, pageNumber, zoom, balloons, selectedBalloonId, onSelectBalloon, onPlaceBalloon, onDocumentMeta }) {
+  const canvasRef = useRef(null);
+  const wrapperRef = useRef(null);
+  const [renderState, setRenderState] = useState({ pageCount: 0, width: 0, height: 0, loading: false, error: "" });
+
+  useEffect(() => {
+    let cancelled = false;
+    const render = async () => {
+      if (!fileUrl || !canvasRef.current) {
+        setRenderState((current) => ({ ...current, pageCount: 0, width: 0, height: 0, loading: false, error: "" }));
+        return;
+      }
+      setRenderState((current) => ({ ...current, loading: true, error: "" }));
+      try {
+        const loadingTask = getDocument(fileUrl);
+        const pdf = await loadingTask.promise;
+        const safePageNumber = Math.max(1, Math.min(pdf.numPages, pageNumber || 1));
+        const page = await pdf.getPage(safePageNumber);
+        const viewport = page.getViewport({ scale: Math.max(0.4, zoom || 1) });
+        if (cancelled || !canvasRef.current) {
+          return;
+        }
+        const canvas = canvasRef.current;
+        const context = canvas.getContext("2d");
+        canvas.width = viewport.width;
+        canvas.height = viewport.height;
+        canvas.style.width = `${viewport.width}px`;
+        canvas.style.height = `${viewport.height}px`;
+        await page.render({ canvasContext: context, viewport }).promise;
+        if (!cancelled) {
+          onDocumentMeta?.({ pageCount: pdf.numPages, safePageNumber });
+          setRenderState({
+            pageCount: pdf.numPages,
+            width: viewport.width,
+            height: viewport.height,
+            loading: false,
+            error: ""
+          });
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setRenderState({ pageCount: 0, width: 0, height: 0, loading: false, error: error.message || String(error) });
+        }
+      }
+    };
+    void render();
+    return () => {
+      cancelled = true;
+    };
+  }, [fileUrl, pageNumber, zoom]);
+
+  const place = (event) => {
+    if (!wrapperRef.current || !renderState.width || !renderState.height) return;
+    const rect = wrapperRef.current.getBoundingClientRect();
+    const x = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
+    const y = Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height));
+    onPlaceBalloon?.({ x, y });
+  };
+
+  return (
+    <div className="inspection-preview-shell">
+      <div className="inspection-preview-stage" onClick={place}>
+        {fileUrl ? (
+          <div
+            ref={wrapperRef}
+            className="inspection-preview-canvas-wrap"
+            style={{ width: renderState.width || undefined, height: renderState.height || undefined }}
+          >
+            <canvas ref={canvasRef} className="inspection-preview-canvas" />
+            {balloons.map((balloon) => (
+              <button
+                key={balloon.id}
+                type="button"
+                className={`inspection-balloon ${balloon.characteristicId === selectedBalloonId ? "selected" : ""}`}
+                style={{ left: `${balloon.x * 100}%`, top: `${balloon.y * 100}%` }}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onSelectBalloon?.(balloon.characteristicId);
+                }}
+              >
+                {balloon.labelText || "?"}
+              </button>
+            ))}
+          </div>
+        ) : (
+          <div className="empty-inline">Attach or upload a PDF drawing to preview and balloon it.</div>
+        )}
+        {renderState.loading ? <div className="inspection-preview-status">Rendering drawing…</div> : null}
+        {renderState.error ? <div className="inspection-preview-status error">{renderState.error}</div> : null}
+      </div>
+      <div className="inspection-preview-meta">
+        <span>{renderState.pageCount ? `Page ${pageNumber} of ${renderState.pageCount}` : "No page loaded"}</span>
+        <span>{Math.round((zoom || 1) * 100)}%</span>
+      </div>
+    </div>
+  );
+}
+
+function PartInspectionScreen({ busy, job, part, instruments, onUpdate, onSaveInspection, onExtract, onGenerateBalloonedPdf }) {
+  const inspection = normalizeInspectionPayload(part.inspection);
+  const [selectedDrawingId, setSelectedDrawingId] = useState(inspection.characteristics.find((item) => item.sourceDrawingDocumentId)?.sourceDrawingDocumentId || "");
+  const [selectedCharacteristicId, setSelectedCharacteristicId] = useState(inspection.characteristics[0]?.id || "");
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pageCount, setPageCount] = useState(1);
+  const [zoom, setZoom] = useState(1.35);
+  const drawings = (part.documents || []).filter((document) => document.active !== false && String(document.fileType || "").toUpperCase() === "PDF");
+  const selectedDrawing = drawings.find((document) => document.id === selectedDrawingId) || drawings[0] || null;
+  const selectedCharacteristic = inspection.characteristics.find((item) => item.id === selectedCharacteristicId) || inspection.characteristics[0] || null;
+  const instrumentOptions = (instruments || []).map((payload) => payload.instrument || payload);
+  const applyInspection = (next) => onUpdate(normalizeInspectionPayload(next));
+  const updateCharacteristic = (characteristicId, patch) => applyInspection({
+    ...inspection,
+    characteristics: inspection.characteristics.map((item) => item.id === characteristicId ? { ...item, ...patch } : item)
+  });
+  const removeCharacteristic = (characteristicId) => applyInspection({
+    ...inspection,
+    characteristics: inspection.characteristics.filter((item) => item.id !== characteristicId),
+    balloons: inspection.balloons.filter((item) => item.characteristicId !== characteristicId),
+    instances: inspection.instances.map((instance) => {
+      const results = { ...(instance.results || {}) };
+      delete results[characteristicId];
+      return { ...instance, results };
+    })
+  });
+  const addCharacteristic = () => {
+    const characteristic = blankInspectionCharacteristic(String(inspection.characteristics.length + 1));
+    applyInspection({ ...inspection, characteristics: [...inspection.characteristics, characteristic] });
+    setSelectedCharacteristicId(characteristic.id);
+  };
+  const addInstance = () => applyInspection({
+    ...inspection,
+    instances: [...inspection.instances, blankInspectionInstance(inspection.instances.length + 1)]
+  });
+  const updateInstance = (instanceId, patch) => applyInspection({
+    ...inspection,
+    instances: inspection.instances.map((item) => item.id === instanceId ? { ...item, ...patch } : item)
+  });
+  const removeInstance = (instanceId) => applyInspection({
+    ...inspection,
+    instances: inspection.instances.filter((item) => item.id !== instanceId)
+  });
+  const updateResult = (instanceId, characteristicId, value) => applyInspection({
+    ...inspection,
+    instances: inspection.instances.map((item) => item.id === instanceId
+      ? { ...item, results: { ...(item.results || {}), [characteristicId]: value } }
+      : item)
+  });
+  useEffect(() => {
+    setCurrentPage(1);
+    setPageCount(1);
+  }, [selectedDrawing?.id]);
+
+  const placeBalloon = ({ x, y }) => {
+    if (!selectedDrawing || !selectedCharacteristic) return;
+    const existing = inspection.balloons.find((item) => item.characteristicId === selectedCharacteristic.id && item.sourceDrawingDocumentId === selectedDrawing.id && Number(item.pageNumber || 1) === currentPage);
+    const balloon = {
+      ...(existing || { id: uid("balloon") }),
+      characteristicId: selectedCharacteristic.id,
+      sourceDrawingDocumentId: selectedDrawing.id,
+      pageNumber: currentPage,
+      x,
+      y,
+      labelText: selectedCharacteristic.number || selectedCharacteristic.label || "?",
+      confidence: existing?.confidence || "",
+      placementSource: "manual"
+    };
+    applyInspection({
+      ...inspection,
+      balloons: existing
+        ? inspection.balloons.map((item) => item.id === existing.id ? balloon : item)
+        : [...inspection.balloons, balloon]
+    });
+  };
+  const acceptReviewItem = (itemId) => {
+    const item = inspection.reviewQueue.find((candidate) => candidate.id === itemId);
+    if (!item) return;
+    applyInspection({
+      ...inspection,
+      characteristics: [...inspection.characteristics, item],
+      reviewQueue: inspection.reviewQueue.filter((candidate) => candidate.id !== itemId)
+    });
+    setSelectedCharacteristicId(item.id);
+  };
+  const rejectReviewItem = (itemId) => applyInspection({
+    ...inspection,
+    reviewQueue: inspection.reviewQueue.filter((candidate) => candidate.id !== itemId)
+  });
+  const drawingUrl = selectedDrawing?.storedPath ? api.assetUrl(selectedDrawing.storedPath) : "";
+  const visibleBalloons = inspection.balloons.filter((balloon) => balloon.sourceDrawingDocumentId === selectedDrawing?.id && Number(balloon.pageNumber || 1) === currentPage);
+
+  return (
+    <div className="workflow-stack inspection-screen">
+      <div className="record-grid inspection-top-grid">
+        <section className="panel">
+          <div className="panel-heading inline">
+            <div>
+              <h3>Inspection Plan</h3>
+              <span>{inspection.characteristics.length} characteristics | {inspection.instances.length} inspected instances</span>
+            </div>
+            <div className="toolbar">
+              <button onClick={addCharacteristic}><Plus size={14} /> Characteristic</button>
+              <button onClick={() => onSaveInspection(inspection)} disabled={busy}>Save Inspection</button>
+            </div>
+          </div>
+          <div className="inspection-characteristic-list">
+            {inspection.characteristics.map((characteristic) => (
+              <div key={characteristic.id} className={`inspection-characteristic-card ${selectedCharacteristic?.id === characteristic.id ? "selected" : ""}`}>
+                <button className="inspection-characteristic-select" onClick={() => setSelectedCharacteristicId(characteristic.id)}>
+                  <strong>{characteristic.number || "?"}</strong>
+                  <span>{characteristic.label || characteristic.type || "Characteristic"}</span>
+                </button>
+                <div className="form-grid compact-4">
+                  <TextField label="Number" value={characteristic.number} onChange={(value) => updateCharacteristic(characteristic.id, { number: value })} />
+                  <TextField label="Label" value={characteristic.label} onChange={(value) => updateCharacteristic(characteristic.id, { label: value })} />
+                  <label className="field">
+                    <span>Type</span>
+                    <select value={characteristic.type || "Dimension"} onChange={(event) => updateCharacteristic(characteristic.id, { type: event.target.value })}>
+                      {["Dimension", "GD&T", "Thread", "Surface Finish", "Note"].map((type) => <option key={type} value={type}>{type}</option>)}
+                    </select>
+                  </label>
+                  <TextField label="Units" value={characteristic.units} onChange={(value) => updateCharacteristic(characteristic.id, { units: value })} />
+                  <TextField label="Nominal" value={characteristic.nominal} onChange={(value) => updateCharacteristic(characteristic.id, { nominal: value })} />
+                  <TextField label="+ Tol" value={characteristic.plusTolerance} onChange={(value) => updateCharacteristic(characteristic.id, { plusTolerance: value, toleranceType: "plusMinus" })} />
+                  <TextField label="- Tol" value={characteristic.minusTolerance} onChange={(value) => updateCharacteristic(characteristic.id, { minusTolerance: value, toleranceType: "plusMinus" })} />
+                  <TextField label="GD&T / Datums" value={[characteristic.gdTolerance, characteristic.datums].filter(Boolean).join(" | ")} onChange={(value) => updateCharacteristic(characteristic.id, { gdTolerance: value, toleranceType: "gdandt" })} />
+                  <TextField label="Lower Limit" value={characteristic.lowerLimit} onChange={(value) => updateCharacteristic(characteristic.id, { lowerLimit: value, toleranceType: "limits" })} />
+                  <TextField label="Upper Limit" value={characteristic.upperLimit} onChange={(value) => updateCharacteristic(characteristic.id, { upperLimit: value, toleranceType: "limits" })} />
+                  <label className="field">
+                    <span>Measuring Tool</span>
+                    <select value={characteristic.gageId || ""} onChange={(event) => updateCharacteristic(characteristic.id, { gageId: event.target.value })}>
+                      <option value="">No linked gage</option>
+                      {instrumentOptions.map((instrument) => <option key={instrument.instrument_id} value={instrument.instrument_id}>{instrument.tool_name || instrument.instrument_id}</option>)}
+                    </select>
+                  </label>
+                  <TextField label="Tool Fallback" value={characteristic.gageText} onChange={(value) => updateCharacteristic(characteristic.id, { gageText: value })} />
+                </div>
+                <TextArea label="Inspection Notes" value={characteristic.notes || ""} onChange={(value) => updateCharacteristic(characteristic.id, { notes: value })} rows={2} />
+                <div className="toolbar">
+                  <button className="danger subtle" onClick={() => removeCharacteristic(characteristic.id)}><X size={14} /> Remove</button>
+                </div>
+              </div>
+            ))}
+            {!inspection.characteristics.length && <div className="empty-inline">No inspection characteristics yet. Add one manually or extract from a drawing.</div>}
+          </div>
+        </section>
+
+        <section className="panel">
+          <div className="panel-heading inline">
+            <div>
+              <h3>Drawing Balloons</h3>
+              <span>Select a characteristic, then click the drawing preview to place its balloon.</span>
+            </div>
+            <div className="toolbar">
+              <button onClick={() => onExtract({ upload: true })} disabled={busy}>Upload + AI Extract</button>
+              <button onClick={() => selectedDrawing && onExtract({ documentId: selectedDrawing.id })} disabled={busy || !selectedDrawing}>AI Extract</button>
+              <button onClick={() => selectedDrawing && onGenerateBalloonedPdf(selectedDrawing.id)} disabled={busy || !selectedDrawing}>Ballooned PDF</button>
+            </div>
+          </div>
+          <div className="form-grid compact-2">
+            <label className="field">
+              <span>PDF Drawing</span>
+              <select value={selectedDrawing?.id || ""} onChange={(event) => setSelectedDrawingId(event.target.value)}>
+                {!drawings.length && <option value="">No PDF drawings attached</option>}
+                {drawings.map((document) => <option key={document.id} value={document.id}>{document.originalFilename}</option>)}
+              </select>
+            </label>
+            <label className="field">
+              <span>Selected Balloon</span>
+              <select value={selectedCharacteristic?.id || ""} onChange={(event) => setSelectedCharacteristicId(event.target.value)}>
+                {!inspection.characteristics.length && <option value="">No characteristics</option>}
+                {inspection.characteristics.map((characteristic) => <option key={characteristic.id} value={characteristic.id}>{characteristic.number || "?"} - {characteristic.label || characteristic.type}</option>)}
+              </select>
+            </label>
+          </div>
+          <div className="inspection-preview-toolbar">
+            <button onClick={() => setCurrentPage((current) => Math.max(1, current - 1))} disabled={!selectedDrawing || currentPage <= 1}>Prev Page</button>
+            <span>Page {currentPage}</span>
+            <button onClick={() => setCurrentPage((current) => Math.min(pageCount, current + 1))} disabled={!selectedDrawing || currentPage >= pageCount}>Next Page</button>
+            <button onClick={() => setZoom((current) => Math.max(0.6, Number((current - 0.15).toFixed(2))))} disabled={!selectedDrawing}>-</button>
+            <span>{Math.round(zoom * 100)}%</span>
+            <button onClick={() => setZoom((current) => Math.min(3, Number((current + 0.15).toFixed(2))))} disabled={!selectedDrawing}>+</button>
+            <button onClick={() => setZoom(1.35)} disabled={!selectedDrawing}>Reset View</button>
+          </div>
+          <PdfPagePreview
+            fileUrl={drawingUrl}
+            pageNumber={currentPage}
+            zoom={zoom}
+            balloons={visibleBalloons}
+            selectedBalloonId={selectedCharacteristic?.id || ""}
+            onSelectBalloon={setSelectedCharacteristicId}
+            onPlaceBalloon={placeBalloon}
+            onDocumentMeta={({ pageCount: nextPageCount, safePageNumber }) => {
+              setPageCount(nextPageCount || 1);
+              if (safePageNumber !== currentPage) {
+                setCurrentPage(safePageNumber);
+              }
+            }}
+          />
+          {inspection.reviewQueue.length ? (
+            <div className="subpanel top-gap">
+              <div className="subpanel-header">
+                <div>
+                  <h4>AI Review Queue</h4>
+                  <span>{inspection.reviewQueue.length} uncertain dimensions</span>
+                </div>
+              </div>
+              <div className="record-list">
+                {inspection.reviewQueue.map((item) => (
+                  <div key={item.id} className="inline-card">
+                    <strong>{item.number} - {item.label || item.type}</strong>
+                    <span>{[item.nominal, item.units, item.gdTolerance || `${item.plusTolerance || ""}/${item.minusTolerance || ""}`].filter(Boolean).join(" ")}</span>
+                    <div className="tiny-toolbar">
+                      <button onClick={() => acceptReviewItem(item.id)}>Accept</button>
+                      <button className="danger subtle" onClick={() => rejectReviewItem(item.id)}>Reject</button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
+        </section>
+      </div>
+
+      <section className="panel">
+        <div className="panel-heading inline">
+          <div>
+            <h3>Inspected Parts</h3>
+            <span>Record one measured value per characteristic and part instance.</span>
+          </div>
+          <button onClick={addInstance}><Plus size={14} /> Instance</button>
+        </div>
+        <div className="inspection-results-table-wrap">
+          <table className="print-table inspection-results-table">
+            <thead>
+              <tr>
+                <th>Instance</th>
+                <th>Inspector</th>
+                <th>Date</th>
+                {inspection.characteristics.map((characteristic) => <th key={characteristic.id}>{characteristic.number || "?"}</th>)}
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {inspection.instances.map((instance) => (
+                <tr key={instance.id}>
+                  <td><input value={instance.label || ""} onChange={(event) => updateInstance(instance.id, { label: event.target.value })} /></td>
+                  <td><input value={instance.inspector || ""} onChange={(event) => updateInstance(instance.id, { inspector: event.target.value })} /></td>
+                  <td><input type="date" value={String(instance.inspectedAt || "").slice(0, 10)} onChange={(event) => updateInstance(instance.id, { inspectedAt: event.target.value })} /></td>
+                  {inspection.characteristics.map((characteristic) => {
+                    const value = instance.results?.[characteristic.id] || "";
+                    const status = inspectionResultStatus(characteristic, value);
+                    return (
+                      <td key={`${instance.id}-${characteristic.id}`}>
+                        <input value={value} onChange={(event) => updateResult(instance.id, characteristic.id, event.target.value)} placeholder={characteristic.type === "GD&T" ? "Pass/Fail" : "Value"} />
+                        {status ? <span className={`inspection-result-chip ${status.toLowerCase()}`}>{status}</span> : null}
+                      </td>
+                    );
+                  })}
+                  <td><button className="danger subtle square" onClick={() => removeInstance(instance.id)}><X size={13} /></button></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {!inspection.instances.length && <div className="empty-inline">No inspected part instances yet.</div>}
+        </div>
+      </section>
     </div>
   );
 }
@@ -7037,6 +7595,123 @@ function TravelerPrintPacket({ jobId }) {
             </div>
         </React.Fragment>
       ))}
+    </div>
+  );
+}
+
+function PrintInspectionReport({ jobId, partId }) {
+  const [payload, setPayload] = useState(null);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    api.loadJob(jobId).then((job) => {
+      const part = job?.parts?.find((item) => item.id === partId);
+      setPayload({ job, part, inspection: normalizeInspectionPayload(part?.inspection) });
+    }).catch((err) => setError(err.message || String(err)));
+  }, [jobId, partId]);
+  if (error) return <Fatal title="Inspection Print Error" message={error} />;
+  if (!payload) return <LoadingScreen message="Preparing inspection report..." />;
+  const { job, part, inspection } = payload;
+  const characteristicMap = new Map(inspection.characteristics.map((item) => [item.id, item]));
+  return (
+    <div className="print-shell inspection-print-shell inspection-print-ready">
+      <section className="print-page inspection-report-page">
+        <header className="inspection-report-header">
+          <div>
+            <span>Inspection Results</span>
+            <h1>{part.partNumber || part.partName || "Part"}</h1>
+            <p>{part.partName || ""}</p>
+          </div>
+          <div className="inspection-report-job">
+            <strong>{job.jobNumber || job.id}</strong>
+            <span>{job.customer || "No customer"}</span>
+          </div>
+        </header>
+        <div className="traveler-fact-grid traveler-job-grid">
+          <PrintField label="Quantity" value={part.quantity} compact />
+          <PrintField label="Revision" value={part.revision?.number} compact />
+          <PrintField label="Material" value={part.materialSpec || part.customMaterialText} compact />
+          <PrintField label="Characteristics" value={inspection.characteristics.length} compact />
+        </div>
+        <section className="inspection-print-section">
+          <h2>Characteristics</h2>
+          <table className="print-table compact">
+            <thead>
+              <tr><th>#</th><th>Requirement</th><th>Nominal</th><th>Tolerance / GD&T</th><th>Tool</th></tr>
+            </thead>
+            <tbody>
+              {inspection.characteristics.map((item) => (
+                <tr key={item.id}>
+                  <td>{item.number}</td>
+                  <td>{item.label || item.type}</td>
+                  <td>{[item.nominal, item.units].filter(Boolean).join(" ")}</td>
+                  <td>{item.gdTolerance || (item.toleranceType === "limits" ? `${item.lowerLimit || "-"} to ${item.upperLimit || "-"}` : `+${item.plusTolerance || "-"} / -${item.minusTolerance || item.plusTolerance || "-"}`)}</td>
+                  <td>{item.gageText || item.gageId || "-"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </section>
+        <section className="inspection-print-section">
+          <h2>Measured Instances</h2>
+          <table className="print-table compact">
+            <thead>
+              <tr>
+                <th>Instance</th><th>Inspector</th><th>Date</th>
+                {inspection.characteristics.map((item) => <th key={item.id}>{item.number}</th>)}
+              </tr>
+            </thead>
+            <tbody>
+              {inspection.instances.map((instance) => (
+                <tr key={instance.id}>
+                  <td>{instance.label}</td>
+                  <td>{instance.inspector || "-"}</td>
+                  <td>{String(instance.inspectedAt || "").slice(0, 10)}</td>
+                  {inspection.characteristics.map((characteristic) => {
+                    const value = instance.results?.[characteristic.id] || "";
+                    const status = inspectionResultStatus(characteristicMap.get(characteristic.id), value);
+                    return <td key={`${instance.id}-${characteristic.id}`}>{value || "-"} {status ? `(${status})` : ""}</td>;
+                  })}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </section>
+      </section>
+    </div>
+  );
+}
+
+function PrintBalloonedDrawing({ jobId, partId, drawingDocumentId }) {
+  const [payload, setPayload] = useState(null);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    api.loadJob(jobId).then((job) => {
+      const part = job?.parts?.find((item) => item.id === partId);
+      const document = part?.documents?.find((item) => item.id === drawingDocumentId);
+      setPayload({ job, part, document, inspection: normalizeInspectionPayload(part?.inspection) });
+    }).catch((err) => setError(err.message || String(err)));
+  }, [jobId, partId, drawingDocumentId]);
+  if (error) return <Fatal title="Ballooned Drawing Error" message={error} />;
+  if (!payload) return <LoadingScreen message="Preparing ballooned drawing..." />;
+  const { part, document, inspection } = payload;
+  const balloons = inspection.balloons.filter((item) => item.sourceDrawingDocumentId === drawingDocumentId);
+  const drawingUrl = document?.storedPath ? api.assetUrl(document.storedPath) : "";
+  return (
+    <div className="print-shell balloon-print-shell balloon-print-ready">
+      <section className="print-page balloon-print-page">
+        <div className="balloon-print-title">
+          <strong>{part.partNumber || part.partName || "Part"}</strong>
+          <span>{document?.originalFilename || "Drawing"}</span>
+        </div>
+        <div className="balloon-print-canvas">
+          {drawingUrl ? <embed src={drawingUrl} type="application/pdf" /> : null}
+          {balloons.map((balloon) => (
+            <div key={balloon.id} className="inspection-balloon print" style={{ left: `${balloon.x * 100}%`, top: `${balloon.y * 100}%` }}>
+              {balloon.labelText || "?"}
+            </div>
+          ))}
+        </div>
+      </section>
     </div>
   );
 }

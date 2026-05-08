@@ -206,6 +206,10 @@ ipcMain.handle("revise-job-document", (_event, jobId, documentId) => backend.rev
 ipcMain.handle("revise-part-document", (_event, jobId, partId, documentId) => backend.revisePartDocument(jobId, partId, documentId, mainWindow));
 ipcMain.handle("choose-operation-images", (_event, jobId, partId, operationId) => backend.chooseOperationImages(jobId, partId, operationId, mainWindow));
   ipcMain.handle("export-job-pdf", (_event, jobId, destinationPath) => backend.exportJobPdf(jobId, destinationPath));
+  ipcMain.handle("save-part-inspection", (_event, jobId, partId, inspection) => backend.savePartInspection(jobId, partId, inspection));
+  ipcMain.handle("extract-part-inspection-from-drawing", (_event, jobId, partId, source) => backend.extractPartInspectionFromDrawing(jobId, partId, source || {}, mainWindow));
+  ipcMain.handle("generate-part-ballooned-drawing-pdf", (_event, jobId, partId, drawingDocumentId) => backend.generatePartBalloonedDrawingPdf(jobId, partId, drawingDocumentId));
+  ipcMain.handle("export-part-inspection-pdf", (_event, jobId, partId, destinationPath) => backend.exportPartInspectionPdf(jobId, partId, destinationPath));
 
   ipcMain.handle("list-materials", () => backend.listMaterials());
   ipcMain.handle("load-material", (_event, id, options) => backend.loadMaterial(id, options || {}));
