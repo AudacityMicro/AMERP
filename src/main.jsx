@@ -16,8 +16,10 @@ import {
   Library,
   Package,
   Plus,
+  RotateCcw,
   Settings,
   ShieldAlert,
+  SearchCheck,
   Trash2,
   X
 } from "lucide-react";
@@ -28,6 +30,7 @@ GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
 const PRIMARY_MODULES = [
   { id: "jobs", label: "Jobs", icon: Package },
+  { id: "inspections", label: "Inspections", icon: SearchCheck },
   { id: "nonconformance", label: "Nonconformance", icon: ShieldAlert },
   { id: "kanban", label: "Kanban", icon: ClipboardList },
   { id: "materials", label: "Materials", icon: Database },
@@ -38,6 +41,22 @@ const normalizeEnabledModules = (value = {}) => Object.fromEntries(PRIMARY_MODUL
   Object.prototype.hasOwnProperty.call(value || {}, module.id) ? Boolean(value[module.id]) : true
 ]));
 const firstEnabledModuleId = (enabledModules) => PRIMARY_MODULES.find((module) => enabledModules[module.id])?.id || "settings";
+const INSPECTION_REPORT_EXPORT_OPTION_DEFINITIONS = [
+  ["includeBalloonedDrawing", "Ballooned drawing page"],
+  ["includeReportControl", "Report control fields"],
+  ["includeTraceability", "Traceability block"],
+  ["includeCharacteristics", "Characteristic table"],
+  ["includeMeasuredInstances", "Measured instances"],
+  ["includeReleaseSummary", "Release summary"],
+  ["includeNcrLinks", "Related NCRs"],
+  ["includeMaterialCerts", "Material certs"],
+  ["includeXBarCharts", "X-bar charts"],
+  ["includeToolCertificationHistory", "Tool certification history"]
+];
+const defaultInspectionReportExportOptions = (value = {}) => Object.fromEntries(INSPECTION_REPORT_EXPORT_OPTION_DEFINITIONS.map(([key]) => [
+  key,
+  Object.prototype.hasOwnProperty.call(value || {}, key) ? Boolean(value[key]) : true
+]));
 
 const nowIso = () => new Date().toISOString();
 const today = () => new Date().toISOString().slice(0, 10);
@@ -146,6 +165,8 @@ const blankInspectionCharacteristic = (number = "") => ({
   id: uid("characteristic"),
   number,
   type: "Dimension",
+  description: "",
+  requirementDescription: "",
   nominal: "",
   toleranceType: "plusMinus",
   plusTolerance: "",
@@ -154,6 +175,10 @@ const blankInspectionCharacteristic = (number = "") => ({
   upperLimit: "",
   gdTolerance: "",
   gageId: "",
+  inspectionMethod: "",
+  calibrationDueDate: "",
+  criticalCharacteristic: false,
+  notes: "",
   sourceDrawingDocumentId: "",
   confidence: "",
   active: true
@@ -162,10 +187,71 @@ const blankInspectionCharacteristic = (number = "") => ({
 const blankInspectionInstance = (index = 1, inspector = "") => ({
   id: uid("inspection-instance"),
   label: `Part ${index}`,
+  serialNumber: "",
   inspector,
   inspectedAt: nowIso(),
+  inspectedTime: "",
   status: "Open",
+  measurementNotes: "",
   results: {}
+});
+
+const blankInspectionReport = (defaults = {}) => ({
+  id: uid("inspection-report"),
+  reportId: defaults.reportId || "",
+  status: defaults.status || "Draft",
+  finalResult: defaults.finalResult || "Pending",
+  generatedAt: defaults.generatedAt || nowIso(),
+  generatedBy: defaults.generatedBy || "",
+  releasedBy: defaults.releasedBy || "",
+  releasedAt: defaults.releasedAt || "",
+  voidedBy: defaults.voidedBy || "",
+  voidedAt: defaults.voidedAt || "",
+  voidReason: defaults.voidReason || "",
+  traceability: {
+    customer: defaults.traceability?.customer || "",
+    customerPoNumber: defaults.traceability?.customerPoNumber || "",
+    internalJobNumber: defaults.traceability?.internalJobNumber || "",
+    salesOrderQuoteNumber: defaults.traceability?.salesOrderQuoteNumber || "",
+    partNumber: defaults.traceability?.partNumber || "",
+    partName: defaults.traceability?.partName || "",
+    partRevision: defaults.traceability?.partRevision || "",
+    drawingNumber: defaults.traceability?.drawingNumber || "",
+    drawingRevision: defaults.traceability?.drawingRevision || "",
+    drawingFileName: defaults.traceability?.drawingFileName || "",
+    modelFileName: defaults.traceability?.modelFileName || "",
+    modelRevision: defaults.traceability?.modelRevision || "",
+    material: defaults.traceability?.material || "",
+    lotBatchSerialNumber: defaults.traceability?.lotBatchSerialNumber || ""
+  },
+  inspectionContext: {
+    inspectionType: defaults.inspectionContext?.inspectionType || "In-Process",
+    samplingPlan: defaults.inspectionContext?.samplingPlan || "100% Inspection",
+    inspectionPlanRevision: defaults.inspectionContext?.inspectionPlanRevision || "",
+    notes: defaults.inspectionContext?.notes || "",
+    deviations: defaults.inspectionContext?.deviations || "",
+    exceptions: defaults.inspectionContext?.exceptions || ""
+  },
+  quantitySummary: {
+    quantityOrdered: defaults.quantitySummary?.quantityOrdered || "",
+    quantityInspected: defaults.quantitySummary?.quantityInspected || "",
+    quantityAccepted: defaults.quantitySummary?.quantityAccepted || "",
+    quantityRejected: defaults.quantitySummary?.quantityRejected || ""
+  },
+  relatedNcrNumbers: Array.isArray(defaults.relatedNcrNumbers) ? defaults.relatedNcrNumbers : [],
+  ncrRequired: defaults.ncrRequired || "No",
+  ncrJustification: defaults.ncrJustification || "",
+  gageExceptionNote: defaults.gageExceptionNote || "",
+  snapshot: {
+    units: defaults.snapshot?.units || defaults.units || "in",
+    balloonedDocumentId: defaults.snapshot?.balloonedDocumentId || "",
+    characteristics: Array.isArray(defaults.snapshot?.characteristics) ? defaults.snapshot.characteristics : [],
+    instances: Array.isArray(defaults.snapshot?.instances) ? defaults.snapshot.instances : []
+  },
+  auditLog: Array.isArray(defaults.auditLog) ? defaults.auditLog : [],
+  versionNumber: Number(defaults.versionNumber || 1) || 1,
+  createdAt: defaults.createdAt || nowIso(),
+  updatedAt: defaults.updatedAt || nowIso()
 });
 
 const blankInspection = () => ({
@@ -174,7 +260,9 @@ const blankInspection = () => ({
   instances: [],
   balloons: [],
   extractionRuns: [],
-  reviewQueue: []
+  reviewQueue: [],
+  reports: [],
+  activeReportId: ""
 });
 
 function renumberInspectionPayload(inspection) {
@@ -194,6 +282,20 @@ function renumberInspectionPayload(inspection) {
     balloons: (inspection?.balloons || []).map((balloon) => ({
       ...balloon,
       labelText: characteristicNumberMap.get(balloon.characteristicId) || balloon.labelText || "?"
+    })),
+    reports: (inspection?.reports || []).map((report) => ({
+      ...report,
+      snapshot: {
+        ...(report?.snapshot || {}),
+        characteristics: (report?.snapshot?.characteristics || []).map((item, index) => ({
+          ...item,
+          number: String(index + 1)
+        })),
+        instances: (report?.snapshot?.instances || []).map((item, index) => ({
+          ...item,
+          label: `Part ${index + 1}`
+        }))
+      }
     }))
   };
 }
@@ -247,30 +349,232 @@ const blankNonconformance = (seed = {}) => ({
   id: uid("ncr"),
   ncrNumber: "",
   status: "Open",
+  severity: "Minor",
+  source: "",
   jobId: seed.jobId || "",
   jobNumber: seed.jobNumber || "",
+  customer: seed.customer || "",
+  customerPoNumber: "",
+  internalJobNumber: seed.jobNumber || "",
+  salesOrderQuoteNumber: "",
   partId: seed.partId || "",
   partNumber: seed.partNumber || "",
   partName: seed.partName || "",
+  partRevision: seed.partRevision || "",
+  drawingRevision: "",
+  modelRevision: "",
+  operationNumber: "",
+  supplierResponsible: "",
+  lotBatchSerialNumber: "",
+  quantityMade: "",
+  quantityInspected: "",
+  quantityAccepted: "",
+  quantityRejected: "",
   inspectionCharacteristicId: "",
   inspectionInstanceId: "",
   reportedAt: nowIso(),
   reportedBy: "",
+  owner: "",
+  dueDate: "",
+  closureDate: "",
+  closedBy: "",
   quantityAffected: "",
   issueSummary: "",
   issueDescription: "",
+  requirementViolated: "",
+  actualConditionFound: "",
+  detectionMethod: "",
+  inspectionEquipmentId: "",
+  inspectionRecordReference: "",
+  relatedCharacteristicNumber: "",
+  units: "",
+  nonconformanceDescription: "",
+  immediateRisk: "",
+  productShipped: "No",
+  customerNotificationRequired: "No",
+  customerApprovalRequired: "No",
+  customerNotificationDate: "",
+  customerApprovalReference: "",
+  customerApprovalOverrideReason: "",
   containmentAction: "",
+  containmentDate: "",
+  containmentBy: "",
+  containmentVerifiedBy: "",
+  containmentNotes: "",
   disposition: "",
-  owner: "",
-  dueDate: "",
+  correctionTaken: "",
+  dispositionApprovedBy: "",
+  dispositionDate: "",
+  reworkInstructions: "",
+  reinspectionRequired: "No",
+  reinspectionResult: "Not Required",
+  rootCauseRequired: "Yes",
+  rootCause: "",
+  rootCauseCategory: "",
+  rootCauseJustification: "",
+  correctiveActionRequired: "Yes",
+  correctiveActionTaken: "",
+  correctiveActionOwner: "",
+  correctiveActionDueDate: "",
+  correctiveActionCompletedDate: "",
+  correctiveActionVerifiedBy: "",
+  correctiveActionJustification: "",
+  effectivenessVerificationMethod: "",
+  effectivenessVerificationResult: "Pending",
+  effectivenessVerificationDate: "",
   closureNotes: "",
-  rootCauseNotes: "",
+  closureApproval: "",
+  cancellationReason: "",
+  reopenReason: "",
+  createdBy: "",
   active: true,
   archivedAt: "",
   updatedAt: nowIso(),
   attachments: [],
+  auditLog: [],
   inspectionContext: null
 });
+
+const NCR_YES_NO_OPTIONS = ["No", "Yes"];
+const NCR_REINSPECTION_RESULT_OPTIONS = ["Pass", "Fail", "Not Required"];
+const NCR_QUICK_TEMPLATES = [
+  {
+    id: "oversize-dimension",
+    label: "Oversize dimension",
+    patch: {
+      issueSummary: "Oversize dimension",
+      source: "Internal Inspection",
+      severity: "Minor",
+      detectionMethod: "Micrometer",
+      nonconformanceDescription: "Feature exceeds the allowed size limit.",
+      immediateRisk: "Part may not assemble or may violate print requirements.",
+      requirementViolated: "Specified dimension upper limit exceeded.",
+      actualConditionFound: "Measured dimension is above the allowed upper limit."
+    }
+  },
+  {
+    id: "undersize-dimension",
+    label: "Undersize dimension",
+    patch: {
+      issueSummary: "Undersize dimension",
+      source: "Internal Inspection",
+      severity: "Minor",
+      detectionMethod: "Micrometer",
+      nonconformanceDescription: "Feature is below the minimum allowed size.",
+      immediateRisk: "Part may be loose, leak, or fail fit requirements.",
+      requirementViolated: "Specified dimension lower limit not met.",
+      actualConditionFound: "Measured dimension is below the allowed lower limit."
+    }
+  },
+  {
+    id: "wrong-finish",
+    label: "Wrong finish",
+    patch: {
+      issueSummary: "Wrong finish",
+      source: "Final Inspection",
+      severity: "Minor",
+      detectionMethod: "Visual",
+      nonconformanceDescription: "Part finish does not match drawing or PO requirements.",
+      immediateRisk: "Appearance, corrosion resistance, or downstream process could be affected."
+    }
+  },
+  {
+    id: "wrong-material",
+    label: "Wrong material",
+    patch: {
+      issueSummary: "Wrong material",
+      source: "Receiving Inspection",
+      severity: "Critical",
+      detectionMethod: "Visual",
+      nonconformanceDescription: "Material does not match the required specification.",
+      immediateRisk: "Part may fail functional, certification, or customer requirements."
+    }
+  },
+  {
+    id: "missing-feature",
+    label: "Missing feature",
+    patch: {
+      issueSummary: "Missing feature",
+      source: "In-Process Inspection",
+      severity: "Major",
+      detectionMethod: "Visual",
+      nonconformanceDescription: "Required machined or formed feature is missing.",
+      immediateRisk: "Part may be unusable or require remake."
+    }
+  },
+  {
+    id: "extra-feature",
+    label: "Extra feature",
+    patch: {
+      issueSummary: "Extra feature",
+      source: "In-Process Inspection",
+      severity: "Major",
+      detectionMethod: "Visual",
+      nonconformanceDescription: "Unexpected or unapproved feature was created on the part.",
+      immediateRisk: "Part may violate print or customer intent."
+    }
+  },
+  {
+    id: "wrong-thread",
+    label: "Wrong thread",
+    patch: {
+      issueSummary: "Wrong thread",
+      source: "Final Inspection",
+      severity: "Major",
+      detectionMethod: "Thread Gage",
+      nonconformanceDescription: "Thread form or size does not match the specified requirement.",
+      immediateRisk: "Part may not assemble or may fail in service."
+    }
+  },
+  {
+    id: "burrs-sharp-edges",
+    label: "Burrs / sharp edges",
+    patch: {
+      issueSummary: "Burrs / sharp edges",
+      source: "Final Inspection",
+      severity: "Minor",
+      detectionMethod: "Visual",
+      nonconformanceDescription: "Part contains burrs or sharp edges beyond acceptable condition.",
+      immediateRisk: "Handling hazard or assembly interference may occur."
+    }
+  },
+  {
+    id: "cosmetic-damage",
+    label: "Cosmetic damage",
+    patch: {
+      issueSummary: "Cosmetic damage",
+      source: "Final Inspection",
+      severity: "Minor",
+      detectionMethod: "Visual",
+      nonconformanceDescription: "Part has cosmetic damage such as scratches, dents, or stains.",
+      immediateRisk: "Customer acceptance could be affected."
+    }
+  },
+  {
+    id: "shipping-damage",
+    label: "Shipping damage",
+    patch: {
+      issueSummary: "Shipping damage",
+      source: "Customer Complaint",
+      severity: "Major",
+      detectionMethod: "Customer Report",
+      nonconformanceDescription: "Part or package was damaged during shipping or handling.",
+      immediateRisk: "Delivered product may be unusable or rejected."
+    }
+  },
+  {
+    id: "documentation-issue",
+    label: "Documentation issue",
+    patch: {
+      issueSummary: "Documentation issue",
+      source: "Other",
+      severity: "Minor",
+      detectionMethod: "Visual",
+      nonconformanceDescription: "Traveler, drawing, cert, or related documentation is incorrect or incomplete.",
+      immediateRisk: "Traceability or process execution may be compromised."
+    }
+  }
+];
 
 const blankInstrumentPayload = () => ({
   instrument: {
@@ -695,13 +999,104 @@ function toolHeading(tool, index) {
 }
 
 function normalizeInspectionPayload(inspection) {
+  const normalizeResult = (value) => {
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      return {
+        value: String(value?.value || "").trim(),
+        passFail: String(value?.passFail || "").trim(),
+        gageId: String(value?.gageId || "").trim(),
+        notes: String(value?.notes || "").trim()
+      };
+    }
+    return {
+      value: String(value || "").trim(),
+      passFail: "",
+      gageId: "",
+      notes: ""
+    };
+  };
+  const normalizeCharacteristic = (item, index) => ({
+    ...blankInspectionCharacteristic(String(item?.number || index + 1)),
+    ...item,
+    number: String(item?.number || index + 1).trim(),
+    type: String(item?.type || "Dimension").trim(),
+    requirementDescription: String(item?.requirementDescription || item?.description || item?.type || "").trim(),
+    description: String(item?.description || item?.requirementDescription || "").trim(),
+    units: String(item?.units || inspection?.units || "in").trim() || "in",
+    nominal: String(item?.nominal || "").trim(),
+    plusTolerance: String(item?.plusTolerance || "").trim(),
+    minusTolerance: String(item?.minusTolerance || "").trim(),
+    lowerLimit: String(item?.lowerLimit || "").trim(),
+    upperLimit: String(item?.upperLimit || "").trim(),
+    gageId: String(item?.gageId || "").trim(),
+    inspectionMethod: String(item?.inspectionMethod || "").trim(),
+    calibrationDueDate: String(item?.calibrationDueDate || "").trim(),
+    notes: String(item?.notes || "").trim(),
+    criticalCharacteristic: item?.criticalCharacteristic === true || String(item?.criticalCharacteristic || "").trim() === "Yes"
+  });
+  const normalizeInstance = (item, index) => ({
+    ...blankInspectionInstance(index + 1, item?.inspector || ""),
+    ...item,
+    label: String(item?.label || `Part ${index + 1}`).trim(),
+    serialNumber: String(item?.serialNumber || "").trim(),
+    inspector: String(item?.inspector || "").trim(),
+    inspectedAt: String(item?.inspectedAt || nowIso()).trim(),
+    inspectedTime: String(item?.inspectedTime || "").trim(),
+    measurementNotes: String(item?.measurementNotes || "").trim(),
+    results: Object.fromEntries(Object.entries(item?.results || {}).map(([key, value]) => [key, normalizeResult(value)]))
+  });
+  const normalizeAuditEntry = (entry) => ({
+    id: entry?.id || uid("inspection-audit"),
+    eventType: String(entry?.eventType || "updated").trim(),
+    message: String(entry?.message || "").trim(),
+    changedBy: String(entry?.changedBy || "").trim(),
+    changedAt: String(entry?.changedAt || nowIso()).trim(),
+    changedFields: Array.isArray(entry?.changedFields) ? entry.changedFields.map((field) => String(field || "").trim()).filter(Boolean) : []
+  });
+  const normalizeReport = (report, index) => {
+    const normalized = blankInspectionReport(report || {});
+    return {
+      ...normalized,
+      ...report,
+      reportId: String(report?.reportId || "").trim(),
+      status: String(report?.status || "Draft").trim() || "Draft",
+      finalResult: String(report?.finalResult || "Pending").trim() || "Pending",
+      generatedAt: String(report?.generatedAt || normalized.generatedAt).trim(),
+      generatedBy: String(report?.generatedBy || "").trim(),
+      releasedBy: String(report?.releasedBy || "").trim(),
+      releasedAt: String(report?.releasedAt || "").trim(),
+      voidedBy: String(report?.voidedBy || "").trim(),
+      voidedAt: String(report?.voidedAt || "").trim(),
+      voidReason: String(report?.voidReason || "").trim(),
+      traceability: { ...normalized.traceability, ...(report?.traceability || {}) },
+      inspectionContext: { ...normalized.inspectionContext, ...(report?.inspectionContext || {}) },
+      quantitySummary: { ...normalized.quantitySummary, ...(report?.quantitySummary || {}) },
+      relatedNcrNumbers: Array.isArray(report?.relatedNcrNumbers) ? report.relatedNcrNumbers.map((value) => String(value || "").trim()).filter(Boolean) : [],
+      ncrRequired: String(report?.ncrRequired || normalized.ncrRequired).trim() || "No",
+      ncrJustification: String(report?.ncrJustification || "").trim(),
+      gageExceptionNote: String(report?.gageExceptionNote || "").trim(),
+      snapshot: {
+        units: String(report?.snapshot?.units || inspection?.units || normalized.snapshot.units || "in").trim() || "in",
+        balloonedDocumentId: String(report?.snapshot?.balloonedDocumentId || "").trim(),
+        characteristics: (Array.isArray(report?.snapshot?.characteristics) ? report.snapshot.characteristics : []).map(normalizeCharacteristic),
+        instances: (Array.isArray(report?.snapshot?.instances) ? report.snapshot.instances : []).map(normalizeInstance)
+      },
+      auditLog: (Array.isArray(report?.auditLog) ? report.auditLog : []).map(normalizeAuditEntry),
+      versionNumber: Number(report?.versionNumber || index + 1) || index + 1,
+      createdAt: String(report?.createdAt || normalized.createdAt).trim(),
+      updatedAt: String(report?.updatedAt || report?.generatedAt || normalized.updatedAt).trim()
+    };
+  };
+  const reports = (Array.isArray(inspection?.reports) ? inspection.reports : []).map(normalizeReport);
   return {
     units: String(inspection?.units || "in").trim() || "in",
-    characteristics: Array.isArray(inspection?.characteristics) ? inspection.characteristics : [],
-    instances: Array.isArray(inspection?.instances) ? inspection.instances : [],
+    characteristics: (Array.isArray(inspection?.characteristics) ? inspection.characteristics : []).map(normalizeCharacteristic),
+    instances: (Array.isArray(inspection?.instances) ? inspection.instances : []).map(normalizeInstance),
     balloons: Array.isArray(inspection?.balloons) ? inspection.balloons : [],
     extractionRuns: Array.isArray(inspection?.extractionRuns) ? inspection.extractionRuns : [],
-    reviewQueue: Array.isArray(inspection?.reviewQueue) ? inspection.reviewQueue : []
+    reviewQueue: (Array.isArray(inspection?.reviewQueue) ? inspection.reviewQueue : []).map(normalizeCharacteristic),
+    reports,
+    activeReportId: reports.some((report) => report.id === inspection?.activeReportId) ? String(inspection.activeReportId || "").trim() : (reports[0]?.id || "")
   };
 }
 
@@ -726,7 +1121,12 @@ function characteristicLimits(characteristic) {
 }
 
 function inspectionResultStatus(characteristic, value) {
-  const result = String(value || "").trim();
+  const rawValue = value && typeof value === "object" && !Array.isArray(value) ? value.value : value;
+  const explicit = value && typeof value === "object" && !Array.isArray(value) ? String(value.passFail || "").trim().toLowerCase() : "";
+  if (explicit === "pass" || explicit === "fail") {
+    return explicit === "pass" ? "Pass" : "Fail";
+  }
+  const result = String(rawValue || "").trim();
   if (!result) return "";
   if (["pass", "fail"].includes(result.toLowerCase())) {
     return result.toLowerCase() === "pass" ? "Pass" : "Fail";
@@ -819,6 +1219,10 @@ function measurementToolLabel(characteristic, instrumentOptions) {
   return match?.toolName || characteristic.gageId;
 }
 
+function measurementToolIdLabel(characteristic) {
+  return String(characteristic?.gageId || "").trim() || "N/A";
+}
+
 function latestBalloonedDrawingDocument(part) {
   const candidates = (part?.documents || [])
     .filter((document) =>
@@ -832,6 +1236,257 @@ function latestBalloonedDrawingDocument(part) {
       return rightTime - leftTime;
     });
   return candidates[0] || null;
+}
+
+function activeInspectionReport(inspection) {
+  const reports = inspection?.reports || [];
+  return reports.find((report) => report.id === inspection?.activeReportId) || reports[0] || null;
+}
+
+function setActiveInspectionReport(inspection, reportId) {
+  return {
+    ...inspection,
+    activeReportId: reportId
+  };
+}
+
+function inspectionReportSnapshot(report, inspection) {
+  return {
+    units: report?.snapshot?.units || inspection?.units || "in",
+    balloonedDocumentId: report?.snapshot?.balloonedDocumentId || "",
+    characteristics: Array.isArray(report?.snapshot?.characteristics) && report.snapshot.characteristics.length
+      ? report.snapshot.characteristics
+      : inspection?.characteristics || [],
+    instances: Array.isArray(report?.snapshot?.instances) && report.snapshot.instances.length
+      ? report.snapshot.instances
+      : inspection?.instances || []
+  };
+}
+
+function inspectionMeasuredValue(result) {
+  if (result && typeof result === "object" && !Array.isArray(result)) {
+    return String(result.value || "").trim();
+  }
+  return String(result || "").trim();
+}
+
+function inspectionResultPayload(value, existing = {}) {
+  return {
+    value: String(value || "").trim(),
+    passFail: String(existing?.passFail || "").trim(),
+    gageId: String(existing?.gageId || "").trim(),
+    notes: String(existing?.notes || "").trim()
+  };
+}
+
+function inspectionSummaryCounts(characteristics, instances) {
+  const failedCharacteristicNumbers = new Set();
+  let accepted = 0;
+  let rejected = 0;
+  for (const instance of instances || []) {
+    let failed = false;
+    for (const characteristic of characteristics || []) {
+      const status = inspectionResultStatus(characteristic, instance?.results?.[characteristic.id]);
+      if (status === "Fail") {
+        failed = true;
+        failedCharacteristicNumbers.add(characteristic.number || characteristic.id);
+      }
+    }
+    if (failed) {
+      rejected += 1;
+    } else {
+      accepted += 1;
+    }
+  }
+  return {
+    inspected: (instances || []).length,
+    accepted,
+    rejected,
+    failedCharacteristics: Array.from(failedCharacteristicNumbers)
+  };
+}
+
+function inspectionReportAuditEntry(eventType, message, changedBy = "", changedFields = []) {
+  return {
+    id: uid("inspection-audit"),
+    eventType,
+    message,
+    changedBy: String(changedBy || "").trim(),
+    changedAt: nowIso(),
+    changedFields: Array.isArray(changedFields) ? changedFields : []
+  };
+}
+
+function ncrRecordsForPart(part, nonconformances = [], job = null) {
+  const seen = new Set();
+  return (nonconformances || []).filter((record) => {
+    const matchesStableId = record?.partId && record.partId === part?.id;
+    const matchesLegacyIdentity = !record?.partId
+      && record?.partNumber
+      && record.partNumber === part?.partNumber
+      && (!job || !record?.jobId || record.jobId === job.id || record.jobNumber === job.jobNumber);
+    if (!matchesStableId && !matchesLegacyIdentity) {
+      return false;
+    }
+    const key = record.id || record.ncrNumber || `${record.jobNumber}:${record.partNumber}`;
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
+}
+
+function autoRelatedNcrNumbers(part, nonconformances = [], report = {}, job = null) {
+  return Array.from(new Set([
+    ...(Array.isArray(report?.relatedNcrNumbers) ? report.relatedNcrNumbers : []),
+    ...ncrRecordsForPart(part, nonconformances, job).map((record) => record.ncrNumber || record.id)
+  ].map((value) => String(value || "").trim()).filter(Boolean)));
+}
+
+function materialLotBatchText(materials = []) {
+  return (materials || []).map((material) => [
+    material.serialCode || material.id,
+    material.lotNumber ? `Lot ${material.lotNumber}` : "",
+    material.heatNumber ? `Heat ${material.heatNumber}` : "",
+    material.originalStockIdentifier ? `Stock ${material.originalStockIdentifier}` : ""
+  ].filter(Boolean).join(" / ")).filter(Boolean).join(", ");
+}
+
+function materialCertRows(materials = []) {
+  return (materials || []).flatMap((material) => (material.attachments || [])
+    .filter((attachment) => attachment.active !== false)
+    .map((attachment) => ({
+      id: `${material.id}-${attachment.id}`,
+      materialSerial: material.serialCode || material.id,
+      materialType: [material.materialFamily || material.materialType, material.materialAlloy].filter(Boolean).join(" / ") || material.materialType || "",
+      supplier: material.supplier || "",
+      lotNumber: material.lotNumber || "",
+      heatNumber: material.heatNumber || "",
+      filename: attachment.originalFilename || attachment.storedFilename || "Attachment",
+      fileType: attachment.fileType || "",
+      category: attachment.attachmentCategory || attachment.category || "Other",
+      revisionNumber: attachment.revisionNumber || 1,
+      attachedAt: attachment.attachedAt || "",
+      storedPath: attachment.storedPath || "",
+      storedFilename: attachment.storedFilename || ""
+    })));
+}
+
+function isPdfAttachment(attachment) {
+  const filename = String(attachment?.filename || attachment?.storedFilename || "").toLowerCase();
+  return String(attachment?.fileType || "").toUpperCase() === "PDF" || filename.endsWith(".pdf");
+}
+
+function isImageAttachment(attachment) {
+  const filename = String(attachment?.filename || attachment?.storedFilename || "").toLowerCase();
+  return [".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"].some((extension) => filename.endsWith(extension));
+}
+
+function chunkList(items = [], size = 10) {
+  const chunks = [];
+  for (let index = 0; index < items.length; index += size) {
+    chunks.push(items.slice(index, index + size));
+  }
+  return chunks;
+}
+
+function buildInspectionReportDefaults(job, part, inspection, report = {}, nonconformances = [], linkedMaterials = []) {
+  const firstDrawing = (part?.documents || []).find((document) => document.active !== false && String(document.fileType || "").toUpperCase() === "PDF");
+  const latestBallooned = latestBalloonedDrawingDocument(part);
+  const summary = inspectionSummaryCounts(inspection?.characteristics || [], inspection?.instances || []);
+  const batchText = materialLotBatchText(linkedMaterials);
+  return {
+    ...report,
+    generatedAt: report.generatedAt || nowIso(),
+    traceability: {
+      customer: job?.customer || report.traceability?.customer || "",
+      customerPoNumber: report.traceability?.customerPoNumber || "",
+      internalJobNumber: job?.jobNumber || report.traceability?.internalJobNumber || "",
+      salesOrderQuoteNumber: report.traceability?.salesOrderQuoteNumber || "",
+      partNumber: part?.partNumber || report.traceability?.partNumber || "",
+      partName: part?.partName || report.traceability?.partName || "",
+      partRevision: part?.revision?.number || report.traceability?.partRevision || "",
+      drawingNumber: report.traceability?.drawingNumber || "",
+      drawingRevision: report.traceability?.drawingRevision || part?.revision?.number || "",
+      drawingFileName: report.traceability?.drawingFileName || firstDrawing?.originalFilename || firstDrawing?.storedFilename || "",
+      modelFileName: report.traceability?.modelFileName || "",
+      modelRevision: report.traceability?.modelRevision || "",
+      material: part?.materialSpec || part?.customMaterialText || report.traceability?.material || "",
+      lotBatchSerialNumber: report.traceability?.lotBatchSerialNumber || batchText || ""
+    },
+    quantitySummary: {
+      quantityOrdered: String(report.quantitySummary?.quantityOrdered || part?.quantity || "").trim(),
+      quantityInspected: String(report.quantitySummary?.quantityInspected || summary.inspected || part?.quantity || "").trim(),
+      quantityAccepted: String(report.quantitySummary?.quantityAccepted || summary.accepted || "").trim(),
+      quantityRejected: String(report.quantitySummary?.quantityRejected || summary.rejected || "").trim()
+    },
+    snapshot: {
+      units: report.snapshot?.units || inspection?.units || "in",
+      balloonedDocumentId: report.snapshot?.balloonedDocumentId || latestBallooned?.id || "",
+      characteristics: Array.isArray(report.snapshot?.characteristics) && report.snapshot.characteristics.length ? report.snapshot.characteristics : (inspection?.characteristics || []),
+      instances: Array.isArray(report.snapshot?.instances) && report.snapshot.instances.length ? report.snapshot.instances : (inspection?.instances || [])
+    },
+    relatedNcrNumbers: autoRelatedNcrNumbers(part, nonconformances, report, job)
+  };
+}
+
+function inspectionReportValidation(report, inspection, job, part) {
+  const errors = [];
+  const requireField = (condition, value, message) => {
+    if (condition && !String(value || "").trim()) {
+      errors.push(message);
+    }
+  };
+  const activeSnapshot = inspectionReportSnapshot(report, inspection);
+  const summary = inspectionSummaryCounts(activeSnapshot.characteristics, activeSnapshot.instances);
+  requireField(true, report?.reportId, "Inspection Report ID is required.");
+  requireField(true, report?.status, "Report Status is required.");
+  requireField(true, report?.generatedAt, "Generated At is required.");
+  requireField(true, report?.generatedBy, "Generated By is required.");
+  requireField(true, report?.traceability?.customer || job?.customer, "Customer is required.");
+  requireField(true, report?.traceability?.internalJobNumber || job?.jobNumber, "Internal Job Number / Work Order is required.");
+  requireField(true, report?.traceability?.partNumber || part?.partNumber, "Part Number is required.");
+  requireField(true, report?.quantitySummary?.quantityInspected, "Quantity Inspected is required.");
+  const qtyInspected = Number(report?.quantitySummary?.quantityInspected || 0);
+  const qtyAccepted = Number(report?.quantitySummary?.quantityAccepted || 0);
+  const qtyRejected = Number(report?.quantitySummary?.quantityRejected || 0);
+  if (Number.isFinite(qtyInspected) && Number.isFinite(qtyAccepted) && Number.isFinite(qtyRejected) && qtyAccepted + qtyRejected !== qtyInspected) {
+    errors.push("Quantity Accepted + Quantity Rejected must equal Quantity Inspected.");
+  }
+  for (const characteristic of activeSnapshot.characteristics || []) {
+    requireField(true, characteristic.number, "Each characteristic must have a number.");
+    requireField(true, characteristic.requirementDescription || characteristic.description || characteristic.type, "Each characteristic must have a requirement or description.");
+    requireField(true, characteristic.nominal || characteristic.lowerLimit || characteristic.upperLimit, "Each characteristic must have a nominal or requirement value.");
+    requireField(true, characteristic.plusTolerance || characteristic.minusTolerance || characteristic.lowerLimit || characteristic.upperLimit, "Each characteristic must have tolerance or limits.");
+    requireField(true, characteristic.units || activeSnapshot.units, "Each characteristic must have units.");
+  }
+  for (const instance of activeSnapshot.instances || []) {
+    requireField(true, instance.label, "Each measured value must have an instance / piece ID.");
+    requireField(true, instance.inspector, "Each measured value must have an inspector.");
+    requireField(true, instance.inspectedAt, "Each measured value must have an inspection date.");
+    for (const characteristic of activeSnapshot.characteristics || []) {
+      const result = instance.results?.[characteristic.id];
+      requireField(true, inspectionMeasuredValue(result), `Characteristic ${characteristic.number || "?"} is missing a measured value for ${instance.label}.`);
+      if (!inspectionResultStatus(characteristic, result)) {
+        errors.push(`Characteristic ${characteristic.number || "?"} for ${instance.label} is missing a pass/fail result.`);
+      }
+      if ((report?.status || "Draft") === "Final" && !String(result?.gageId || characteristic.gageId || "").trim() && !String(report?.gageExceptionNote || "").trim()) {
+        errors.push(`Characteristic ${characteristic.number || "?"} for ${instance.label} is missing a Gage / Tool ID or exception note.`);
+      }
+    }
+  }
+  if ((report?.status || "Draft") === "Final") {
+    requireField(true, report?.finalResult, "Final Result is required before Final.");
+    requireField(true, report?.releasedBy, "Released By is required before Final.");
+    requireField(true, report?.releasedAt, "Released At is required before Final.");
+  }
+  if ((report?.status || "Draft") === "Voided") {
+    requireField(true, report?.voidedBy, "Voided By is required.");
+    requireField(true, report?.voidedAt, "Voided At is required.");
+    requireField(true, report?.voidReason, "Void Reason is required.");
+  }
+  return errors;
 }
 
 function instructionStepsFromOperation(operation) {
@@ -1018,8 +1673,13 @@ function App() {
     return <PrintMaterialLabel materialId={materialId} sizeId={params.get("size") || ""} monochrome={params.get("bw") === "1"} />;
   }
   if (route.startsWith("/print/inspection/")) {
-    const [jobId, partId] = route.replace("/print/inspection/", "").split("/").map(decodeURIComponent);
-    return <PrintInspectionReport jobId={jobId} partId={partId} />;
+    const [pathPart, queryPart = ""] = route.replace("/print/inspection/", "").split("?");
+    const [jobId, partId] = pathPart.split("/").map(decodeURIComponent);
+    const params = new URLSearchParams(queryPart);
+    const exportOptions = defaultInspectionReportExportOptions(Object.fromEntries(
+      INSPECTION_REPORT_EXPORT_OPTION_DEFINITIONS.map(([key]) => [key, params.get(key) !== "0"])
+    ));
+    return <PrintInspectionReport jobId={jobId} partId={partId} reportId={params.get("reportId") || ""} exportOptions={exportOptions} />;
   }
   if (route.startsWith("/print/nonconformance/")) {
     const ncrId = decodeURIComponent(route.replace("/print/nonconformance/", "").split("?")[0]);
@@ -1043,7 +1703,7 @@ function App() {
 class RenderBoundary extends React.Component {
   constructor(props) {
     super(props);
-    this.state = { error: null };
+    this.state = { error: null, errorInfo: null };
   }
 
   static getDerivedStateFromError(error) {
@@ -1052,11 +1712,23 @@ class RenderBoundary extends React.Component {
 
   componentDidCatch(error, info) {
     console.error("AMERP render error", error, info);
+    this.setState({ errorInfo: info });
   }
 
   render() {
     if (this.state.error) {
-      return <Fatal title="AMERP Error" message={this.state.error.message || String(this.state.error)} />;
+      return (
+        <Fatal
+          title="AMERP Error"
+          message={this.state.error.message || String(this.state.error)}
+          stack={this.state.error.stack || ""}
+          componentStack={this.state.errorInfo?.componentStack || ""}
+          onHome={() => {
+            window.location.hash = "/";
+            this.setState({ error: null, errorInfo: null });
+          }}
+        />
+      );
     }
     return this.props.children;
   }
@@ -1070,6 +1742,7 @@ function Workspace() {
   const [startupError, setStartupError] = useState("");
   const [confirmDeleteJobOpen, setConfirmDeleteJobOpen] = useState(false);
   const [confirmDeleteKanbanOpen, setConfirmDeleteKanbanOpen] = useState(false);
+  const [confirmDeleteNonconformanceOpen, setConfirmDeleteNonconformanceOpen] = useState(false);
   const [saveState, setSaveState] = useState("saved");
   const fusionImportInFlight = useRef(false);
   const refreshWorkspaceRef = useRef(null);
@@ -1104,6 +1777,8 @@ function Workspace() {
   const [selectedInstrumentId, setSelectedInstrumentId] = useState(null);
   const [instrumentPayload, setInstrumentPayload] = useState(null);
   const [metrologyScreen, setMetrologyScreen] = useState("list");
+  const [inspectionExportDialogOpen, setInspectionExportDialogOpen] = useState(false);
+  const [inspectionExportOptions, setInspectionExportOptions] = useState(defaultInspectionReportExportOptions());
 
   const [selectedTemplateId, setSelectedTemplateId] = useState(null);
   const [lastIndexMaintenance, setLastIndexMaintenance] = useState(0);
@@ -1217,6 +1892,7 @@ useEffect(() => api.onDeepLink?.((payload) => {
 
   useEffect(() => {
     if ((view === "jobs" && jobScreen === "list")
+      || view === "inspections"
       || (view === "nonconformance" && nonconformanceScreen === "list")
       || (view === "kanban" && kanbanScreen === "list")
       || (view === "materials" && materialScreen === "list")
@@ -1395,17 +2071,29 @@ useEffect(() => api.onDeepLink?.((payload) => {
     }
     try {
       const nextNumber = await api.generateNextNonconformanceNumber().catch(() => "");
+      const linkedMaterialIds = Array.from(new Set(part.requiredMaterialLots || []));
+      const linkedMaterials = (await Promise.all(
+        linkedMaterialIds.map((materialId) => api.loadMaterial(materialId).catch(() => null))
+      )).filter(Boolean);
       if (selectedNonconformanceId) {
         await api.releaseLock("nonconformance", selectedNonconformanceId).catch(() => {});
       }
-      const draft = blankNonconformance({
-        jobId: job.id,
-        jobNumber: job.jobNumber,
-        partId: part.id,
-        partNumber: part.partNumber,
-        partName: part.partName
+      const inspection = renumberInspectionPayload(normalizeInspectionPayload(part.inspection));
+      const seed = ncrSeedFromContext({
+        job,
+        part,
+        inspection,
+        materials: linkedMaterials,
+        nonconformances: workspace.nonconformances || []
       });
-      draft.ncrNumber = nextNumber;
+      const draft = {
+        ...blankNonconformance(seed),
+        ...seed,
+        ncrNumber: nextNumber,
+        auditLog: [
+          inspectionReportAuditEntry("created", `Created NCR draft from ${job.jobNumber || job.id} / ${part.partNumber || part.partName || part.id}.`, seed.reportedBy || seed.owner || "")
+        ]
+      };
       setSelectedNonconformanceId(null);
       setNonconformanceRecord(draft);
       setNonconformanceScreen("detail");
@@ -1465,6 +2153,46 @@ useEffect(() => api.onDeepLink?.((payload) => {
     setView("nonconformance");
     setNonconformanceScreen("list");
     setSaveState("saved");
+  };
+
+  const showInspectionList = () => {
+    if (selectedNonconformanceId) {
+      api.releaseLock("nonconformance", selectedNonconformanceId).catch(() => {});
+      setSelectedNonconformanceId(null);
+      setNonconformanceRecord(null);
+    }
+    setView("inspections");
+    setSaveState("saved");
+  };
+
+  const openInspectionReportFromList = async (summary) => {
+    if (!summary?.jobId || !summary?.partId) return;
+    setBusy(true);
+    try {
+      if (selectedJobId && selectedJobId !== summary.jobId) {
+        await api.releaseLock("job", selectedJobId).catch(() => {});
+      }
+      const loaded = await api.loadJob(summary.jobId, { acquireLock: true });
+      const part = loaded.parts?.find((item) => item.id === summary.partId);
+      const inspection = normalizeInspectionPayload(part?.inspection);
+      const activeReportId = summary.id && !String(summary.id).includes(":draft") ? summary.id : inspection.activeReportId;
+      setSelectedJobId(loaded.id);
+      setJob({
+        ...loaded,
+        parts: (loaded.parts || []).map((item) => item.id === summary.partId
+          ? { ...item, inspection: setActiveInspectionReport(normalizeInspectionPayload(item.inspection), activeReportId) }
+          : item)
+      });
+      setSelectedPartId(summary.partId);
+      setSelectedOperationId(null);
+      setJobScreen("inspection-results");
+      setView("jobs");
+      setSaveState("saved");
+    } catch (error) {
+      showStatus(error.message || String(error));
+    } finally {
+      setBusy(false);
+    }
   };
 
   const openPart = (partId) => {
@@ -1606,7 +2334,9 @@ useEffect(() => api.onDeepLink?.((payload) => {
       if (!savedJob?.id) {
         return;
       }
-      const output = await api.exportPartInspectionPdf(savedJob.id, selectedPartId);
+      const savedPart = savedJob.parts.find((item) => item.id === selectedPartId);
+      const savedInspection = normalizeInspectionPayload(savedPart?.inspection);
+      const output = await api.exportPartInspectionPdf(savedJob.id, selectedPartId, "", savedInspection.activeReportId || "", inspectionExportOptions);
       if (output) {
         showStatus(`Exported inspection PDF: ${output}`);
       }
@@ -1615,6 +2345,16 @@ useEffect(() => api.onDeepLink?.((payload) => {
     } finally {
       setBusy(false);
     }
+  };
+
+  const openInspectionExportDialog = () => {
+    setInspectionExportOptions(defaultInspectionReportExportOptions(workspace?.preferences?.inspectionReportExportOptions));
+    setInspectionExportDialogOpen(true);
+  };
+
+  const confirmInspectionExport = async () => {
+    setInspectionExportDialogOpen(false);
+    await exportCurrentInspectionPdf();
   };
 
   const importXometryIntoJob = async () => {
@@ -2024,6 +2764,42 @@ useEffect(() => api.onDeepLink?.((payload) => {
     }
   };
 
+  const exportNonconformancesCsv = async (filters = {}) => {
+    setBusy(true);
+    try {
+      await api.exportNonconformancesCsv(filters);
+      showStatus("NCR CSV exported.");
+    } catch (error) {
+      showStatus(error.message || String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const reopenCurrentNonconformance = async () => {
+    if (!nonconformanceRecord?.id) return;
+    const reason = window.prompt("Enter a reopen reason for the NCR.", nonconformanceRecord.reopenReason || "");
+    if (reason === null) {
+      return;
+    }
+    setBusy(true);
+    try {
+      const saved = await api.saveNonconformance({
+        ...nonconformanceRecord,
+        status: "Open",
+        reopenReason: reason,
+        closureDate: "",
+        closedBy: ""
+      });
+      await applySavedNonconformance(saved);
+      showStatus("NCR reopened.");
+    } catch (error) {
+      showStatus(error.message || String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const archiveCurrentNonconformance = async () => {
     if (!selectedNonconformanceId) return;
     setBusy(true);
@@ -2050,6 +2826,34 @@ useEffect(() => api.onDeepLink?.((payload) => {
     } finally {
       setBusy(false);
     }
+  };
+
+  const deleteCurrentNonconformance = async () => {
+    if (!selectedNonconformanceId) return;
+    setBusy(true);
+    try {
+      const deletedId = selectedNonconformanceId;
+      await api.deleteNonconformance(deletedId);
+      await api.releaseLock("nonconformance", deletedId).catch(() => {});
+      setSelectedNonconformanceId(null);
+      setNonconformanceRecord(null);
+      if (view === "nonconformance") {
+        setNonconformanceScreen("list");
+      }
+      await refreshWorkspace();
+      showStatus("Archived NCR deleted.");
+    } catch (error) {
+      showStatus(error.message || String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const openDeleteNonconformanceConfirm = () => {
+    if (!selectedNonconformanceId || busy) {
+      return;
+    }
+    setConfirmDeleteNonconformanceOpen(true);
   };
 
   const addNonconformanceAttachments = async () => {
@@ -2798,7 +3602,21 @@ useEffect(() => api.onDeepLink?.((payload) => {
     value: nonconformanceRecord,
     resetKey: `nonconformance:${nonconformanceRecord?.id || "none"}`,
     enabled: Boolean(nonconformanceRecord),
-    isReady: (current) => Boolean(current?.jobId && current?.partId && current?.ncrNumber),
+    isReady: (current) => {
+      if (!current?.jobId || !current?.partId || !current?.ncrNumber) {
+        return false;
+      }
+      if (!String(current.reportedBy || "").trim()) {
+        return false;
+      }
+      if (current.status !== "Cancelled" && !(Number(current.quantityAffected || 0) > 0)) {
+        return false;
+      }
+      if (current.status !== "Closed" && current.status !== "Cancelled" && !String(current.owner || "").trim()) {
+        return false;
+      }
+      return Boolean(String(current.nonconformanceDescription || current.issueDescription || "").trim());
+    },
     save: (current) => api.saveNonconformance(current),
     onSaved: applySavedNonconformance,
     onError: (error) => showStatus(error.message || String(error)),
@@ -2918,26 +3736,23 @@ useEffect(() => api.onDeepLink?.((payload) => {
           jobScreen === "part" ? <button key="inspection-results" onClick={() => selectedPart && openInspectionResults(selectedPart.id)} disabled={!job || !selectedPart || busy}>Inspection Results</button> : null,
           jobScreen === "part" ? <button key="part-ncr" onClick={() => selectedPart && openPartNonconformance(selectedPart.id)} disabled={!job || !selectedPart || busy}>Nonconformance</button> : null,
           jobScreen === "inspection-setup" || jobScreen === "inspection-results"
-            ? <button key="inspection-pdf" onClick={() => exportCurrentInspectionPdf()} disabled={!job || !selectedPart || busy}><FileDown size={16} /> Inspection PDF</button>
+            ? <button key="inspection-pdf" onClick={openInspectionExportDialog} disabled={!job || !selectedPart || busy}><FileDown size={16} /> Inspection PDF</button>
             : null,
           jobScreen === "nonconformance" && nonconformanceRecord
             ? <button key="ncr-pdf" onClick={exportCurrentNonconformancePdf} disabled={!nonconformanceRecord || busy}><FileDown size={16} /> NCR PDF</button>
+            : null,
+          jobScreen === "nonconformance" && nonconformanceRecord?.status === "Closed"
+            ? <button key="ncr-reopen" onClick={reopenCurrentNonconformance} disabled={!selectedNonconformanceId || busy}><RotateCcw size={16} /> Reopen</button>
             : null
         ].filter(Boolean),
         dangerActions: [
-          jobScreen === "nonconformance" && nonconformanceRecord?.active !== false
-            ? <button key="archive-ncr" className="danger" onClick={archiveCurrentNonconformance} disabled={!selectedNonconformanceId || busy}><Archive size={16} /> Archive</button>
-            : null,
-          jobScreen === "nonconformance" && nonconformanceRecord?.active === false
-            ? <button key="unarchive-ncr" onClick={unarchiveCurrentNonconformance} disabled={!selectedNonconformanceId || busy}><ArchiveRestore size={16} /> Unarchive</button>
-            : null,
-          jobScreen !== "list" && job?.active !== false
+          jobScreen !== "list" && jobScreen !== "nonconformance" && job?.active !== false
             ? <button key="archive-job" className="danger" onClick={archiveCurrentJob} disabled={!selectedJobId || busy}><Archive size={16} /> Archive</button>
             : null,
-          jobScreen !== "list" && job?.active === false
+          jobScreen !== "list" && jobScreen !== "nonconformance" && job?.active === false
             ? <button key="unarchive-job" onClick={unarchiveCurrentJob} disabled={!selectedJobId || busy}><ArchiveRestore size={16} /> Unarchive</button>
             : null,
-          jobScreen !== "list" && job?.active === false
+          jobScreen !== "list" && jobScreen !== "nonconformance" && job?.active === false
             ? <button key="delete-job" className="danger" onClick={openDeleteJobConfirm} disabled={!selectedJobId || busy}><Trash2 size={16} /> Delete</button>
             : null
         ].filter(Boolean)
@@ -2956,16 +3771,21 @@ useEffect(() => api.onDeepLink?.((payload) => {
         primaryActions: [
           nonconformanceScreen === "detail" && nonconformanceRecord
             ? <button key="ncr-top-pdf" onClick={exportCurrentNonconformancePdf} disabled={!nonconformanceRecord || busy}><FileDown size={16} /> PDF</button>
+            : null,
+          nonconformanceScreen === "detail" && nonconformanceRecord?.status === "Closed"
+            ? <button key="ncr-top-reopen" onClick={reopenCurrentNonconformance} disabled={!selectedNonconformanceId || busy}><RotateCcw size={16} /> Reopen</button>
             : null
         ].filter(Boolean),
-        dangerActions: [
-          nonconformanceScreen === "detail" && nonconformanceRecord?.active !== false
-            ? <button key="ncr-top-archive" className="danger" onClick={archiveCurrentNonconformance} disabled={!selectedNonconformanceId || busy}><Archive size={16} /> Archive</button>
-            : null,
-          nonconformanceScreen === "detail" && nonconformanceRecord?.active === false
-            ? <button key="ncr-top-unarchive" onClick={unarchiveCurrentNonconformance} disabled={!selectedNonconformanceId || busy}><ArchiveRestore size={16} /> Unarchive</button>
-            : null
-        ].filter(Boolean)
+        dangerActions: []
+      };
+    }
+    if (view === "inspections") {
+      return {
+        breadcrumbs: [{ label: "Inspections", onClick: showInspectionList, active: true }],
+        title: "Inspections",
+        subtitle: "Inspection reports across jobs and parts.",
+        primaryActions: [],
+        dangerActions: []
       };
     }
     if (view === "kanban") {
@@ -3064,6 +3884,7 @@ useEffect(() => api.onDeepLink?.((payload) => {
           {PRIMARY_MODULES.filter((module) => moduleIsEnabled(module.id)).map((module) => {
             const handlers = {
               jobs: showJobList,
+              inspections: showInspectionList,
               nonconformance: showNonconformanceList,
               kanban: showKanbanList,
               materials: showMaterialsList,
@@ -3160,6 +3981,10 @@ useEffect(() => api.onDeepLink?.((payload) => {
             onCreatePartNonconformance={createPartNonconformance}
             onOpenNonconformance={(ncrId, partId) => openNonconformance(ncrId, { sourceView: "jobs", partId })}
             onUpdateNonconformance={setNonconformanceRecord}
+            onArchiveNonconformance={archiveCurrentNonconformance}
+            onUnarchiveNonconformance={unarchiveCurrentNonconformance}
+            onDeleteNonconformance={openDeleteNonconformanceConfirm}
+            onApplyNonconformanceTemplate={(patch) => setNonconformanceRecord((current) => current ? { ...current, ...patch } : current)}
             onAddNonconformanceAttachments={addNonconformanceAttachments}
             onOpenNonconformanceAttachment={openNonconformanceAttachment}
             onOpenNonconformanceAttachmentRevision={openNonconformanceAttachmentRevision}
@@ -3167,6 +3992,7 @@ useEffect(() => api.onDeepLink?.((payload) => {
             onUnarchiveNonconformanceAttachment={unarchiveNonconformanceAttachment}
             onReviseNonconformanceAttachment={reviseNonconformanceAttachment}
             onDeleteNonconformanceAttachment={deleteNonconformanceAttachment}
+            ncrConstants={workspace.constants}
           />
         )}
         {view === "nonconformance" && moduleIsEnabled("nonconformance") && (
@@ -3177,6 +4003,10 @@ useEffect(() => api.onDeepLink?.((payload) => {
             setRecord={setNonconformanceRecord}
             onOpenRecord={(ncrId) => openNonconformance(ncrId, { sourceView: "nonconformance" })}
             onShowList={showNonconformanceList}
+            onExportCsv={exportNonconformancesCsv}
+            onArchiveRecord={archiveCurrentNonconformance}
+            onUnarchiveRecord={unarchiveCurrentNonconformance}
+            onDeleteRecord={openDeleteNonconformanceConfirm}
             onAddAttachments={addNonconformanceAttachments}
             onOpenAttachment={openNonconformanceAttachment}
             onOpenAttachmentRevision={openNonconformanceAttachmentRevision}
@@ -3186,6 +4016,12 @@ useEffect(() => api.onDeepLink?.((payload) => {
             onDeleteAttachment={deleteNonconformanceAttachment}
             instruments={workspace.instruments || []}
             preferences={workspace.preferences}
+          />
+        )}
+        {view === "inspections" && moduleIsEnabled("inspections") && (
+          <InspectionsView
+            workspace={workspace}
+            onOpenReport={openInspectionReportFromList}
           />
         )}
         {view === "kanban" && moduleIsEnabled("kanban") && (
@@ -3277,6 +4113,18 @@ useEffect(() => api.onDeepLink?.((payload) => {
         }}
       />
 
+      <ConfirmDialog
+        open={confirmDeleteNonconformanceOpen}
+        title="Delete Archived NCR?"
+        message={`Delete ${nonconformanceRecord?.ncrNumber || "this archived NCR"}? This cannot be undone.`}
+        confirmLabel="Delete NCR"
+        onCancel={() => setConfirmDeleteNonconformanceOpen(false)}
+        onConfirm={async () => {
+          setConfirmDeleteNonconformanceOpen(false);
+          await deleteCurrentNonconformance();
+        }}
+      />
+
       <KanbanPrintDialog
         open={kanbanPrintDialogOpen}
         sizes={kanbanPrintSizes(workspace?.preferences)}
@@ -3304,6 +4152,13 @@ useEffect(() => api.onDeepLink?.((payload) => {
           setMaterialPrintDialogOpen(false);
           await exportCurrentMaterialPdf();
         }}
+      />
+      <InspectionExportDialog
+        open={inspectionExportDialogOpen}
+        options={inspectionExportOptions}
+        onChange={(key, value) => setInspectionExportOptions((current) => ({ ...defaultInspectionReportExportOptions(current), [key]: value }))}
+        onCancel={() => setInspectionExportDialogOpen(false)}
+        onConfirm={confirmInspectionExport}
       />
     </div>
   );
@@ -3631,7 +4486,8 @@ function DocumentsPanel({
   onArchiveDocument,
   onDeleteDocument,
   onReviseDocument,
-  emptyText
+  emptyText,
+  readOnly = false
 }) {
   const [showArchived, setShowArchived] = useState(false);
   const [expandedDocumentId, setExpandedDocumentId] = useState("");
@@ -3655,7 +4511,7 @@ function DocumentsPanel({
               {showArchived ? "Hide Archived" : `Show Archived (${archivedDocuments.length})`}
             </button>
           ) : null}
-          <button onClick={onAddDocuments}><FolderOpen size={14} /> Add Attachment</button>
+          <button onClick={onAddDocuments} disabled={readOnly}><FolderOpen size={14} /> Add Attachment</button>
         </div>
       </div>
       <div className="document-list">
@@ -3682,15 +4538,16 @@ function DocumentsPanel({
               </div>
               <div className="tiny-toolbar">
                 <button onClick={() => onOpenDocument(document.id)}>Open</button>
-                <button onClick={() => onReviseDocument(document.id)} disabled={document.active === false}>New Revision</button>
+                <button onClick={() => onReviseDocument(document.id)} disabled={document.active === false || readOnly}>New Revision</button>
                 <button
                   className={document.active === false ? "" : "danger"}
                   onClick={() => onArchiveDocument(document.id, document.originalFilename, document.active === false)}
+                  disabled={readOnly}
                 >
                   {document.active === false ? "Unarchive" : "Archive"}
                 </button>
                 {document.active === false ? (
-                  <button className="danger" onClick={() => onDeleteDocument(document.id, document.originalFilename)}>Delete</button>
+                  <button className="danger" onClick={() => onDeleteDocument(document.id, document.originalFilename)} disabled={readOnly}>Delete</button>
                 ) : null}
               </div>
             </div>
@@ -3848,13 +4705,18 @@ function JobsView({
   onCreatePartNonconformance,
   onOpenNonconformance,
   onUpdateNonconformance,
+  onArchiveNonconformance,
+  onUnarchiveNonconformance,
+  onDeleteNonconformance,
+  onApplyNonconformanceTemplate,
   onAddNonconformanceAttachments,
   onOpenNonconformanceAttachment,
   onOpenNonconformanceAttachmentRevision,
   onArchiveNonconformanceAttachment,
   onUnarchiveNonconformanceAttachment,
   onReviseNonconformanceAttachment,
-  onDeleteNonconformanceAttachment
+  onDeleteNonconformanceAttachment,
+  ncrConstants
 }) {
   const materials = workspace.materials || [];
   const instruments = workspace.instruments || [];
@@ -3944,8 +4806,11 @@ function JobsView({
     return (
       <PartInspectionResultsScreen
         busy={busy}
+        job={job}
         part={selectedPart}
         instruments={instruments}
+        preferences={workspace.preferences}
+        nonconformances={workspace.nonconformances || []}
         onUpdate={(inspection) => updatePart(selectedPart.id, { inspection })}
       />
     );
@@ -3962,6 +4827,10 @@ function JobsView({
         onCreateRecord={() => onCreatePartNonconformance(selectedPart)}
         onOpenRecord={(ncrId) => onOpenNonconformance(ncrId, selectedPart.id)}
         onChangeRecord={onUpdateNonconformance}
+        onArchiveRecord={onArchiveNonconformance}
+        onUnarchiveRecord={onUnarchiveNonconformance}
+        onDeleteRecord={onDeleteNonconformance}
+        onApplyTemplate={onApplyNonconformanceTemplate}
         onAddAttachments={onAddNonconformanceAttachments}
         onOpenAttachment={onOpenNonconformanceAttachment}
         onOpenAttachmentRevision={onOpenNonconformanceAttachmentRevision}
@@ -3969,6 +4838,7 @@ function JobsView({
         onUnarchiveAttachment={onUnarchiveNonconformanceAttachment}
         onReviseAttachment={onReviseNonconformanceAttachment}
         onDeleteAttachment={onDeleteNonconformanceAttachment}
+        constants={ncrConstants}
       />
     );
   }
@@ -4830,12 +5700,15 @@ function PartInspectionSetupScreen({ busy, job, part, instruments, onUpdate, onE
               <tr>
                 <th>#</th>
                 <th>Type</th>
+                <th>Requirement</th>
                 <th>Nominal</th>
                 <th>+ Tol</th>
                 <th>- Tol</th>
                 <th>Lower</th>
                 <th>Upper</th>
+                <th>Method</th>
                 <th>Measuring Tool</th>
+                <th>Critical</th>
                 <th></th>
               </tr>
             </thead>
@@ -4848,15 +5721,22 @@ function PartInspectionSetupScreen({ busy, job, part, instruments, onUpdate, onE
                       {["Dimension", "GD&T", "Thread", "Surface Finish", "Note"].map((type) => <option key={type} value={type}>{type}</option>)}
                     </select>
                   </td>
+                  <td><input value={characteristic.requirementDescription || ""} onChange={(event) => updateCharacteristic(characteristic.id, { requirementDescription: event.target.value, description: event.target.value })} onFocus={() => setSelectedCharacteristicId(characteristic.id)} /></td>
                   <td><input value={characteristic.nominal || ""} onChange={(event) => updateCharacteristic(characteristic.id, { nominal: event.target.value })} onFocus={() => setSelectedCharacteristicId(characteristic.id)} /></td>
                   <td><input value={characteristic.plusTolerance || ""} onChange={(event) => updateCharacteristic(characteristic.id, { plusTolerance: event.target.value, toleranceType: "plusMinus" })} onFocus={() => setSelectedCharacteristicId(characteristic.id)} /></td>
                   <td><input value={characteristic.minusTolerance || ""} onChange={(event) => updateCharacteristic(characteristic.id, { minusTolerance: event.target.value, toleranceType: "plusMinus" })} onFocus={() => setSelectedCharacteristicId(characteristic.id)} /></td>
                   <td><input value={characteristic.lowerLimit || ""} onChange={(event) => updateCharacteristic(characteristic.id, { lowerLimit: event.target.value, toleranceType: "limits" })} onFocus={() => setSelectedCharacteristicId(characteristic.id)} /></td>
                   <td><input value={characteristic.upperLimit || ""} onChange={(event) => updateCharacteristic(characteristic.id, { upperLimit: event.target.value, toleranceType: "limits" })} onFocus={() => setSelectedCharacteristicId(characteristic.id)} /></td>
+                  <td><input value={characteristic.inspectionMethod || ""} onChange={(event) => updateCharacteristic(characteristic.id, { inspectionMethod: event.target.value })} onFocus={() => setSelectedCharacteristicId(characteristic.id)} /></td>
                   <td>
                     <select value={characteristic.gageId || ""} onChange={(event) => updateCharacteristic(characteristic.id, { gageId: event.target.value })} onFocus={() => setSelectedCharacteristicId(characteristic.id)}>
                       <option value="">No linked gage</option>
                       {instrumentOptions.map((instrument) => <option key={instrument.instrumentId} value={instrument.instrumentId}>{instrument.toolName || instrument.instrumentId}</option>)}
+                    </select>
+                  </td>
+                  <td>
+                    <select value={characteristic.criticalCharacteristic ? "Yes" : "No"} onChange={(event) => updateCharacteristic(characteristic.id, { criticalCharacteristic: event.target.value === "Yes" })} onFocus={() => setSelectedCharacteristicId(characteristic.id)}>
+                      {["No", "Yes"].map((option) => <option key={option} value={option}>{option}</option>)}
                     </select>
                   </td>
                   <td><button className="danger subtle square" onClick={() => removeCharacteristic(characteristic.id)}><X size={13} /></button></td>
@@ -4871,7 +5751,8 @@ function PartInspectionSetupScreen({ busy, job, part, instruments, onUpdate, onE
   );
 }
 
-function InspectionResultsTable({ inspection, instrumentOptions, onAddInstance, onUpdateInstance, onUpdateResult, onRemoveInstance }) {
+function InspectionResultsTable({ inspection, characteristics, instances, instrumentOptions, onAddInstance, onUpdateInstance, onUpdateResult, onRemoveInstance, readOnly = false }) {
+  const summary = inspectionSummaryCounts(characteristics, instances);
   return (
     <section className="panel">
       <div className="panel-heading inline">
@@ -4879,24 +5760,32 @@ function InspectionResultsTable({ inspection, instrumentOptions, onAddInstance, 
           <h3>Inspected Parts</h3>
           <span>Record one measured value per characteristic and part instance.</span>
         </div>
-        <button onClick={onAddInstance}><Plus size={14} /> Instance</button>
+        {!readOnly ? <button onClick={onAddInstance}><Plus size={14} /> Instance</button> : null}
+      </div>
+      <div className="inspection-selected-summary">
+        <span>Inspected: <strong>{summary.inspected}</strong></span>
+        <span>Accepted: <strong>{summary.accepted}</strong></span>
+        <span>Rejected: <strong>{summary.rejected}</strong></span>
+        <span>Failed Characteristics: <strong>{summary.failedCharacteristics.length ? summary.failedCharacteristics.join(", ") : "None"}</strong></span>
       </div>
       <div className="inspection-results-table-wrap">
         <table className="print-table inspection-results-table">
           <thead>
             <tr>
               <th>Instance</th>
+              <th>Serial</th>
               <th>Inspector</th>
               <th>Date</th>
-              {inspection.characteristics.map((characteristic) => {
+              {characteristics.map((characteristic) => {
                 const limits = characteristicLimitDisplay(characteristic, inspection.units);
                 return (
                   <th key={characteristic.id}>
                     <div className="inspection-results-header">
                       <strong>{characteristic.number || "?"}</strong>
+                      <small>{characteristic.requirementDescription || characteristic.description || characteristic.type || "-"}</small>
                       <small>Lower: {limits.lower}</small>
                       <small>Upper: {limits.upper}</small>
-                      <small>Tool: {measurementToolLabel(characteristic, instrumentOptions)}</small>
+                      <small>Gage: {measurementToolLabel(characteristic, instrumentOptions)}</small>
                     </div>
                   </th>
                 );
@@ -4905,41 +5794,239 @@ function InspectionResultsTable({ inspection, instrumentOptions, onAddInstance, 
             </tr>
           </thead>
           <tbody>
-            {inspection.instances.map((instance) => (
+            {instances.map((instance) => (
               <tr key={instance.id}>
                 <td><div className="static-field">{instance.label || "-"}</div></td>
-                <td><input value={instance.inspector || ""} onChange={(event) => onUpdateInstance(instance.id, { inspector: event.target.value })} /></td>
-                <td><input type="date" value={String(instance.inspectedAt || "").slice(0, 10)} onChange={(event) => onUpdateInstance(instance.id, { inspectedAt: event.target.value })} /></td>
-                {inspection.characteristics.map((characteristic) => {
-                  const value = instance.results?.[characteristic.id] || "";
+                <td><input value={instance.serialNumber || ""} onChange={(event) => onUpdateInstance(instance.id, { serialNumber: event.target.value })} readOnly={readOnly} /></td>
+                <td><input value={instance.inspector || ""} onChange={(event) => onUpdateInstance(instance.id, { inspector: event.target.value })} readOnly={readOnly} /></td>
+                <td><input type="date" value={String(instance.inspectedAt || "").slice(0, 10)} onChange={(event) => onUpdateInstance(instance.id, { inspectedAt: event.target.value })} readOnly={readOnly} /></td>
+                {characteristics.map((characteristic) => {
+                  const result = instance.results?.[characteristic.id] || {};
+                  const value = inspectionMeasuredValue(result);
                   const status = inspectionResultStatus(characteristic, value);
                   return (
                     <td key={`${instance.id}-${characteristic.id}`} className={status ? `inspection-results-entry-cell ${status.toLowerCase()}` : "inspection-results-entry-cell"}>
-                      <input value={value} onChange={(event) => onUpdateResult(instance.id, characteristic.id, event.target.value)} placeholder={characteristic.type === "GD&T" ? "Pass/Fail" : "Value"} />
+                      <input value={value} onChange={(event) => onUpdateResult(instance.id, characteristic.id, event.target.value)} placeholder={characteristic.type === "GD&T" ? "Pass/Fail" : "Value"} readOnly={readOnly} />
                     </td>
                   );
                 })}
-                <td><button className="danger subtle square" onClick={() => onRemoveInstance(instance.id)}><X size={13} /></button></td>
+                <td>{!readOnly ? <button className="danger subtle square" onClick={() => onRemoveInstance(instance.id)}><X size={13} /></button> : null}</td>
               </tr>
             ))}
           </tbody>
         </table>
-        {!inspection.instances.length && <div className="empty-inline">No inspected part instances yet.</div>}
+        {!instances.length && <div className="empty-inline">No inspected part instances yet.</div>}
       </div>
     </section>
   );
 }
 
-function PartInspectionResultsScreen({ busy, part, instruments, onUpdate }) {
+function PartInspectionResultsScreen({ busy, job, part, instruments, preferences, nonconformances, onUpdate }) {
   const inspection = renumberInspectionPayload(normalizeInspectionPayload(part.inspection));
   const instrumentOptions = normalizeInstrumentOptions(instruments);
-  const balloonedDocument = latestBalloonedDrawingDocument(part);
+  const [reportBusy, setReportBusy] = useState(false);
+  const [selectedReportId, setSelectedReportId] = useState(inspection.activeReportId || "");
+  const [linkedMaterials, setLinkedMaterials] = useState([]);
+  useEffect(() => {
+    let cancelled = false;
+    const materialIds = Array.from(new Set(part.requiredMaterialLots || []));
+    if (!materialIds.length) {
+      setLinkedMaterials([]);
+      return () => {
+        cancelled = true;
+      };
+    }
+    Promise.all(materialIds.map((materialId) => api.loadMaterial(materialId).catch(() => null))).then((materials) => {
+      if (!cancelled) {
+        setLinkedMaterials(materials.filter(Boolean));
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [part.id, part.requiredMaterialLots]);
+  useEffect(() => {
+    const validIds = new Set((inspection.reports || []).map((item) => item.id));
+    if (!validIds.size) {
+      return;
+    }
+    if (!selectedReportId || !validIds.has(selectedReportId)) {
+      setSelectedReportId(inspection.activeReportId || inspection.reports[0]?.id || "");
+    }
+  }, [inspection.activeReportId, inspection.reports, selectedReportId]);
+  const report = buildInspectionReportDefaults(
+    job,
+    part,
+    inspection,
+    (inspection.reports || []).find((item) => item.id === selectedReportId)
+      || activeInspectionReport(inspection)
+      || blankInspectionReport(),
+    nonconformances,
+    linkedMaterials
+  );
+  const latestDraftReport = [...(inspection.reports || [])].reverse().find((item) => item.status === "Draft") || null;
+  const selectedSnapshot = inspectionReportSnapshot(report, inspection);
+  const reportCharacteristics = report.id === inspection.activeReportId && report.status === "Draft" ? inspection.characteristics : selectedSnapshot.characteristics;
+  const reportInstances = report.id === inspection.activeReportId && report.status === "Draft" ? inspection.instances : selectedSnapshot.instances;
+  const balloonedDocument = (part.documents || []).find((item) => item.id === selectedSnapshot.balloonedDocumentId) || latestBalloonedDrawingDocument(part);
   const [currentPage, setCurrentPage] = useState(1);
   const [pageCount, setPageCount] = useState(1);
   const [zoom, setZoom] = useState(null);
   const [activeScale, setActiveScale] = useState(1);
-  const applyInspection = (next) => onUpdate(renumberInspectionPayload(normalizeInspectionPayload(next)));
+  const syncDraftReport = (nextInspection) => {
+    const normalized = renumberInspectionPayload(normalizeInspectionPayload(nextInspection));
+    const activeReport = activeInspectionReport(normalized);
+    if (!activeReport || activeReport.status !== "Draft") {
+      return normalized;
+    }
+    const updatedReport = buildInspectionReportDefaults(job, part, normalized, {
+      ...activeReport,
+      updatedAt: nowIso(),
+      snapshot: {
+        ...(activeReport.snapshot || {}),
+        units: normalized.units,
+        balloonedDocumentId: activeReport.snapshot?.balloonedDocumentId || latestBalloonedDrawingDocument(part)?.id || "",
+        characteristics: normalized.characteristics,
+        instances: normalized.instances
+      }
+    }, nonconformances, linkedMaterials);
+    return {
+      ...normalized,
+      reports: normalized.reports.map((item) => item.id === updatedReport.id ? updatedReport : item)
+    };
+  };
+  const applyInspection = (next) => onUpdate(syncDraftReport(next));
+  useEffect(() => {
+    if (inspection.reports?.length) {
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      const nextNumber = await api.generateNextInspectionReportNumber().catch(() => "");
+      if (cancelled) {
+        return;
+      }
+      const draft = buildInspectionReportDefaults(job, part, inspection, blankInspectionReport({
+        reportId: nextNumber,
+        generatedBy: "",
+        auditLog: [inspectionReportAuditEntry("created", "Created inspection report draft.")]
+      }), nonconformances, linkedMaterials);
+      onUpdate({
+        ...inspection,
+        reports: [draft],
+        activeReportId: draft.id
+      });
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [inspection, job, onUpdate, part]);
   const previousInspector = String(inspection.instances[inspection.instances.length - 1]?.inspector || "").trim();
+  const reportReadOnly = report.status !== "Draft" || report.id !== inspection.activeReportId;
+  const reportValidationErrors = inspectionReportValidation(report, { ...inspection, characteristics: reportCharacteristics, instances: reportInstances }, job, part);
+  const failedSummary = inspectionSummaryCounts(reportCharacteristics, reportInstances);
+  const autoLinkedNcrs = ncrRecordsForPart(part, nonconformances, job);
+  const autoLinkedNcrNumbers = autoRelatedNcrNumbers(part, nonconformances, report, job);
+  const updateReport = (patch) => {
+    const updatedReport = buildInspectionReportDefaults(job, part, inspection, {
+      ...report,
+      ...patch,
+      traceability: { ...(report.traceability || {}), ...(patch.traceability || {}) },
+      inspectionContext: { ...(report.inspectionContext || {}), ...(patch.inspectionContext || {}) },
+      quantitySummary: { ...(report.quantitySummary || {}), ...(patch.quantitySummary || {}) },
+      updatedAt: nowIso()
+    }, nonconformances, linkedMaterials);
+    const nextAudit = inspectionReportAuditEntry("updated", "Updated inspection report fields.", updatedReport.generatedBy || updatedReport.releasedBy || "", Object.keys(patch));
+    onUpdate({
+      ...inspection,
+      reports: inspection.reports.map((item) => item.id === report.id ? { ...updatedReport, auditLog: [...(item.auditLog || []), nextAudit] } : item)
+    });
+  };
+  const createNewReportVersion = async () => {
+    setReportBusy(true);
+    try {
+      const reportId = await api.generateNextInspectionReportNumber().catch(() => "");
+      const nextVersion = buildInspectionReportDefaults(job, part, inspection, blankInspectionReport({
+        reportId,
+        generatedBy: report.generatedBy || report.releasedBy || "",
+        traceability: report.traceability,
+        inspectionContext: report.inspectionContext,
+        quantitySummary: report.quantitySummary,
+        ncrRequired: report.ncrRequired,
+        ncrJustification: report.ncrJustification,
+        gageExceptionNote: report.gageExceptionNote,
+        snapshot: {
+          units: inspection.units,
+          balloonedDocumentId: latestBalloonedDrawingDocument(part)?.id || "",
+          characteristics: inspection.characteristics,
+          instances: inspection.instances
+        },
+        versionNumber: (inspection.reports?.length || 0) + 1,
+        auditLog: [inspectionReportAuditEntry("created", "Created new inspection report version.", report.generatedBy || report.releasedBy || "")]
+      }), nonconformances, linkedMaterials);
+      setSelectedReportId(nextVersion.id);
+      onUpdate({
+        ...inspection,
+        reports: [...(inspection.reports || []), nextVersion],
+        activeReportId: nextVersion.id
+      });
+    } finally {
+      setReportBusy(false);
+    }
+  };
+  const finalizeReport = () => {
+    const autoFinalResult = failedSummary.rejected > 0
+      ? (failedSummary.accepted > 0 ? "Partial" : "Rejected")
+      : (reportInstances.length ? "Accepted" : "Pending");
+    const nextReport = buildInspectionReportDefaults(job, part, inspection, {
+      ...report,
+      status: "Final",
+      finalResult: report.finalResult && report.finalResult !== "Pending" ? report.finalResult : autoFinalResult,
+      releasedAt: report.releasedAt || nowIso(),
+      snapshot: {
+        units: inspection.units,
+        balloonedDocumentId: latestBalloonedDrawingDocument(part)?.id || report.snapshot?.balloonedDocumentId || "",
+        characteristics: inspection.characteristics,
+        instances: inspection.instances
+      }
+    }, nonconformances, linkedMaterials);
+    const nextErrors = inspectionReportValidation(nextReport, inspection, job, part);
+    if (nextErrors.length) {
+      window.alert(nextErrors.join("\n"));
+      return;
+    }
+    onUpdate({
+      ...inspection,
+      reports: inspection.reports.map((item) => item.id === report.id ? {
+        ...nextReport,
+        auditLog: [...(item.auditLog || []), inspectionReportAuditEntry("finalized", "Finalized inspection report.", nextReport.releasedBy || nextReport.generatedBy || "")]
+      } : item)
+    });
+  };
+  const voidReport = () => {
+    const reason = window.prompt("Void reason:");
+    if (!String(reason || "").trim()) {
+      return;
+    }
+    const nextReport = buildInspectionReportDefaults(job, part, inspection, {
+      ...report,
+      status: "Voided",
+      voidReason: reason,
+      voidedAt: nowIso()
+    }, nonconformances, linkedMaterials);
+    const nextErrors = inspectionReportValidation(nextReport, inspection, job, part);
+    if (nextErrors.length) {
+      window.alert(nextErrors.join("\n"));
+      return;
+    }
+    onUpdate({
+      ...inspection,
+      reports: inspection.reports.map((item) => item.id === report.id ? {
+        ...nextReport,
+        auditLog: [...(item.auditLog || []), inspectionReportAuditEntry("voided", `Voided inspection report: ${reason}`, nextReport.voidedBy || nextReport.generatedBy || "")]
+      } : item)
+    });
+  };
   const addInstance = () => applyInspection({
     ...inspection,
     instances: [...inspection.instances, blankInspectionInstance(inspection.instances.length + 1, previousInspector)]
@@ -4955,7 +6042,20 @@ function PartInspectionResultsScreen({ busy, part, instruments, onUpdate }) {
   const updateResult = (instanceId, characteristicId, value) => applyInspection({
     ...inspection,
     instances: inspection.instances.map((item) => item.id === instanceId
-      ? { ...item, results: { ...(item.results || {}), [characteristicId]: value } }
+      ? {
+        ...item,
+        results: {
+          ...(item.results || {}),
+          [characteristicId]: {
+            ...inspectionResultPayload(value, item.results?.[characteristicId]),
+            passFail: (() => {
+              const characteristic = inspection.characteristics.find((entry) => entry.id === characteristicId);
+              const status = inspectionResultStatus(characteristic, value);
+              return status ? status.toLowerCase() : "";
+            })()
+          }
+        }
+      }
       : item)
   });
   const fileUrl = balloonedDocument?.storedPath ? api.assetUrl(balloonedDocument.storedPath) : "";
@@ -4968,6 +6068,107 @@ function PartInspectionResultsScreen({ busy, part, instruments, onUpdate }) {
 
   return (
     <div className="workflow-stack inspection-screen">
+      {reportValidationErrors.length ? (
+        <section className="panel validation-summary danger">
+          <div className="panel-heading">
+            <div>
+              <h3>Inspection Report Validation</h3>
+              <span>{reportValidationErrors.length} issue{reportValidationErrors.length === 1 ? "" : "s"} must be resolved for finalization.</span>
+            </div>
+          </div>
+          <div className="stack-list compact-list">
+            {reportValidationErrors.map((error) => <div key={error} className="validation-message">{error}</div>)}
+          </div>
+        </section>
+      ) : null}
+      <section className="panel">
+        <div className="panel-heading inline">
+          <div>
+            <h3>Report Control</h3>
+            <span>{report.reportId || "No report ID"} | {report.status} | {report.finalResult}</span>
+          </div>
+          <div className="toolbar">
+            <button onClick={() => latestDraftReport && setSelectedReportId(latestDraftReport.id)} disabled={!latestDraftReport || latestDraftReport.id === report.id}>Open Draft</button>
+            <button onClick={() => void createNewReportVersion()} disabled={busy || reportBusy}><Plus size={14} /> New Version</button>
+            <button onClick={finalizeReport} disabled={busy || reportBusy || reportReadOnly}>Finalize</button>
+            <button onClick={voidReport} disabled={busy || reportBusy}>Void</button>
+          </div>
+        </div>
+        <div className="form-grid compact-4">
+          <label className="field" title="Unique inspection report identifier used for traceability and printing.">
+            <span>Inspection Report ID *</span>
+            <div className="field-action-row">
+              <input value={report.reportId || ""} onChange={(event) => updateReport({ reportId: event.target.value })} readOnly={reportReadOnly} />
+              <button className="inline-action-button" onClick={async () => updateReport({ reportId: await api.generateNextInspectionReportNumber().catch(() => report.reportId) })} disabled={reportReadOnly}>Assign Number</button>
+            </div>
+          </label>
+          <label className="field" title="Draft can still be edited. Final is released. Voided is retained for audit but no longer valid.">
+            <span>Report Status *</span>
+            <select value={report.status || "Draft"} onChange={() => {}} disabled>
+              {["Draft", "Final", "Voided"].map((option) => <option key={option} value={option}>{option}</option>)}
+            </select>
+          </label>
+          <label className="field" title="Overall inspection disposition for the report.">
+            <span>Final Result *</span>
+            <select value={report.finalResult || "Pending"} onChange={(event) => updateReport({ finalResult: event.target.value })} disabled={reportReadOnly}>
+              {["Accepted", "Rejected", "Pending", "Partial"].map((option) => <option key={option} value={option}>{option}</option>)}
+            </select>
+          </label>
+          <label className="field">
+            <span>Report Version</span>
+            <select value={report.id || ""} onChange={(event) => setSelectedReportId(event.target.value)}>
+              {(inspection.reports || []).map((item) => <option key={item.id} value={item.id}>{item.reportId || `Version ${item.versionNumber || "?"}`} | {item.status}</option>)}
+            </select>
+          </label>
+          <TextField label="Generated At *" type="datetime-local" value={String(report.generatedAt || "").slice(0, 16)} onChange={(value) => updateReport({ generatedAt: value })} readOnly={reportReadOnly} />
+          <TextField label="Generated By *" value={report.generatedBy || ""} onChange={(value) => updateReport({ generatedBy: value })} readOnly={reportReadOnly} />
+          <TextField label="Released By" value={report.releasedBy || ""} onChange={(value) => updateReport({ releasedBy: value })} readOnly={reportReadOnly} />
+          <TextField label="Released At" type="datetime-local" value={String(report.releasedAt || "").slice(0, 16)} onChange={(value) => updateReport({ releasedAt: value })} readOnly={reportReadOnly} />
+          <TextField label="Voided By" value={report.voidedBy || ""} onChange={(value) => updateReport({ voidedBy: value })} readOnly={report.status !== "Voided" || reportReadOnly} />
+          <TextField label="Voided At" type="datetime-local" value={String(report.voidedAt || "").slice(0, 16)} onChange={(value) => updateReport({ voidedAt: value })} readOnly={report.status !== "Voided" || reportReadOnly} />
+          <TextField label="Void Reason" value={report.voidReason || ""} onChange={(value) => updateReport({ voidReason: value })} readOnly={report.status !== "Voided" || reportReadOnly} />
+        </div>
+      </section>
+      <section className="panel">
+        <div className="panel-heading">
+          <div>
+            <h3>Traceability and Inspection Context</h3>
+            <span>Compact report fields for audit-ready output.</span>
+          </div>
+        </div>
+        <div className="form-grid compact-4">
+          <TextField label="Customer *" value={report.traceability?.customer || ""} onChange={(value) => updateReport({ traceability: { customer: value } })} readOnly={reportReadOnly} />
+          <TextField label="Customer PO Number" value={report.traceability?.customerPoNumber || ""} onChange={(value) => updateReport({ traceability: { customerPoNumber: value } })} readOnly={reportReadOnly} />
+          <TextField label="Internal Job / Work Order *" value={report.traceability?.internalJobNumber || ""} onChange={(value) => updateReport({ traceability: { internalJobNumber: value } })} readOnly={reportReadOnly} />
+          <TextField label="Sales Order / Quote" value={report.traceability?.salesOrderQuoteNumber || ""} onChange={(value) => updateReport({ traceability: { salesOrderQuoteNumber: value } })} readOnly={reportReadOnly} />
+          <TextField label="Part Number *" value={report.traceability?.partNumber || ""} onChange={(value) => updateReport({ traceability: { partNumber: value } })} readOnly={reportReadOnly} />
+          <TextField label="Part Name" value={report.traceability?.partName || ""} onChange={(value) => updateReport({ traceability: { partName: value } })} readOnly={reportReadOnly} />
+          <TextField label="Part Revision" value={report.traceability?.partRevision || ""} onChange={(value) => updateReport({ traceability: { partRevision: value } })} readOnly={reportReadOnly} />
+          <TextField label="Drawing Revision" value={report.traceability?.drawingRevision || ""} onChange={(value) => updateReport({ traceability: { drawingRevision: value } })} readOnly={reportReadOnly} />
+          <TextField label="Drawing File Name" value={report.traceability?.drawingFileName || ""} onChange={(value) => updateReport({ traceability: { drawingFileName: value } })} readOnly={reportReadOnly} />
+          <TextField label="Model Revision" value={report.traceability?.modelRevision || ""} onChange={(value) => updateReport({ traceability: { modelRevision: value } })} readOnly={reportReadOnly} />
+          <TextField label="Material" value={report.traceability?.material || ""} onChange={(value) => updateReport({ traceability: { material: value } })} readOnly={reportReadOnly} />
+          <TextField label="Lot / Batch / Serial" value={report.traceability?.lotBatchSerialNumber || ""} onChange={(value) => updateReport({ traceability: { lotBatchSerialNumber: value } })} readOnly={reportReadOnly} />
+          <TextField label="Quantity Ordered" value={report.quantitySummary?.quantityOrdered || ""} onChange={(value) => updateReport({ quantitySummary: { quantityOrdered: value } })} readOnly={reportReadOnly} />
+          <TextField label="Quantity Inspected *" value={report.quantitySummary?.quantityInspected || ""} onChange={(value) => updateReport({ quantitySummary: { quantityInspected: value } })} readOnly={reportReadOnly} />
+          <TextField label="Quantity Accepted" value={report.quantitySummary?.quantityAccepted || ""} onChange={(value) => updateReport({ quantitySummary: { quantityAccepted: value } })} readOnly={reportReadOnly} />
+          <TextField label="Quantity Rejected" value={report.quantitySummary?.quantityRejected || ""} onChange={(value) => updateReport({ quantitySummary: { quantityRejected: value } })} readOnly={reportReadOnly} />
+          <label className="field" title="Inspection context for the report release, such as first article, in-process, or final inspection.">
+            <span>Inspection Type</span>
+            <select value={report.inspectionContext?.inspectionType || "In-Process"} onChange={(event) => updateReport({ inspectionContext: { inspectionType: event.target.value } })} disabled={reportReadOnly}>
+              {["First Article", "In-Process", "Final", "Receiving", "Reinspection", "Other"].map((option) => <option key={option} value={option}>{option}</option>)}
+            </select>
+          </label>
+          <label className="field" title="Sampling plan used to collect the measured instances in this report.">
+            <span>Sampling Plan</span>
+            <select value={report.inspectionContext?.samplingPlan || "100% Inspection"} onChange={(event) => updateReport({ inspectionContext: { samplingPlan: event.target.value } })} disabled={reportReadOnly}>
+              {["100% Inspection", "First Article Only", "Random Sample", "Customer-Defined Sample", "Subtract Standard Sample", "Other"].map((option) => <option key={option} value={option}>{option}</option>)}
+            </select>
+          </label>
+          <TextField label="Inspection Plan Revision" value={report.inspectionContext?.inspectionPlanRevision || ""} onChange={(value) => updateReport({ inspectionContext: { inspectionPlanRevision: value } })} readOnly={reportReadOnly} />
+        </div>
+        <TextArea label="Inspection Notes / Deviations / Exceptions" value={[report.inspectionContext?.notes, report.inspectionContext?.deviations, report.inspectionContext?.exceptions].filter(Boolean).join("\n")} onChange={(value) => updateReport({ inspectionContext: { notes: value } })} rows={3} readOnly={reportReadOnly} />
+      </section>
       <section className="panel inspection-balloon-panel">
         <div className="panel-heading inline">
           <div>
@@ -5007,12 +6208,62 @@ function PartInspectionResultsScreen({ busy, part, instruments, onUpdate }) {
       </section>
       <InspectionResultsTable
         inspection={inspection}
+        characteristics={reportCharacteristics}
+        instances={reportInstances}
         instrumentOptions={instrumentOptions}
         onAddInstance={addInstance}
         onUpdateInstance={updateInstance}
         onUpdateResult={updateResult}
         onRemoveInstance={removeInstance}
+        readOnly={reportReadOnly}
       />
+      <section className="panel">
+        <div className="panel-heading">
+          <div>
+            <h3>Related NCRs and Audit Log</h3>
+            <span>All NCRs on this part are linked to the inspection report automatically.</span>
+          </div>
+        </div>
+        <div className="inline-list top-gap">
+          {autoLinkedNcrs.map((record) => (
+            <div className="inline-record" key={record.id || record.ncrNumber}>
+              <strong>{record.ncrNumber || record.id}</strong>
+              <span>{record.status || "Open"}{record.disposition ? ` / ${record.disposition}` : ""}{record.active === false ? " / Archived" : ""}</span>
+              <span>{record.issueSummary || record.nonconformanceDescription || "No issue summary"}</span>
+            </div>
+          ))}
+          {!autoLinkedNcrs.length && <div className="empty-inline">No NCRs exist for this part.</div>}
+          {autoLinkedNcrNumbers.some((number) => !autoLinkedNcrs.some((record) => (record.ncrNumber || record.id) === number)) ? (
+            <div className="empty-inline">Legacy report links: {autoLinkedNcrNumbers.filter((number) => !autoLinkedNcrs.some((record) => (record.ncrNumber || record.id) === number)).join(", ")}</div>
+          ) : null}
+        </div>
+        <div className="form-grid compact-4 top-gap">
+          <TextField label="Gage Exception Note" value={report.gageExceptionNote || ""} onChange={(value) => updateReport({ gageExceptionNote: value })} readOnly={reportReadOnly} />
+        </div>
+        <div className="table-wrap compact top-gap">
+          <table className="detail-table">
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>Event</th>
+                <th>Changed By</th>
+                <th>Message</th>
+              </tr>
+            </thead>
+            <tbody>
+              {[...(report.auditLog || [])].sort((a, b) => String(b.changedAt || "").localeCompare(String(a.changedAt || ""))).map((entry) => (
+                <tr key={entry.id}>
+                  <td>{formatDateTime(entry.changedAt)}</td>
+                  <td>{entry.eventType || "-"}</td>
+                  <td>{entry.changedBy || "-"}</td>
+                  <td>{entry.message || "-"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {!report.auditLog?.length && <div className="empty-inline">No report audit entries yet.</div>}
+        </div>
+      </section>
     </div>
   );
 }
@@ -5033,13 +6284,252 @@ function inspectionCharacteristicContextText(context, instruments = []) {
   return `Dim ${characteristic.number || "?"} | Lower ${lower} | Upper ${upper} | Tool ${tool}`;
 }
 
+function ncrFieldValue(value) {
+  return String(value || "").trim() || "N/A";
+}
+
+function ncrInspectionContextSummary(record, instruments = []) {
+  const gageName = record.inspectionContext?.characteristic?.gageId
+    ? instruments.find((item) => item.instrumentId === record.inspectionContext.characteristic.gageId)?.toolName || record.inspectionContext.characteristic.gageId
+    : "";
+  return [
+    record.inspectionContext?.characteristic?.number ? `Dim ${record.inspectionContext.characteristic.number}` : "",
+    record.inspectionContext?.characteristic?.lowerLimit || record.inspectionContext?.characteristic?.upperLimit
+      ? `${record.inspectionContext.characteristic.lowerLimit || "-"} to ${record.inspectionContext.characteristic.upperLimit || "-"}`
+      : "",
+    gageName
+  ].filter(Boolean).join(" | ") || "No linked inspection context.";
+}
+
+function extractLabeledTextValue(text, labels = []) {
+  const lines = String(text || "").split(/\r?\n/);
+  for (const label of labels) {
+    const escaped = String(label).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const matcher = new RegExp(`^\\s*${escaped}\\s*:\\s*(.+?)\\s*$`, "i");
+    for (const line of lines) {
+      const match = line.match(matcher);
+      const value = String(match?.[1] || "").trim();
+      if (value && value !== "-") {
+        return value;
+      }
+    }
+  }
+  return "";
+}
+
+function firstFailedInspectionResult(inspection) {
+  for (const instance of inspection.instances || []) {
+    for (const characteristic of inspection.characteristics || []) {
+      const result = instance.results?.[characteristic.id];
+      if (inspectionResultStatus(characteristic, result) === "Fail") {
+        return { instance, characteristic, result };
+      }
+    }
+  }
+  return null;
+}
+
+function ncrRequirementFromCharacteristic(characteristic, units = "") {
+  if (!characteristic) {
+    return "";
+  }
+  const limits = characteristicLimitDisplay(characteristic, units);
+  const requirement = characteristic.requirementDescription || characteristic.description || characteristic.type || `Dimension ${characteristic.number || "?"}`;
+  if (limits.lower !== "-" || limits.upper !== "-") {
+    return `${requirement} must be ${limits.lower} to ${limits.upper}`;
+  }
+  if (characteristic.nominal) {
+    return `${requirement} nominal ${characteristic.nominal} ${units}`.trim();
+  }
+  return requirement;
+}
+
+function ncrActualFromResult(failure, units = "") {
+  if (!failure) {
+    return "";
+  }
+  const value = inspectionMeasuredValue(failure.result);
+  return `Dimension ${failure.characteristic?.number || "?"} measured ${[value, units].filter(Boolean).join(" ")} on ${failure.instance?.label || "inspected part"}.`;
+}
+
+function ncrSeedFromContext({ job, part, inspection, materials = [], nonconformances = [] }) {
+  const report = buildInspectionReportDefaults(job, part, inspection, activeInspectionReport(inspection) || {}, nonconformances);
+  const snapshot = inspectionReportSnapshot(report, inspection);
+  const failure = firstFailedInspectionResult({ ...inspection, characteristics: snapshot.characteristics, instances: snapshot.instances });
+  const linkedMaterialIds = new Set(part?.requiredMaterialLots || []);
+  const linkedMaterials = (materials || []).filter((material) => linkedMaterialIds.has(material.id));
+  const materialLotText = linkedMaterials
+    .map((material) => [
+      material.serialCode,
+      material.lotNumber ? `Lot ${material.lotNumber}` : "",
+      material.heatNumber ? `Heat ${material.heatNumber}` : ""
+    ].filter(Boolean).join(" / "))
+    .filter(Boolean)
+    .join(", ");
+  const lastNcr = [...(nonconformances || [])]
+    .filter((record) => record.reportedBy || record.owner)
+    .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")))[0] || null;
+  const summary = inspectionSummaryCounts(snapshot.characteristics, snapshot.instances);
+  const customerPoNumber = report.traceability?.customerPoNumber || extractLabeledTextValue(job?.notes, ["PO Number", "Purchase Order", "Customer PO"]);
+  const salesOrderQuoteNumber = report.traceability?.salesOrderQuoteNumber || extractLabeledTextValue(job?.notes, ["Partner Quote ID", "Sales Order", "Quote", "Sales Order / Quote"]);
+  return {
+    jobId: job?.id || "",
+    jobNumber: job?.jobNumber || "",
+    customer: report.traceability?.customer || job?.customer || "",
+    customerPoNumber,
+    internalJobNumber: report.traceability?.internalJobNumber || job?.jobNumber || "",
+    salesOrderQuoteNumber,
+    partId: part?.id || "",
+    partNumber: report.traceability?.partNumber || part?.partNumber || "",
+    partName: report.traceability?.partName || part?.partName || "",
+    partRevision: report.traceability?.partRevision || part?.revision?.number || "",
+    drawingRevision: report.traceability?.drawingRevision || part?.revision?.number || "",
+    modelRevision: report.traceability?.modelRevision || "",
+    supplierResponsible: linkedMaterials.map((material) => material.supplier).filter(Boolean).join(", "),
+    lotBatchSerialNumber: report.traceability?.lotBatchSerialNumber || materialLotText,
+    quantityMade: report.quantitySummary?.quantityOrdered || part?.quantity || "",
+    quantityInspected: report.quantitySummary?.quantityInspected || (summary.inspected ? String(summary.inspected) : ""),
+    quantityAccepted: report.quantitySummary?.quantityAccepted || (summary.inspected ? String(summary.accepted) : ""),
+    quantityRejected: report.quantitySummary?.quantityRejected || (summary.inspected ? String(summary.rejected) : ""),
+    quantityAffected: summary.rejected ? String(summary.rejected) : "1",
+    dueDate: job?.dueDate || "",
+    reportedBy: lastNcr?.reportedBy || "",
+    owner: lastNcr?.owner || "",
+    source: snapshot.instances?.length ? "Internal Inspection" : "Other",
+    inspectionCharacteristicId: failure?.characteristic?.id || "",
+    inspectionInstanceId: failure?.instance?.id || "",
+    requirementViolated: ncrRequirementFromCharacteristic(failure?.characteristic, snapshot.units),
+    actualConditionFound: ncrActualFromResult(failure, snapshot.units),
+    detectionMethod: failure?.characteristic?.inspectionMethod || "",
+    inspectionEquipmentId: failure?.result?.gageId || failure?.characteristic?.gageId || "",
+    inspectionRecordReference: report.reportId || "",
+    relatedCharacteristicNumber: failure?.characteristic?.number || "",
+    units: snapshot.units || inspection.units || "",
+    issueSummary: failure ? `Dimension ${failure.characteristic?.number || "?"} out of tolerance` : "",
+    issueDescription: failure ? ncrActualFromResult(failure, snapshot.units) : "",
+    nonconformanceDescription: failure ? ncrActualFromResult(failure, snapshot.units) : "",
+    inspectionContext: failure ? {
+      characteristic: failure.characteristic,
+      instance: failure.instance
+    } : null
+  };
+}
+
+function getNonconformanceValidationMessages(record) {
+  const errors = [];
+  const requireField = (condition, value, message) => {
+    if (condition && !String(value || "").trim()) {
+      errors.push(message);
+    }
+  };
+  const status = record.status || "Open";
+  const quantityAffected = Number(record.quantityAffected || 0);
+  requireField(true, record.ncrNumber, "NCR Number is required.");
+  requireField(true, record.reportedBy, "Reported By is required.");
+  requireField(true, record.reportedAt, "Date Reported is required.");
+  requireField(status !== "Closed" && status !== "Cancelled", record.owner, "Owner is required while the NCR is not closed or cancelled.");
+  if (status !== "Cancelled") {
+    if (!String(record.quantityAffected || "").trim()) {
+      errors.push("Quantity Affected is required.");
+    } else if (!Number.isFinite(quantityAffected) || quantityAffected <= 0) {
+      errors.push("Quantity Affected must be greater than zero.");
+    }
+  }
+  requireField(true, record.nonconformanceDescription || record.issueDescription, "Nonconformance Description is required.");
+  if (["Contained", "Awaiting Disposition", "Awaiting Corrective Action", "Awaiting Verification", "Closed"].includes(status)) {
+    requireField(true, record.containmentAction, "Containment Action is required before moving past Open.");
+  }
+  if (String(record.containmentAction || "").trim() && status !== "Open") {
+    requireField(true, record.containmentDate, "Containment Date is required when containment is entered.");
+    requireField(true, record.containmentBy, "Containment By is required when containment is entered.");
+  }
+  if (["Awaiting Disposition", "Awaiting Corrective Action", "Awaiting Verification", "Closed"].includes(status)) {
+    requireField(true, record.requirementViolated, "Requirement / Specification Violated is required before disposition.");
+    requireField(true, record.actualConditionFound, "Actual Condition Found is required before disposition.");
+  }
+  if (record.customerNotificationRequired === "Yes" && status === "Closed") {
+    requireField(true, record.customerNotificationDate, "Customer Notification Date is required before closure.");
+  }
+  if (record.customerApprovalRequired === "Yes" && status === "Closed") {
+    requireField(true, record.customerApprovalReference, "Customer Approval Reference is required before closure.");
+  }
+  if (record.disposition === "Use As-Is" && record.customerApprovalRequired === "No") {
+    requireField(true, record.customerApprovalOverrideReason, "Use As-Is requires a reason if customer approval is overridden.");
+  }
+  if (record.reinspectionRequired === "Yes" && status === "Closed" && !["Pass", "Fail"].includes(record.reinspectionResult || "")) {
+    errors.push("Reinspection Result is required before closure.");
+  }
+  if (record.rootCauseRequired === "No" && ["Awaiting Corrective Action", "Awaiting Verification", "Closed"].includes(status)) {
+    requireField(true, record.rootCauseJustification, "Root Cause justification is required.");
+  }
+  if (record.correctiveActionRequired === "No" && ["Awaiting Verification", "Closed"].includes(status)) {
+    requireField(true, record.correctiveActionJustification, "Corrective Action justification is required.");
+  }
+  if (record.correctiveActionRequired === "Yes" && ["Awaiting Corrective Action", "Awaiting Verification", "Closed"].includes(status)) {
+    requireField(true, record.rootCause, "Root Cause is required when corrective action is required.");
+    requireField(true, record.correctiveActionTaken, "Corrective Action Taken is required when corrective action is required.");
+    requireField(true, record.correctiveActionOwner, "Corrective Action Owner is required when corrective action is required.");
+    if (status === "Closed") {
+      requireField(true, record.correctiveActionCompletedDate, "Corrective Action Completed Date is required before closure.");
+      requireField(true, record.effectivenessVerificationMethod, "Effectiveness Verification Method is required before closure.");
+      if (record.effectivenessVerificationResult !== "Effective") {
+        errors.push("Effectiveness Verification Result must be Effective before closure.");
+      }
+    }
+  }
+  if (status === "Closed") {
+    requireField(true, record.disposition, "Disposition is required before closure.");
+    requireField(true, record.correctionTaken, "Correction Taken is required before closure.");
+    requireField(true, record.closureApproval, "Closure Approval is required before closure.");
+  }
+  if (status === "Cancelled") {
+    requireField(true, record.cancellationReason, "Cancellation reason is required.");
+  }
+  return errors;
+}
+
+function allowedNcrStatuses(record) {
+  const statusOptions = [
+    "Open",
+    "Contained",
+    "Awaiting Disposition",
+    "Awaiting Corrective Action",
+    "Awaiting Verification",
+    "Closed",
+    "Cancelled"
+  ];
+  const status = record.status || "Open";
+  const options = new Set([status]);
+  if (status !== "Closed" && status !== "Cancelled") {
+    options.add("Cancelled");
+  }
+  if (status === "Open" && record.containmentAction && record.containmentDate && record.containmentBy) {
+    options.add("Contained");
+  }
+  if (status === "Contained") {
+    options.add("Awaiting Disposition");
+  }
+  if (status === "Awaiting Disposition") {
+    options.add(record.correctiveActionRequired === "Yes" ? "Awaiting Corrective Action" : "Awaiting Verification");
+  }
+  if (status === "Awaiting Corrective Action" && record.rootCause && record.correctiveActionTaken && record.correctiveActionOwner) {
+    options.add("Awaiting Verification");
+  }
+  if (status === "Awaiting Verification") {
+    options.add("Closed");
+  }
+  return statusOptions.filter((option) => options.has(option));
+}
+
 function NonconformanceDetailScreen({
   record,
   onChange,
   instruments,
   preferences,
+  constants,
   characteristicOptions = [],
   instanceOptions = [],
+  onApplyTemplate,
   onAddAttachments,
   onOpenAttachment,
   onOpenAttachmentRevision,
@@ -5048,8 +6538,17 @@ function NonconformanceDetailScreen({
   onReviseAttachment,
   onDeleteAttachment
 }) {
-  const dispositions = Array.from(new Set(["", ...(preferences?.nonconformanceDispositions || []), record.disposition || ""])).filter((item, index, array) => item || index === 0);
-  const statusOptions = ["Open", "Review", "Dispositioned", "Closed"];
+  const readOnly = record.status === "Closed";
+  const validationErrors = getNonconformanceValidationMessages(record);
+  const dispositions = Array.from(new Set(["", ...(preferences?.nonconformanceDispositions || []), record.disposition || ""])).filter((item, index) => item || index === 0);
+  const severityOptions = ["", ...(constants?.nonconformanceSeverities || ["Minor", "Major", "Critical"])];
+  const sourceOptions = ["", ...(constants?.nonconformanceSources || [])];
+  const detectionMethodOptions = ["", ...(constants?.nonconformanceDetectionMethods || [])];
+  const rootCauseCategoryOptions = ["", ...(constants?.nonconformanceRootCauseCategories || [])];
+  const effectivenessMethodOptions = ["", ...(constants?.nonconformanceEffectivenessMethods || [])];
+  const effectivenessResultOptions = constants?.nonconformanceEffectivenessResults || ["Effective", "Not Effective", "Pending", "Not Required"];
+  const attachmentTypeOptions = constants?.nonconformanceAttachmentTypes || ["Photo", "Drawing", "Inspection Report", "Customer Email", "Supplier Email", "Material Cert", "Rework Instructions", "Other"];
+  const attachmentStatusOptions = constants?.nonconformanceAttachmentStatuses || ["Current", "Superseded", "Archived"];
   const linkedCharacteristicOptions = Array.from(new Map([
     ...characteristicOptions.map((item) => [item.value, item]),
     ...(record.inspectionContext?.characteristic ? [[record.inspectionCharacteristicId || "", { value: record.inspectionCharacteristicId || "", label: `Dimension ${record.inspectionContext.characteristic.number || "?"}` }]] : [])
@@ -5062,53 +6561,236 @@ function NonconformanceDetailScreen({
     const filename = String(attachment.storedFilename || attachment.originalFilename || "").toLowerCase();
     return [".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"].some((extension) => filename.endsWith(extension));
   });
+  const applyPatch = (patch) => {
+    const next = { ...record, ...patch };
+    if (Object.prototype.hasOwnProperty.call(patch, "disposition") && patch.disposition === "Use As-Is" && next.customerApprovalRequired !== "Yes" && !next.customerApprovalOverrideReason) {
+      next.customerApprovalRequired = "Yes";
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, "status") && patch.status === "Closed") {
+      next.closedBy = next.closedBy || next.owner || next.reportedBy || "";
+      next.closureDate = next.closureDate || nowIso().slice(0, 10);
+    }
+    onChange(next);
+  };
+  const updateAttachment = (attachmentId, patch) => {
+    applyPatch({
+      attachments: (record.attachments || []).map((attachment) => attachment.id === attachmentId ? { ...attachment, ...patch } : attachment)
+    });
+  };
+
   return (
     <div className="workflow-stack">
+      {validationErrors.length ? (
+        <section className="panel validation-summary danger">
+          <div className="panel-heading">
+            <div>
+              <h3>Validation</h3>
+              <span>{validationErrors.length} issue{validationErrors.length === 1 ? "" : "s"} blocking advancement or closure.</span>
+            </div>
+          </div>
+          <div className="stack-list compact-list">
+            {validationErrors.map((error) => <div key={error} className="validation-message">{error}</div>)}
+          </div>
+        </section>
+      ) : null}
+
+      <section className="panel">
+        <div className="panel-heading inline">
+          <div>
+            <h3>Header and Status</h3>
+            <span>{record.jobNumber || "-"} / {record.partNumber || record.partName || "-"}</span>
+          </div>
+          <div className="toolbar">
+            <div className="field slim-field">
+              <span>Quick Template</span>
+              <select value="" onChange={(event) => {
+                const nextTemplate = NCR_QUICK_TEMPLATES.find((item) => item.id === event.target.value);
+                if (nextTemplate) {
+                  onApplyTemplate(nextTemplate.patch);
+                }
+              }} disabled={readOnly}>
+                <option value="">Apply Template</option>
+                {NCR_QUICK_TEMPLATES.map((template) => <option key={template.id} value={template.id}>{template.label}</option>)}
+              </select>
+            </div>
+          </div>
+        </div>
+        <div className="form-grid compact-4">
+          <TextField label="NCR Number *" value={record.ncrNumber || ""} onChange={(value) => applyPatch({ ncrNumber: value })} readOnly={readOnly} />
+          <SelectField label="Status *" value={record.status || "Open"} options={allowedNcrStatuses(record)} onChange={(value) => applyPatch({ status: value })} disabled={readOnly} />
+          <SelectField label="Severity" value={record.severity || "Minor"} options={severityOptions} onChange={(value) => applyPatch({ severity: value })} disabled={readOnly} />
+          <SelectField label="Source" value={record.source || ""} options={sourceOptions} onChange={(value) => applyPatch({ source: value })} emptyLabel="Choose source" disabled={readOnly} />
+          <TextField label="Date Reported *" type="datetime-local" value={String(record.reportedAt || "").slice(0, 16)} onChange={(value) => applyPatch({ reportedAt: value })} readOnly={readOnly} />
+          <TextField label="Reported By *" value={record.reportedBy || ""} onChange={(value) => applyPatch({ reportedBy: value, createdBy: record.createdBy || value })} readOnly={readOnly} />
+          <TextField label="Owner *" value={record.owner || ""} onChange={(value) => applyPatch({ owner: value })} readOnly={readOnly} />
+          <TextField label="Due Date" type="date" value={record.dueDate || ""} onChange={(value) => applyPatch({ dueDate: value })} readOnly={readOnly} />
+          <TextField label="Closure Date" type="date" value={record.closureDate || ""} onChange={(value) => applyPatch({ closureDate: value })} readOnly />
+          <TextField label="Closed By" value={record.closedBy || ""} onChange={(value) => applyPatch({ closedBy: value })} readOnly />
+          <TextField label="Closure Approval" value={record.closureApproval || ""} onChange={(value) => applyPatch({ closureApproval: value })} readOnly={readOnly} />
+          <TextField label="Quantity Affected *" value={record.quantityAffected || ""} onChange={(value) => applyPatch({ quantityAffected: value })} readOnly={readOnly} />
+        </div>
+      </section>
+
       <section className="panel">
         <div className="panel-heading">
           <div>
-            <h3>NCR Detail</h3>
-            <span>{record.jobNumber || "-"} / {record.partNumber || record.partName || "-"}</span>
+            <h3>Traceability</h3>
+            <span>Customer, job, part, supplier, and quantity context.</span>
           </div>
         </div>
-        <div className="form-grid compact-3">
-          <TextField label="NCR Number" value={record.ncrNumber || ""} onChange={(value) => onChange({ ...record, ncrNumber: value })} />
-          <SelectField label="Status" value={record.status || "Open"} options={statusOptions} onChange={(value) => onChange({ ...record, status: value })} />
-          <TextField label="Reported At" type="datetime-local" value={String(record.reportedAt || "").slice(0, 16)} onChange={(value) => onChange({ ...record, reportedAt: value })} />
-          <TextField label="Reported By" value={record.reportedBy || ""} onChange={(value) => onChange({ ...record, reportedBy: value })} />
-          <TextField label="Quantity Affected" value={record.quantityAffected || ""} onChange={(value) => onChange({ ...record, quantityAffected: value })} />
-          <TextField label="Owner" value={record.owner || ""} onChange={(value) => onChange({ ...record, owner: value })} />
-          <SelectField label="Disposition" value={record.disposition || ""} options={dispositions} onChange={(value) => onChange({ ...record, disposition: value })} />
-          <TextField label="Due Date" type="date" value={record.dueDate || ""} onChange={(value) => onChange({ ...record, dueDate: value })} />
+        <div className="form-grid compact-4">
+          <TextField label="Customer" value={record.customer || ""} onChange={(value) => applyPatch({ customer: value })} readOnly={readOnly} />
+          <TextField label="Customer PO Number" value={record.customerPoNumber || ""} onChange={(value) => applyPatch({ customerPoNumber: value })} readOnly={readOnly} />
+          <TextField label="Internal Job / Work Order" value={record.internalJobNumber || record.jobNumber || ""} onChange={(value) => applyPatch({ internalJobNumber: value })} readOnly={readOnly} />
+          <TextField label="Sales Order / Quote" value={record.salesOrderQuoteNumber || ""} onChange={(value) => applyPatch({ salesOrderQuoteNumber: value })} readOnly={readOnly} />
+          <TextField label="Part Number" value={record.partNumber || ""} onChange={(value) => applyPatch({ partNumber: value })} readOnly={readOnly} />
+          <TextField label="Part Name" value={record.partName || ""} onChange={(value) => applyPatch({ partName: value })} readOnly={readOnly} />
+          <TextField label="Part Revision" value={record.partRevision || ""} onChange={(value) => applyPatch({ partRevision: value })} readOnly={readOnly} />
+          <TextField label="Drawing Revision" value={record.drawingRevision || ""} onChange={(value) => applyPatch({ drawingRevision: value })} readOnly={readOnly} />
+          <TextField label="Model Revision" value={record.modelRevision || ""} onChange={(value) => applyPatch({ modelRevision: value })} readOnly={readOnly} />
+          <TextField label="Operation / Op Number" value={record.operationNumber || ""} onChange={(value) => applyPatch({ operationNumber: value })} readOnly={readOnly} />
+          <TextField label="Supplier / Vendor Responsible" value={record.supplierResponsible || ""} onChange={(value) => applyPatch({ supplierResponsible: value })} readOnly={readOnly} />
+          <TextField label="Lot / Batch / Serial Number" value={record.lotBatchSerialNumber || ""} onChange={(value) => applyPatch({ lotBatchSerialNumber: value })} readOnly={readOnly} />
+          <TextField label="Quantity Made" value={record.quantityMade || ""} onChange={(value) => applyPatch({ quantityMade: value })} readOnly={readOnly} />
+          <TextField label="Quantity Inspected" value={record.quantityInspected || ""} onChange={(value) => applyPatch({ quantityInspected: value })} readOnly={readOnly} />
+          <TextField label="Quantity Accepted" value={record.quantityAccepted || ""} onChange={(value) => applyPatch({ quantityAccepted: value })} readOnly={readOnly} />
+          <TextField label="Quantity Rejected" value={record.quantityRejected || ""} onChange={(value) => applyPatch({ quantityRejected: value })} readOnly={readOnly} />
+        </div>
+      </section>
+
+      <section className="panel">
+        <div className="panel-heading">
+          <div>
+            <h3>Requirement and Actual Condition</h3>
+            <span>Separate the requirement from what was actually found.</span>
+          </div>
+        </div>
+        <div className="form-grid compact-4">
+          <SelectField label="Detection Method" value={record.detectionMethod || ""} options={detectionMethodOptions} emptyLabel="Choose method" onChange={(value) => applyPatch({ detectionMethod: value })} disabled={readOnly} />
+          <TextField label="Inspection Equipment / Gage ID" value={record.inspectionEquipmentId || ""} onChange={(value) => applyPatch({ inspectionEquipmentId: value })} readOnly={readOnly} />
+          <TextField label="Inspection Record Reference" value={record.inspectionRecordReference || ""} onChange={(value) => applyPatch({ inspectionRecordReference: value })} readOnly={readOnly} />
+          <TextField label="Units" value={record.units || ""} onChange={(value) => applyPatch({ units: value })} readOnly={readOnly} />
           <div className="field">
             <span>Linked Characteristic</span>
-            <select value={record.inspectionCharacteristicId || ""} onChange={(event) => onChange({ ...record, inspectionCharacteristicId: event.target.value })}>
+            <select value={record.inspectionCharacteristicId || ""} onChange={(event) => applyPatch({ inspectionCharacteristicId: event.target.value })} disabled={readOnly}>
               <option value="">No linked characteristic</option>
               {linkedCharacteristicOptions.map((option) => <option key={option.value || "linked-characteristic"} value={option.value}>{option.label}</option>)}
             </select>
           </div>
           <div className="field">
             <span>Linked Instance</span>
-            <select value={record.inspectionInstanceId || ""} onChange={(event) => onChange({ ...record, inspectionInstanceId: event.target.value })}>
+            <select value={record.inspectionInstanceId || ""} onChange={(event) => applyPatch({ inspectionInstanceId: event.target.value })} disabled={readOnly}>
               <option value="">No linked instance</option>
               {linkedInstanceOptions.map((option) => <option key={option.value || "linked-instance"} value={option.value}>{option.label}</option>)}
             </select>
           </div>
-          <div className="field field-span-2">
+          <TextField label="Related Balloon / Characteristic Number" value={record.relatedCharacteristicNumber || ""} onChange={(value) => applyPatch({ relatedCharacteristicNumber: value })} readOnly={readOnly} />
+          <div className="field field-span-1">
             <span>Inspection Context</span>
-            <div className="static-field">{inspectionCharacteristicContextText(record.inspectionContext, instruments)}</div>
+            <div className="static-field">{ncrInspectionContextSummary(record, instruments)}</div>
           </div>
         </div>
-        <TextArea label="Issue Summary" value={record.issueSummary || ""} onChange={(value) => onChange({ ...record, issueSummary: value })} rows={2} />
-        <TextArea label="Issue Description" value={record.issueDescription || ""} onChange={(value) => onChange({ ...record, issueDescription: value })} rows={4} />
-        <TextArea label="Containment Action" value={record.containmentAction || ""} onChange={(value) => onChange({ ...record, containmentAction: value })} rows={3} />
-        <TextArea label="Root Cause Notes" value={record.rootCauseNotes || ""} onChange={(value) => onChange({ ...record, rootCauseNotes: value })} rows={3} />
-        <TextArea label="Closure Notes" value={record.closureNotes || ""} onChange={(value) => onChange({ ...record, closureNotes: value })} rows={3} />
+        <TextArea label="Requirement / Specification Violated *" value={record.requirementViolated || ""} onChange={(value) => applyPatch({ requirementViolated: value })} rows={2} readOnly={readOnly} />
+        <TextArea label="Actual Condition Found *" value={record.actualConditionFound || ""} onChange={(value) => applyPatch({ actualConditionFound: value })} rows={2} readOnly={readOnly} />
+      </section>
+
+      <section className="panel">
+        <div className="panel-heading">
+          <div>
+            <h3>Problem Description</h3>
+            <span>Plain-language issue statement and customer exposure.</span>
+          </div>
+        </div>
+        <div className="form-grid compact-4">
+          <TextField label="Short Title" value={record.issueSummary || ""} onChange={(value) => applyPatch({ issueSummary: value })} readOnly={readOnly} />
+          <SelectField label="Is Product Shipped?" value={record.productShipped || "No"} options={NCR_YES_NO_OPTIONS} onChange={(value) => applyPatch({ productShipped: value })} disabled={readOnly} />
+          <SelectField label="Customer Notification Required?" value={record.customerNotificationRequired || "No"} options={NCR_YES_NO_OPTIONS} onChange={(value) => applyPatch({ customerNotificationRequired: value })} disabled={readOnly} />
+          <SelectField label="Customer Approval Required?" value={record.customerApprovalRequired || "No"} options={NCR_YES_NO_OPTIONS} onChange={(value) => applyPatch({ customerApprovalRequired: value })} disabled={readOnly} />
+          <TextField label="Customer Notification Date" type="date" value={record.customerNotificationDate || ""} onChange={(value) => applyPatch({ customerNotificationDate: value })} readOnly={readOnly} />
+          <TextField label="Customer Approval Reference" value={record.customerApprovalReference || ""} onChange={(value) => applyPatch({ customerApprovalReference: value })} readOnly={readOnly} />
+          <TextField label="Override Reason" value={record.customerApprovalOverrideReason || ""} onChange={(value) => applyPatch({ customerApprovalOverrideReason: value })} readOnly={readOnly} />
+        </div>
+        <TextArea label="Nonconformance Description *" value={record.nonconformanceDescription || record.issueDescription || ""} onChange={(value) => applyPatch({ nonconformanceDescription: value, issueDescription: value })} rows={3} readOnly={readOnly} />
+        <TextArea label="Immediate Risk" value={record.immediateRisk || ""} onChange={(value) => applyPatch({ immediateRisk: value })} rows={2} readOnly={readOnly} />
+      </section>
+
+      <section className="panel">
+        <div className="panel-heading">
+          <div>
+            <h3>Containment</h3>
+            <span className="muted-note">Containment protects the customer immediately. It is not the same as correction or corrective action.</span>
+          </div>
+        </div>
+        <div className="form-grid compact-4">
+          <TextField label="Containment Date" type="date" value={record.containmentDate || ""} onChange={(value) => applyPatch({ containmentDate: value })} readOnly={readOnly} />
+          <TextField label="Containment By" value={record.containmentBy || ""} onChange={(value) => applyPatch({ containmentBy: value })} readOnly={readOnly} />
+          <TextField label="Containment Verified By" value={record.containmentVerifiedBy || ""} onChange={(value) => applyPatch({ containmentVerifiedBy: value })} readOnly={readOnly} />
+        </div>
+        <TextArea label="Containment Action *" value={record.containmentAction || ""} onChange={(value) => applyPatch({ containmentAction: value })} rows={3} readOnly={readOnly} />
+        <TextArea label="Containment Notes" value={record.containmentNotes || ""} onChange={(value) => applyPatch({ containmentNotes: value })} rows={2} readOnly={readOnly} />
+      </section>
+
+      <section className="panel">
+        <div className="panel-heading">
+          <div>
+            <h3>Disposition and Correction</h3>
+            <span className="muted-note">Correction is what physically happened to the affected product. Corrective action is what changes the system to prevent recurrence.</span>
+          </div>
+        </div>
+        <div className="form-grid compact-4">
+          <SelectField label="Disposition" value={record.disposition || ""} options={dispositions} emptyLabel="Choose disposition" onChange={(value) => applyPatch({ disposition: value })} disabled={readOnly} />
+          <TextField label="Disposition Approved By" value={record.dispositionApprovedBy || ""} onChange={(value) => applyPatch({ dispositionApprovedBy: value })} readOnly={readOnly} />
+          <TextField label="Disposition Date" type="date" value={record.dispositionDate || ""} onChange={(value) => applyPatch({ dispositionDate: value })} readOnly={readOnly} />
+          <SelectField label="Reinspection Required?" value={record.reinspectionRequired || "No"} options={NCR_YES_NO_OPTIONS} onChange={(value) => applyPatch({ reinspectionRequired: value, reinspectionResult: value === "Yes" ? record.reinspectionResult : "Not Required" })} disabled={readOnly} />
+          <SelectField label="Reinspection Result" value={record.reinspectionResult || "Not Required"} options={NCR_REINSPECTION_RESULT_OPTIONS} onChange={(value) => applyPatch({ reinspectionResult: value })} disabled={readOnly || record.reinspectionRequired !== "Yes"} />
+        </div>
+        <TextArea label="Correction Taken *" value={record.correctionTaken || ""} onChange={(value) => applyPatch({ correctionTaken: value })} rows={3} readOnly={readOnly} />
+        <TextArea label="Rework Instructions" value={record.reworkInstructions || ""} onChange={(value) => applyPatch({ reworkInstructions: value })} rows={2} readOnly={readOnly} />
+      </section>
+
+      <section className="panel">
+        <div className="panel-heading">
+          <div>
+            <h3>Root Cause and Corrective Action</h3>
+            <span className="muted-note">Root cause explains why it happened. Corrective action explains what changed in the system to stop recurrence.</span>
+          </div>
+        </div>
+        <div className="form-grid compact-4">
+          <SelectField label="Root Cause Required?" value={record.rootCauseRequired || "Yes"} options={NCR_YES_NO_OPTIONS} onChange={(value) => applyPatch({ rootCauseRequired: value })} disabled={readOnly} />
+          <SelectField label="Root Cause Category" value={record.rootCauseCategory || ""} options={rootCauseCategoryOptions} emptyLabel="Choose category" onChange={(value) => applyPatch({ rootCauseCategory: value })} disabled={readOnly} />
+          <SelectField label="Corrective Action Required?" value={record.correctiveActionRequired || "Yes"} options={NCR_YES_NO_OPTIONS} onChange={(value) => applyPatch({ correctiveActionRequired: value })} disabled={readOnly} />
+          <TextField label="Corrective Action Owner" value={record.correctiveActionOwner || ""} onChange={(value) => applyPatch({ correctiveActionOwner: value })} readOnly={readOnly} />
+          <TextField label="Corrective Action Due Date" type="date" value={record.correctiveActionDueDate || ""} onChange={(value) => applyPatch({ correctiveActionDueDate: value })} readOnly={readOnly} />
+          <TextField label="Completed Date" type="date" value={record.correctiveActionCompletedDate || ""} onChange={(value) => applyPatch({ correctiveActionCompletedDate: value })} readOnly={readOnly} />
+          <TextField label="Verified By" value={record.correctiveActionVerifiedBy || ""} onChange={(value) => applyPatch({ correctiveActionVerifiedBy: value })} readOnly={readOnly} />
+        </div>
+        <TextArea label="Root Cause" value={record.rootCause || record.rootCauseNotes || ""} onChange={(value) => applyPatch({ rootCause: value, rootCauseNotes: value })} rows={3} readOnly={readOnly} />
+        {record.rootCauseRequired === "No" ? (
+          <TextArea label="Root Cause Justification" value={record.rootCauseJustification || ""} onChange={(value) => applyPatch({ rootCauseJustification: value })} rows={2} readOnly={readOnly} />
+        ) : null}
+        <TextArea label="Corrective Action Taken" value={record.correctiveActionTaken || ""} onChange={(value) => applyPatch({ correctiveActionTaken: value })} rows={3} readOnly={readOnly} />
+        {record.correctiveActionRequired === "No" ? (
+          <TextArea label="Corrective Action Justification" value={record.correctiveActionJustification || ""} onChange={(value) => applyPatch({ correctiveActionJustification: value })} rows={2} readOnly={readOnly} />
+        ) : null}
+      </section>
+
+      <section className="panel">
+        <div className="panel-heading">
+          <div>
+            <h3>Effectiveness Verification</h3>
+            <span className="muted-note">Effectiveness verification checks whether the corrective action actually prevented recurrence.</span>
+          </div>
+        </div>
+        <div className="form-grid compact-4">
+          <SelectField label="Verification Method" value={record.effectivenessVerificationMethod || ""} options={effectivenessMethodOptions} emptyLabel="Choose method" onChange={(value) => applyPatch({ effectivenessVerificationMethod: value })} disabled={readOnly} />
+          <SelectField label="Verification Result" value={record.effectivenessVerificationResult || "Pending"} options={effectivenessResultOptions} onChange={(value) => applyPatch({ effectivenessVerificationResult: value })} disabled={readOnly} />
+          <TextField label="Verification Date" type="date" value={record.effectivenessVerificationDate || ""} onChange={(value) => applyPatch({ effectivenessVerificationDate: value })} readOnly={readOnly} />
+        </div>
       </section>
 
       <div className="record-grid job-detail-columns">
         <DocumentsPanel
-          title="NCR Attachments"
+          title="Attachments"
           documents={record.attachments || []}
           onAddDocuments={onAddAttachments}
           onOpenDocument={onOpenAttachment}
@@ -5127,7 +6809,39 @@ function NonconformanceDetailScreen({
           }}
           onReviseDocument={onReviseAttachment}
           emptyText="No NCR attachments attached yet."
+          readOnly={readOnly}
         />
+        <section className="panel">
+          <div className="panel-heading">
+            <div>
+              <h3>Attachment Metadata</h3>
+              <span>{record.attachments?.length || 0} attachment records</span>
+            </div>
+          </div>
+          <div className="stack-list compact-list">
+            {(record.attachments || []).map((attachment) => (
+              <div key={attachment.id} className="subpanel">
+                <div className="subpanel-header">
+                  <div>
+                    <h4>{attachment.originalFilename || "Attachment"}</h4>
+                    <span>{attachment.fileType || "File"} | Rev {attachment.revisionNumber || 1} | {formatDateTime(attachment.uploadedDate || attachment.attachedAt)}</span>
+                  </div>
+                </div>
+                <div className="form-grid compact-3">
+                  <SelectField label="Type" value={attachment.attachmentType || "Other"} options={attachmentTypeOptions} onChange={(value) => updateAttachment(attachment.id, { attachmentType: value, category: value })} disabled={readOnly} />
+                  <SelectField label="Status" value={attachment.attachmentStatus || (attachment.active === false ? "Archived" : "Current")} options={attachmentStatusOptions} onChange={(value) => updateAttachment(attachment.id, { attachmentStatus: value, status: value })} disabled={readOnly} />
+                  <TextField label="Uploaded By" value={attachment.uploadedBy || ""} onChange={(value) => updateAttachment(attachment.id, { uploadedBy: value })} readOnly={readOnly} />
+                  <TextField label="Uploaded Date" type="datetime-local" value={String(attachment.uploadedDate || attachment.attachedAt || "").slice(0, 16)} onChange={(value) => updateAttachment(attachment.id, { uploadedDate: value })} readOnly={readOnly} />
+                </div>
+                <TextArea label="Description" value={attachment.description || ""} onChange={(value) => updateAttachment(attachment.id, { description: value })} rows={2} readOnly={readOnly} />
+              </div>
+            ))}
+            {!record.attachments?.length && <div className="empty-inline">No attachment metadata yet.</div>}
+          </div>
+        </section>
+      </div>
+
+      {photoAttachments.length ? (
         <section className="panel">
           <div className="panel-heading">
             <div>
@@ -5142,10 +6856,57 @@ function NonconformanceDetailScreen({
                 <img className="ncr-photo-preview" src={nonconformanceAttachmentImageSrc(attachment)} alt={attachment.originalFilename} />
               </div>
             ))}
-            {!photoAttachments.length && <div className="empty-inline">No image attachments attached yet.</div>}
           </div>
         </section>
-      </div>
+      ) : null}
+
+      <section className="panel">
+        <div className="panel-heading">
+          <div>
+            <h3>Closure</h3>
+            <span>Closure is blocked until containment, correction, and verification requirements are complete.</span>
+          </div>
+        </div>
+        <div className="form-grid compact-4">
+          <TextField label="Closed By" value={record.closedBy || ""} onChange={(value) => applyPatch({ closedBy: value })} readOnly={readOnly} />
+          <TextField label="Closure Date" type="date" value={record.closureDate || ""} onChange={(value) => applyPatch({ closureDate: value })} readOnly={readOnly} />
+          <TextField label="Closure Approval" value={record.closureApproval || ""} onChange={(value) => applyPatch({ closureApproval: value })} readOnly={readOnly} />
+          <TextField label="Cancellation Reason" value={record.cancellationReason || ""} onChange={(value) => applyPatch({ cancellationReason: value })} readOnly={readOnly && record.status !== "Cancelled"} />
+        </div>
+        <TextArea label="Closure Notes" value={record.closureNotes || ""} onChange={(value) => applyPatch({ closureNotes: value })} rows={3} readOnly={readOnly} />
+      </section>
+
+      <section className="panel">
+        <div className="panel-heading">
+          <div>
+            <h3>Audit Log</h3>
+            <span>{record.auditLog?.length || 0} recorded event{record.auditLog?.length === 1 ? "" : "s"}</span>
+          </div>
+        </div>
+        <div className="table-wrap compact">
+          <table className="detail-table">
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>Event</th>
+                <th>Changed By</th>
+                <th>Message</th>
+              </tr>
+            </thead>
+            <tbody>
+              {[...(record.auditLog || [])].sort((a, b) => String(b.changedAt || "").localeCompare(String(a.changedAt || ""))).map((entry) => (
+                <tr key={entry.id}>
+                  <td>{formatDateTime(entry.changedAt)}</td>
+                  <td>{entry.eventType || "-"}</td>
+                  <td>{entry.changedBy || "-"}</td>
+                  <td>{entry.message || "-"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {!record.auditLog?.length && <div className="empty-inline">No audit entries recorded yet.</div>}
+        </div>
+      </section>
     </div>
   );
 }
@@ -5159,18 +6920,24 @@ function PartNonconformanceScreen({
   onCreateRecord,
   onOpenRecord,
   onChangeRecord,
+  onArchiveRecord,
+  onUnarchiveRecord,
+  onDeleteRecord,
   onAddAttachments,
   onOpenAttachment,
   onOpenAttachmentRevision,
   onArchiveAttachment,
   onUnarchiveAttachment,
   onReviseAttachment,
-  onDeleteAttachment
+  onDeleteAttachment,
+  constants,
+  onApplyTemplate
 }) {
   const partRecords = (nonconformances || []).filter((item) => item.partId === part.id);
   const inspection = renumberInspectionPayload(normalizeInspectionPayload(part.inspection));
   const characteristicOptions = inspection.characteristics.map((item) => ({ value: item.id, label: `Dimension ${item.number || "?"}` }));
   const instanceOptions = inspection.instances.map((item) => ({ value: item.id, label: item.label || "Instance" }));
+  const selectedRecordIsSaved = Boolean(record?.id && partRecords.some((item) => item.id === record.id));
   return (
     <div className="workflow-stack">
       <div className="record-grid job-detail-columns">
@@ -5184,13 +6951,34 @@ function PartNonconformanceScreen({
           </div>
           <div className="record-list">
             {partRecords.map((item) => (
-              <button key={item.id} className={`record-list-item ${record?.id === item.id ? "selected" : ""}`} onClick={() => onOpenRecord(item.id)}>
-                <strong>{item.ncrNumber || item.id}</strong>
-                <span>{item.issueSummary || "No issue summary"}</span>
-                <small>{[item.status, item.disposition || "No disposition", item.quantityAffected ? `Qty ${item.quantityAffected}` : ""].filter(Boolean).join(" | ")}</small>
-              </button>
+              <div key={item.id} className={`record-list-item ncr-list-item ${record?.id === item.id ? "selected" : ""}`}>
+                <button className="record-list-main" onClick={() => onOpenRecord(item.id)}>
+                  <strong>{item.ncrNumber || item.id}</strong>
+                  <span>{item.issueSummary || "No issue summary"}</span>
+                  <small>{[item.active === false ? "Archived" : item.status, item.disposition || "No disposition", item.quantityAffected ? `Qty ${item.quantityAffected}` : ""].filter(Boolean).join(" | ")}</small>
+                </button>
+                {record?.id === item.id ? (
+                  <div className="toolbar">
+                    <button
+                      className={item.active === false ? "subtle" : "danger subtle"}
+                      onClick={item.active === false ? onUnarchiveRecord : onArchiveRecord}
+                    >
+                      {item.active === false ? <ArchiveRestore size={14} /> : <Archive size={14} />}
+                      {item.active === false ? "Unarchive" : "Archive"}
+                    </button>
+                    {item.active === false ? (
+                      <button className="danger subtle" onClick={onDeleteRecord}>
+                        <Trash2 size={14} /> Delete
+                      </button>
+                    ) : null}
+                  </div>
+                ) : null}
+              </div>
             ))}
             {!partRecords.length && <div className="empty-inline">No NCRs have been created for this part.</div>}
+            {record && !selectedRecordIsSaved ? (
+              <div className="empty-inline">New NCR draft. Archive is available after the record autosaves.</div>
+            ) : null}
           </div>
         </section>
         {!record ? (
@@ -5203,8 +6991,10 @@ function PartNonconformanceScreen({
             onChange={onChangeRecord}
             instruments={instruments}
             preferences={preferences}
+            constants={constants}
             characteristicOptions={characteristicOptions}
             instanceOptions={instanceOptions}
+            onApplyTemplate={onApplyTemplate}
             onAddAttachments={onAddAttachments}
             onOpenAttachment={onOpenAttachment}
             onOpenAttachmentRevision={onOpenAttachmentRevision}
@@ -5219,6 +7009,90 @@ function PartNonconformanceScreen({
   );
 }
 
+function InspectionsView({ workspace, onOpenReport }) {
+  const [filters, setFilters] = useState({
+    query: "",
+    status: "All",
+    finalResult: "All",
+    customer: "",
+    job: "",
+    part: ""
+  });
+  const [showArchived, setShowArchived] = useState(false);
+  const records = workspace.inspections || [];
+  const archivedCount = records.filter((item) => item.active === false).length;
+  const statusOptions = Array.from(new Set(records.map((item) => item.status).filter(Boolean))).sort((a, b) => a.localeCompare(b));
+  const resultOptions = Array.from(new Set(records.map((item) => item.finalResult).filter(Boolean))).sort((a, b) => a.localeCompare(b));
+  const customerOptions = Array.from(new Set(records.map((item) => item.customer).filter(Boolean))).sort((a, b) => a.localeCompare(b));
+  const jobOptions = Array.from(new Set(records.map((item) => item.jobNumber).filter(Boolean))).sort((a, b) => a.localeCompare(b));
+  const partOptions = Array.from(new Set(records.map((item) => item.partNumber || item.partName).filter(Boolean))).sort((a, b) => a.localeCompare(b));
+  const filteredRecords = records.filter((item) => {
+    if (!showArchived && item.active === false) return false;
+    if (filters.status !== "All" && item.status !== filters.status) return false;
+    if (filters.finalResult !== "All" && item.finalResult !== filters.finalResult) return false;
+    if (filters.customer && item.customer !== filters.customer) return false;
+    if (filters.job && item.jobNumber !== filters.job) return false;
+    if (filters.part && (item.partNumber || item.partName || "") !== filters.part) return false;
+    const haystack = [item.reportId, item.status, item.finalResult, item.customer, item.jobNumber, item.partNumber, item.partName, item.inspectionType, item.samplingPlan, ...(item.relatedNcrNumbers || [])].join(" ").toLowerCase();
+    return haystack.includes(filters.query.trim().toLowerCase());
+  });
+  return (
+    <section className="panel">
+      <div className="panel-heading inline">
+        <div>
+          <h3>Inspection Reports</h3>
+          <span>{filteredRecords.length} matching reports{!showArchived && archivedCount ? ` | ${archivedCount} archived hidden` : ""}</span>
+        </div>
+        <div className="toolbar">
+          <button onClick={() => setShowArchived((current) => !current)}>{showArchived ? "Hide Archived" : `Show Archived (${archivedCount})`}</button>
+          <button onClick={() => setFilters({ query: "", status: "All", finalResult: "All", customer: "", job: "", part: "" })}>Clear Filters</button>
+        </div>
+      </div>
+      <div className="search-grid materials-search-grid sticky-filters">
+        <TextField label="Search" value={filters.query} onChange={(value) => setFilters((current) => ({ ...current, query: value }))} placeholder="Report, job, part, customer, NCR..." />
+        <SelectField label="Status" value={filters.status} options={["All", ...statusOptions]} onChange={(value) => setFilters((current) => ({ ...current, status: value }))} />
+        <SelectField label="Final Result" value={filters.finalResult} options={["All", ...resultOptions]} onChange={(value) => setFilters((current) => ({ ...current, finalResult: value }))} />
+        <SelectField label="Customer" value={filters.customer} options={["", ...customerOptions]} onChange={(value) => setFilters((current) => ({ ...current, customer: value }))} />
+        <SelectField label="Job" value={filters.job} options={["", ...jobOptions]} onChange={(value) => setFilters((current) => ({ ...current, job: value }))} />
+        <SelectField label="Part" value={filters.part} options={["", ...partOptions]} onChange={(value) => setFilters((current) => ({ ...current, part: value }))} />
+      </div>
+      <div className="table-wrap top-gap">
+        <table className="detail-table">
+          <thead>
+            <tr>
+              <th>Report</th>
+              <th>Status</th>
+              <th>Result</th>
+              <th>Job</th>
+              <th>Part</th>
+              <th>Customer</th>
+              <th>Qty</th>
+              <th>Released</th>
+              <th>NCR</th>
+            </tr>
+          </thead>
+          <tbody>
+            {filteredRecords.map((item) => (
+              <tr key={`${item.jobId}-${item.partId}-${item.id}`} onClick={() => onOpenReport(item)}>
+                <td><strong>{item.reportId || "Draft Inspection"}</strong></td>
+                <td>{item.status || "-"}</td>
+                <td>{item.finalResult || "-"}</td>
+                <td>{item.jobNumber || "-"}</td>
+                <td>{item.partNumber || item.partName || "-"}</td>
+                <td>{item.customer || "-"}</td>
+                <td>{item.quantityInspected || item.instanceCount || "-"}</td>
+                <td>{formatDateTime(item.releasedAt || item.generatedAt)}</td>
+                <td>{(item.relatedNcrNumbers || []).join(", ") || "-"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {!filteredRecords.length && <div className="empty-inline">No inspection reports matched the current filters.</div>}
+      </div>
+    </section>
+  );
+}
+
 function NonconformanceView({
   workspace,
   screen,
@@ -5226,6 +7100,11 @@ function NonconformanceView({
   setRecord,
   onOpenRecord,
   onShowList,
+  onExportCsv,
+  onArchiveRecord,
+  onUnarchiveRecord,
+  onDeleteRecord,
+  onApplyTemplate,
   onAddAttachments,
   onOpenAttachment,
   onOpenAttachmentRevision,
@@ -5239,83 +7118,137 @@ function NonconformanceView({
   const [filters, setFilters] = useState({
     query: "",
     status: "All",
+    severity: "All",
     disposition: "All",
+    customer: "",
+    supplier: "",
+    rootCauseCategory: "All",
     owner: "",
     job: "",
     part: "",
-    reportedDate: ""
+    dateFrom: "",
+    dateTo: ""
   });
   const [showArchived, setShowArchived] = useState(false);
   const records = workspace.nonconformances || [];
   const dispositionOptions = Array.from(new Set(records.map((item) => item.disposition).filter(Boolean))).sort((a, b) => a.localeCompare(b));
+  const severityOptions = Array.from(new Set(records.map((item) => item.severity).filter(Boolean))).sort((a, b) => a.localeCompare(b));
+  const customerOptions = Array.from(new Set(records.map((item) => item.customer).filter(Boolean))).sort((a, b) => a.localeCompare(b));
+  const supplierOptions = Array.from(new Set(records.map((item) => item.supplierResponsible).filter(Boolean))).sort((a, b) => a.localeCompare(b));
+  const rootCauseCategoryOptions = Array.from(new Set(records.map((item) => item.rootCauseCategory).filter(Boolean))).sort((a, b) => a.localeCompare(b));
   const ownerOptions = Array.from(new Set(records.map((item) => item.owner).filter(Boolean))).sort((a, b) => a.localeCompare(b));
   const jobOptions = Array.from(new Set(records.map((item) => item.jobNumber).filter(Boolean))).sort((a, b) => a.localeCompare(b));
   const partOptions = Array.from(new Set(records.map((item) => item.partNumber || item.partName).filter(Boolean))).sort((a, b) => a.localeCompare(b));
   const filteredRecords = records.filter((item) => {
     if (!showArchived && item.active === false) return false;
     if (filters.status !== "All" && item.status !== filters.status) return false;
+    if (filters.severity !== "All" && (item.severity || "") !== filters.severity) return false;
     if (filters.disposition !== "All" && (item.disposition || "") !== filters.disposition) return false;
+    if (filters.customer && (item.customer || "") !== filters.customer) return false;
+    if (filters.supplier && (item.supplierResponsible || "") !== filters.supplier) return false;
+    if (filters.rootCauseCategory !== "All" && (item.rootCauseCategory || "") !== filters.rootCauseCategory) return false;
     if (filters.owner && (item.owner || "") !== filters.owner) return false;
     if (filters.job && (item.jobNumber || "") !== filters.job) return false;
     if (filters.part && ((item.partNumber || item.partName || "") !== filters.part)) return false;
-    if (filters.reportedDate && String(item.reportedAt || "").slice(0, 10) !== filters.reportedDate) return false;
-    const haystack = [item.ncrNumber, item.jobNumber, item.partNumber, item.partName, item.issueSummary, item.owner, item.disposition].join(" ").toLowerCase();
+    if (filters.dateFrom && String(item.reportedAt || "").slice(0, 10) < filters.dateFrom) return false;
+    if (filters.dateTo && String(item.reportedAt || "").slice(0, 10) > filters.dateTo) return false;
+    const haystack = [item.ncrNumber, item.jobNumber, item.partNumber, item.partName, item.issueSummary, item.nonconformanceDescription, item.owner, item.disposition, item.customer, item.supplierResponsible, item.rootCauseCategory].join(" ").toLowerCase();
     return haystack.includes(filters.query.trim().toLowerCase());
   });
   const updateRecord = (patch) => setRecord((current) => current ? { ...current, ...patch } : current);
+  const statusCounts = (workspace.constants?.nonconformanceStatuses || []).map((status) => ({ status, count: filteredRecords.filter((item) => item.status === status).length }));
+  const severityCounts = (workspace.constants?.nonconformanceSeverities || []).map((severity) => ({ severity, count: filteredRecords.filter((item) => item.severity === severity).length }));
 
   if (screen === "detail" && record) {
     return (
-      <NonconformanceDetailScreen
-        record={record}
-        onChange={updateRecord}
-        instruments={instruments}
-        preferences={preferences}
-        characteristicOptions={[]}
-        instanceOptions={[]}
-        onAddAttachments={onAddAttachments}
-        onOpenAttachment={onOpenAttachment}
-        onOpenAttachmentRevision={onOpenAttachmentRevision}
-        onArchiveAttachment={onArchiveAttachment}
-        onUnarchiveAttachment={onUnarchiveAttachment}
-        onReviseAttachment={onReviseAttachment}
-        onDeleteAttachment={onDeleteAttachment}
-      />
+      <div className="workflow-stack">
+        <section className="panel ncr-record-actions-panel">
+          <div className="panel-heading inline">
+            <div>
+              <h3>NCR Actions</h3>
+              <span>{record.active === false ? "Archived record" : "Current record"}</span>
+            </div>
+            <div className="toolbar">
+              <button
+                className={record.active === false ? "subtle" : "danger subtle"}
+                onClick={record.active === false ? onUnarchiveRecord : onArchiveRecord}
+                disabled={!record.id}
+              >
+                {record.active === false ? <ArchiveRestore size={14} /> : <Archive size={14} />}
+                {record.active === false ? "Unarchive" : "Archive"}
+              </button>
+              {record.active === false ? (
+                <button className="danger subtle" onClick={onDeleteRecord} disabled={!record.id}>
+                  <Trash2 size={14} /> Delete
+                </button>
+              ) : null}
+            </div>
+          </div>
+        </section>
+        <NonconformanceDetailScreen
+          record={record}
+          onChange={updateRecord}
+          instruments={instruments}
+          preferences={preferences}
+          constants={workspace.constants}
+          characteristicOptions={[]}
+          instanceOptions={[]}
+          onApplyTemplate={(patch) => updateRecord(patch)}
+          onAddAttachments={onAddAttachments}
+          onOpenAttachment={onOpenAttachment}
+          onOpenAttachmentRevision={onOpenAttachmentRevision}
+          onArchiveAttachment={onArchiveAttachment}
+          onUnarchiveAttachment={onUnarchiveAttachment}
+          onReviseAttachment={onReviseAttachment}
+          onDeleteAttachment={onDeleteAttachment}
+        />
+      </div>
     );
   }
 
   return (
     <section className="panel">
-      <div className="panel-heading inline">
-        <div>
-          <h3>Nonconformance Records</h3>
-          <span>{filteredRecords.length} matching records</span>
+        <div className="panel-heading inline">
+          <div>
+            <h3>Nonconformance Records</h3>
+            <span>{filteredRecords.length} matching records</span>
+          </div>
+          <div className="toolbar">
+            <button onClick={() => setFilters({ query: "", status: "All", severity: "All", disposition: "All", customer: "", supplier: "", rootCauseCategory: "All", owner: "", job: "", part: "", dateFrom: "", dateTo: "" })}>Clear Filters</button>
+            <button onClick={() => setShowArchived((current) => !current)}>{showArchived ? "Hide Archived" : "Show Archived"}</button>
+            <button onClick={() => onExportCsv(filters)}><FileDown size={15} /> Export CSV</button>
+          </div>
         </div>
-        <div className="toolbar">
-          <button onClick={() => setFilters({ query: "", status: "All", disposition: "All", owner: "", job: "", part: "", reportedDate: "" })}>Clear Filters</button>
-          <button onClick={() => setShowArchived((current) => !current)}>{showArchived ? "Hide Archived" : "Show Archived"}</button>
-        </div>
+      <div className="inline-chip-list">
+        {statusCounts.map((item) => <span key={item.status} className="inline-chip">{item.status}: {item.count}</span>)}
+        {severityCounts.map((item) => <span key={item.severity} className="inline-chip">{item.severity}: {item.count}</span>)}
       </div>
       <div className="search-grid materials-search-grid sticky-filters">
         <TextField label="Search" value={filters.query} onChange={(value) => setFilters((current) => ({ ...current, query: value }))} placeholder="NCR, job, part, issue, owner..." />
-        <SelectField label="Status" value={filters.status} options={["All", "Open", "Review", "Dispositioned", "Closed"]} onChange={(value) => setFilters((current) => ({ ...current, status: value }))} />
+        <SelectField label="Status" value={filters.status} options={["All", ...(workspace.constants?.nonconformanceStatuses || [])]} onChange={(value) => setFilters((current) => ({ ...current, status: value }))} />
+        <SelectField label="Severity" value={filters.severity} options={["All", ...severityOptions]} onChange={(value) => setFilters((current) => ({ ...current, severity: value }))} />
         <SelectField label="Disposition" value={filters.disposition} options={["All", ...dispositionOptions]} onChange={(value) => setFilters((current) => ({ ...current, disposition: value }))} />
+        <SelectField label="Customer" value={filters.customer} options={["", ...customerOptions]} onChange={(value) => setFilters((current) => ({ ...current, customer: value }))} />
+        <SelectField label="Supplier" value={filters.supplier} options={["", ...supplierOptions]} onChange={(value) => setFilters((current) => ({ ...current, supplier: value }))} />
+        <SelectField label="Root Cause Category" value={filters.rootCauseCategory} options={["All", ...rootCauseCategoryOptions]} onChange={(value) => setFilters((current) => ({ ...current, rootCauseCategory: value }))} />
         <SelectField label="Owner" value={filters.owner} options={["", ...ownerOptions]} onChange={(value) => setFilters((current) => ({ ...current, owner: value }))} />
         <SelectField label="Job" value={filters.job} options={["", ...jobOptions]} onChange={(value) => setFilters((current) => ({ ...current, job: value }))} />
         <SelectField label="Part" value={filters.part} options={["", ...partOptions]} onChange={(value) => setFilters((current) => ({ ...current, part: value }))} />
-        <TextField label="Reported Date" type="date" value={filters.reportedDate} onChange={(value) => setFilters((current) => ({ ...current, reportedDate: value }))} />
+        <TextField label="Date From" type="date" value={filters.dateFrom} onChange={(value) => setFilters((current) => ({ ...current, dateFrom: value }))} />
+        <TextField label="Date To" type="date" value={filters.dateTo} onChange={(value) => setFilters((current) => ({ ...current, dateTo: value }))} />
       </div>
       <div className="record-list top-gap">
         {filteredRecords.map((item) => (
           <button key={item.id} className="record-list-item record-list-row" onClick={() => onOpenRecord(item.id)}>
             <div className="record-row-primary">
               <strong>{item.ncrNumber || item.id}</strong>
-              <span>{item.issueSummary || "No issue summary"}</span>
+              <span>{item.issueSummary || item.nonconformanceDescription || "No issue summary"}</span>
             </div>
             <div className="record-row-meta">
               <small>{item.jobNumber || "-"}</small>
               <small>{item.partNumber || item.partName || "-"}</small>
               <small>{item.status || "-"}</small>
+              <small>{item.severity || "-"}</small>
               <small>{item.disposition || "-"}</small>
             </div>
           </button>
@@ -5326,7 +7259,7 @@ function NonconformanceView({
   );
 }
 
-function PrintPdfPage({ fileUrl, pageNumber = 1 }) {
+function PrintPdfPage({ fileUrl, pageNumber = 1, bare = false }) {
   const canvasRef = useRef(null);
   const [error, setError] = useState("");
 
@@ -5374,8 +7307,19 @@ function PrintPdfPage({ fileUrl, pageNumber = 1 }) {
     return <div className="traveler-empty-state">{error}</div>;
   }
   return (
-    <div className="inspection-print-drawing-frame">
+    <div className={bare ? "inspection-print-drawing-frame inspection-print-drawing-frame-bare" : "inspection-print-drawing-frame"}>
       <canvas ref={canvasRef} className="inspection-print-drawing-canvas" />
+    </div>
+  );
+}
+
+function PrintImagePage({ fileUrl, alt = "", bare = false }) {
+  if (!fileUrl) {
+    return <div className="traveler-empty-state">No attachment image available.</div>;
+  }
+  return (
+    <div className={bare ? "inspection-print-attachment-frame inspection-print-attachment-frame-bare" : "inspection-print-attachment-frame"}>
+      <img src={fileUrl} alt={alt || "Material attachment"} />
     </div>
   );
 }
@@ -5384,7 +7328,7 @@ function InspectionXBarChart({ characteristic, instances, units, instrumentOptio
   const numericPoints = instances
     .map((instance, index) => {
       const raw = instance.results?.[characteristic.id];
-      const value = Number(String(raw || "").trim());
+      const value = Number(inspectionMeasuredValue(raw));
       if (!Number.isFinite(value)) {
         return null;
       }
@@ -5416,12 +7360,12 @@ function InspectionXBarChart({ characteristic, instances, units, instrumentOptio
   const padding = (max - min) * 0.15 || 1;
   min -= padding;
   max += padding;
-  const width = 640;
-  const height = 220;
+  const width = 760;
+  const height = 190;
   const left = 56;
-  const right = 20;
+  const right = 24;
   const top = 18;
-  const bottom = 42;
+  const bottom = 36;
   const innerWidth = width - left - right;
   const innerHeight = height - top - bottom;
   const xFor = (index) => numericPoints.length === 1 ? left + innerWidth / 2 : left + (innerWidth * index) / (numericPoints.length - 1);
@@ -7366,6 +9310,7 @@ function LibrarySettingsSection({ workspace, onStatus, onRefresh }) {
 }
 
 function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, selectedTemplate, setSelectedTemplateId, onStatus, onRefresh }) {
+  const [activeSettingsTab, setActiveSettingsTab] = useState("system");
   const [materialFamilies, setMaterialFamilies] = useState(workspace.preferences?.materialFamilies || []);
   const [selectedFamilyId, setSelectedFamilyId] = useState(workspace.preferences?.materialFamilies?.[0]?.id || null);
   const [brandingSettings, setBrandingSettings] = useState({
@@ -7379,6 +9324,11 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
     jobPrefix: workspace.preferences?.jobPrefix || "J03C",
     startingJobNumber: String(workspace.preferences?.startingJobNumber ?? 600)
   });
+  const [inspectionReportNumberSettings, setInspectionReportNumberSettings] = useState({
+    inspectionReportPrefix: workspace.preferences?.inspectionReportPrefix || "IR",
+    startingInspectionReportNumber: String(workspace.preferences?.startingInspectionReportNumber ?? 1)
+  });
+  const [inspectionReportExportSettings, setInspectionReportExportSettings] = useState(defaultInspectionReportExportOptions(workspace.preferences?.inspectionReportExportOptions));
   const [nonconformanceNumberSettings, setNonconformanceNumberSettings] = useState({
     nonconformancePrefix: workspace.preferences?.nonconformancePrefix || "NCR",
     startingNonconformanceNumber: String(workspace.preferences?.startingNonconformanceNumber ?? 1)
@@ -7431,6 +9381,11 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
       jobPrefix: workspace.preferences?.jobPrefix || "J03C",
       startingJobNumber: String(workspace.preferences?.startingJobNumber ?? 600)
     });
+    setInspectionReportNumberSettings({
+      inspectionReportPrefix: workspace.preferences?.inspectionReportPrefix || "IR",
+      startingInspectionReportNumber: String(workspace.preferences?.startingInspectionReportNumber ?? 1)
+    });
+    setInspectionReportExportSettings(defaultInspectionReportExportOptions(workspace.preferences?.inspectionReportExportOptions));
     setNonconformanceNumberSettings({
       nonconformancePrefix: workspace.preferences?.nonconformancePrefix || "NCR",
       startingNonconformanceNumber: String(workspace.preferences?.startingNonconformanceNumber ?? 1)
@@ -7651,6 +9606,33 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
   });
 
   useAutoSave({
+    value: inspectionReportNumberSettings,
+    resetKey: `inspection-report-number-settings:${workspace.dataFolder}:${workspace.preferences?.inspectionReportPrefix || ""}:${workspace.preferences?.startingInspectionReportNumber ?? ""}`,
+    enabled: true,
+    isReady: (current) => Boolean(current),
+    save: async (current) => {
+      await onSavePreferences({
+        inspectionReportPrefix: String(current.inspectionReportPrefix || "").trim(),
+        startingInspectionReportNumber: Number(current.startingInspectionReportNumber || 0) || 1
+      }, { silent: true });
+      return current;
+    }
+  });
+
+  useAutoSave({
+    value: inspectionReportExportSettings,
+    resetKey: `inspection-report-export-settings:${workspace.dataFolder}:${JSON.stringify(workspace.preferences?.inspectionReportExportOptions || {})}`,
+    enabled: true,
+    isReady: (current) => Boolean(current),
+    save: async (current) => {
+      await onSavePreferences({
+        inspectionReportExportOptions: defaultInspectionReportExportOptions(current)
+      }, { silent: true });
+      return current;
+    }
+  });
+
+  useAutoSave({
     value: nonconformanceNumberSettings,
     resetKey: `ncr-number-settings:${workspace.dataFolder}:${workspace.preferences?.nonconformancePrefix || ""}:${workspace.preferences?.startingNonconformanceNumber ?? ""}`,
     enabled: true,
@@ -7809,6 +9791,17 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
   const nonconformanceSections = [
     ["nonconformanceDispositions", "Dispositions"]
   ];
+  const settingsTabs = [
+    ["system", "System"],
+    ["jobs", "Jobs"],
+    ["inspections", "Inspections"],
+    ["nonconformance", "Nonconformance"],
+    ["kanban", "Kanban"],
+    ["materials", "Materials"],
+    ["gages", "Gages"],
+    ["templates", "Templates"],
+    ["activity", "Activity"]
+  ];
   const selectedKanbanDepartment = kanbanDepartments.find((department) => department.id === selectedKanbanDepartmentId) || null;
   const settingsOptionPlaceholder = (label) => {
     if (label === "Categories") {
@@ -7819,20 +9812,26 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
 
   return (
     <div className="workflow-stack settings-stack">
-      <section className="panel">
+      <div className="settings-tab-row">
+        {settingsTabs.map(([id, label]) => (
+          <button key={id} className={activeSettingsTab === id ? "active" : ""} onClick={() => setActiveSettingsTab(id)}>{label}</button>
+        ))}
+      </div>
+
+      <section className={`panel ${activeSettingsTab === "system" || activeSettingsTab === "jobs" || activeSettingsTab === "inspections" || activeSettingsTab === "nonconformance" || activeSettingsTab === "kanban" ? "" : "settings-section-hidden"}`}>
         <div className="panel-heading inline">
           <div>
-            <h3>Data</h3>
+            <h3>{activeSettingsTab === "system" ? "Data" : activeSettingsTab === "jobs" ? "Job Settings" : activeSettingsTab === "inspections" ? "Inspection Settings" : activeSettingsTab === "nonconformance" ? "Nonconformance Settings" : "Kanban Settings"}</h3>
             <span>Workspace location and numbering defaults.</span>
           </div>
         </div>
         <div className="settings-admin-grid">
-          <button className="import-card" onClick={onChooseDataFolder}>
+          <button className={`import-card ${activeSettingsTab === "system" ? "" : "settings-section-hidden"}`} onClick={onChooseDataFolder}>
             <FolderOpen size={20} />
             <strong>Change Data Folder</strong>
             <span>{workspace.dataFolder}</span>
           </button>
-          <div className="subpanel">
+          <div className={`subpanel ${activeSettingsTab === "system" ? "" : "settings-section-hidden"}`}>
             <div className="subpanel-header">
               <div>
                 <h4>Branding</h4>
@@ -7864,7 +9863,7 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
               )}
             </div>
           </div>
-          <div className="subpanel">
+          <div className={`subpanel ${activeSettingsTab === "jobs" ? "" : "settings-section-hidden"}`}>
             <div className="subpanel-header">
               <div>
                 <h4>Job Numbering</h4>
@@ -7876,7 +9875,7 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
               <TextField label="Starting Job Number" value={jobSettings.startingJobNumber} onChange={(value) => setJobSettings((current) => ({ ...current, startingJobNumber: value }))} />
             </div>
           </div>
-          <div className="subpanel">
+          <div className={`subpanel ${activeSettingsTab === "kanban" ? "" : "settings-section-hidden"}`}>
             <div className="subpanel-header">
               <div>
                 <h4>Kanban Numbering</h4>
@@ -7888,7 +9887,7 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
               <TextField label="Starting Inventory Number" value={kanbanNumberSettings.kanbanStartingInventoryNumber} onChange={(value) => setKanbanNumberSettings((current) => ({ ...current, kanbanStartingInventoryNumber: value }))} />
             </div>
           </div>
-          <div className="subpanel">
+          <div className={`subpanel ${activeSettingsTab === "nonconformance" ? "" : "settings-section-hidden"}`}>
             <div className="subpanel-header">
               <div>
                 <h4>NCR Numbering</h4>
@@ -7900,7 +9899,39 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
               <TextField label="Starting NCR Number" value={nonconformanceNumberSettings.startingNonconformanceNumber} onChange={(value) => setNonconformanceNumberSettings((current) => ({ ...current, startingNonconformanceNumber: value }))} />
             </div>
           </div>
-          <div className="subpanel">
+          <div className={`subpanel ${activeSettingsTab === "inspections" ? "" : "settings-section-hidden"}`}>
+            <div className="subpanel-header">
+              <div>
+                <h4>Inspection Report Numbering</h4>
+                <span>Defaults for new inspection report versions.</span>
+              </div>
+            </div>
+            <div className="form-grid compact-2">
+              <TextField label="Inspection Report Prefix" value={inspectionReportNumberSettings.inspectionReportPrefix} onChange={(value) => setInspectionReportNumberSettings((current) => ({ ...current, inspectionReportPrefix: value }))} />
+              <TextField label="Starting Inspection Report Number" value={inspectionReportNumberSettings.startingInspectionReportNumber} onChange={(value) => setInspectionReportNumberSettings((current) => ({ ...current, startingInspectionReportNumber: value }))} />
+            </div>
+          </div>
+          <div className={`subpanel ${activeSettingsTab === "inspections" ? "" : "settings-section-hidden"}`}>
+            <div className="subpanel-header">
+              <div>
+                <h4>Inspection Report Export Defaults</h4>
+                <span>These are the default checked sections when exporting an inspection report.</span>
+              </div>
+            </div>
+            <div className="module-toggle-list">
+              {INSPECTION_REPORT_EXPORT_OPTION_DEFINITIONS.map(([key, label]) => (
+                <label className="module-toggle-row" key={key}>
+                  <input
+                    type="checkbox"
+                    checked={inspectionReportExportSettings[key] !== false}
+                    onChange={(event) => setInspectionReportExportSettings((current) => ({ ...defaultInspectionReportExportOptions(current), [key]: event.target.checked }))}
+                  />
+                  <span><strong>{label}</strong></span>
+                </label>
+              ))}
+            </div>
+          </div>
+          <div className={`subpanel ${activeSettingsTab === "system" ? "" : "settings-section-hidden"}`}>
             <div className="subpanel-header">
               <div>
                 <h4>AI</h4>
@@ -7917,7 +9948,7 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
               />
             </div>
           </div>
-          <div className="subpanel">
+          <div className={`subpanel ${activeSettingsTab === "system" ? "" : "settings-section-hidden"}`}>
             <div className="subpanel-header">
               <div>
                 <h4>Modules</h4>
@@ -7946,7 +9977,7 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
         </div>
       </section>
 
-      <section className="panel">
+      <section className={`panel ${activeSettingsTab === "templates" ? "" : "settings-section-hidden"}`}>
         <div className="panel-heading inline">
           <div>
             <h3>Reusable Libraries</h3>
@@ -7960,7 +9991,7 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
         />
       </section>
 
-      <section className="panel">
+      <section className={`panel ${activeSettingsTab === "templates" ? "" : "settings-section-hidden"}`}>
         <div className="panel-heading inline">
           <div>
             <h3>Operation Templates</h3>
@@ -7976,7 +10007,7 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
         />
       </section>
 
-      <section className="panel">
+      <section className={`panel ${activeSettingsTab === "materials" ? "" : "settings-section-hidden"}`}>
         <div className="panel-heading inline">
           <div>
             <h3>Material Catalog</h3>
@@ -8045,7 +10076,7 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
         </div>
       </section>
 
-      <section className="panel">
+      <section className={`panel ${activeSettingsTab === "gages" ? "" : "settings-section-hidden"}`}>
         <div className="panel-heading inline">
           <div>
             <h3>Metrology Options</h3>
@@ -8076,7 +10107,7 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
         </div>
       </section>
 
-      <section className="panel">
+      <section className={`panel ${activeSettingsTab === "kanban" ? "" : "settings-section-hidden"}`}>
         <div className="panel-heading inline">
           <div>
             <h3>Kanban Options</h3>
@@ -8174,7 +10205,7 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
         </div>
       </section>
 
-      <section className="panel">
+      <section className={`panel ${activeSettingsTab === "nonconformance" ? "" : "settings-section-hidden"}`}>
         <div className="panel-heading inline">
           <div>
             <h3>Nonconformance Options</h3>
@@ -8205,7 +10236,7 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
         </div>
       </section>
 
-      <section className="panel">
+      <section className={`panel ${activeSettingsTab === "kanban" ? "" : "settings-section-hidden"}`}>
         <div className="panel-heading inline">
           <div>
             <h3>Kanban Print Sizes</h3>
@@ -8232,7 +10263,7 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
         </div>
       </section>
 
-      <section className="panel">
+      <section className={`panel ${activeSettingsTab === "activity" ? "" : "settings-section-hidden"}`}>
         <div className="panel-heading inline">
           <div>
             <h3>Activity</h3>
@@ -8933,85 +10964,236 @@ function PrintNonconformanceReport({ ncrId }) {
     Promise.all([api.loadNonconformance(ncrId), api.loadWorkspace()]).then(([record, workspace]) => {
       setPayload({
         record,
-        instruments: workspace?.instruments || []
+        instruments: workspace?.instruments || [],
+        preferences: workspace?.preferences || {}
       });
     }).catch((err) => setError(err.message || String(err)));
   }, [ncrId]);
   if (error) return <Fatal title="NCR Print Error" message={error} />;
   if (!payload?.record) return <LoadingScreen message="Preparing NCR report..." />;
-  const { record, instruments } = payload;
+  const { record, instruments, preferences } = payload;
   const photoAttachments = (record.attachments || []).filter((attachment) => {
     const filename = String(attachment.storedFilename || attachment.originalFilename || "").toLowerCase();
     return [".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"].some((extension) => filename.endsWith(extension));
   });
+  const majorAuditEvents = [...(record.auditLog || [])]
+    .filter((entry) => ["created", "status_changed", "closed", "reopened", "cancelled"].includes(entry.eventType))
+    .sort((a, b) => String(a.changedAt || "").localeCompare(String(b.changedAt || "")));
+  const display = (value, { required = false } = {}) => {
+    const text = String(value || "").trim();
+    if (text) {
+      return text;
+    }
+    return required ? "MISSING" : "N/A";
+  };
+  const reportState = record.status === "Closed" ? "Final Record" : "Draft";
+  const generatedAt = formatDateTime(nowIso());
+  const attachmentRows = record.attachments || [];
+  const attachmentPages = chunkList(attachmentRows, 12);
+  const photoPages = chunkList(photoAttachments, 4);
+  const auditPages = chunkList(majorAuditEvents, 18);
+  const totalPages = 4 + attachmentPages.length + photoPages.length + Math.max(auditPages.length, 1);
+  let pageCounter = 0;
+  const footer = (pageNumber) => (
+    <div className="inspection-print-footer">
+      <span>{record.ncrNumber || record.id || "NCR"}</span>
+      <span>Page {pageNumber} of {totalPages}</span>
+      <span>{generatedAt}</span>
+      <span>{record.status || "Open"}</span>
+    </div>
+  );
+  const header = (label, subtitle = "") => (
+    <header className="inspection-report-header ncr-report-header">
+      <div>
+        <span>{label}</span>
+        <h1>{record.ncrNumber || record.id}</h1>
+        <p>{subtitle || record.issueSummary || record.nonconformanceDescription || "No short summary"}</p>
+      </div>
+      <div className="inspection-report-job">
+        <strong>{record.status || "Open"}</strong>
+        <span>{[record.severity || "Minor", record.source || "No source"].filter(Boolean).join(" / ")}</span>
+      </div>
+    </header>
+  );
+  const ncrSummaryItems = [
+    ["Company", preferences.appTitle || "AMERP"],
+    ["NCR Number", display(record.ncrNumber || record.id, { required: true })],
+    ["Report State", reportState],
+    ["Status", display(record.status, { required: true })],
+    ["Severity", display(record.severity)],
+    ["Source", display(record.source)],
+    ["Date Reported", display(formatDateTime(record.reportedAt), { required: true })],
+    ["Reported By", display(record.reportedBy, { required: true })],
+    ["Owner", display(record.owner, { required: record.status !== "Closed" && record.status !== "Cancelled" })],
+    ["Due Date", display(record.dueDate)],
+    ["Closure Date", display(record.closureDate)],
+    ["Closed By", display(record.closedBy)],
+    ["Quantity Made", display(record.quantityMade)],
+    ["Quantity Inspected", display(record.quantityInspected)],
+    ["Quantity Accepted", display(record.quantityAccepted)],
+    ["Quantity Rejected", display(record.quantityRejected)],
+    ["Quantity Affected", display(record.quantityAffected, { required: record.status !== "Cancelled" })],
+    ["Customer", display(record.customer)],
+    ["Customer PO", display(record.customerPoNumber)],
+    ["Internal Job / Work Order", display(record.internalJobNumber || record.jobNumber)],
+    ["Sales Order / Quote", display(record.salesOrderQuoteNumber)],
+    ["Part Number", display(record.partNumber)],
+    ["Part Name", display(record.partName)],
+    ["Part Revision", display(record.partRevision)],
+    ["Drawing Revision", display(record.drawingRevision)],
+    ["Model Revision", display(record.modelRevision)],
+    ["Operation", display(record.operationNumber)],
+    ["Supplier / Vendor", display(record.supplierResponsible)],
+    ["Lot / Batch / Serial", display(record.lotBatchSerialNumber)]
+  ];
+  const requirementItems = [
+    ["Detection Method", display(record.detectionMethod)],
+    ["Inspection Equipment / Gage ID", display(record.inspectionEquipmentId)],
+    ["Inspection Record Reference", display(record.inspectionRecordReference || ncrInspectionContextSummary(record, instruments))],
+    ["Balloon / Characteristic Number", display(record.relatedCharacteristicNumber || record.inspectionContext?.characteristic?.number)],
+    ["Units", display(record.units)]
+  ];
+  const customerImpactItems = [
+    ["Product Shipped?", display(record.productShipped)],
+    ["Customer Notification Required?", display(record.customerNotificationRequired)],
+    ["Customer Approval Required?", display(record.customerApprovalRequired)],
+    ["Customer Notification Date", display(record.customerNotificationDate)],
+    ["Customer Approval Reference", display(record.customerApprovalReference)]
+  ];
+  const containmentItems = [
+    ["Containment Date", display(record.containmentDate)],
+    ["Containment By", display(record.containmentBy)],
+    ["Containment Verified By", display(record.containmentVerifiedBy)]
+  ];
+  const dispositionItems = [
+    ["Disposition", display(record.disposition, { required: record.status === "Closed" })],
+    ["Disposition Approved By", display(record.dispositionApprovedBy)],
+    ["Disposition Date", display(record.dispositionDate)],
+    ["Reinspection Required?", display(record.reinspectionRequired)],
+    ["Reinspection Result", display(record.reinspectionResult)]
+  ];
+  const rootCauseItems = [
+    ["Root Cause Required?", display(record.rootCauseRequired)],
+    ["Root Cause Category", display(record.rootCauseCategory)],
+    ["Corrective Action Required?", display(record.correctiveActionRequired)],
+    ["Corrective Action Owner", display(record.correctiveActionOwner)],
+    ["Corrective Action Due Date", display(record.correctiveActionDueDate)],
+    ["Completed Date", display(record.correctiveActionCompletedDate)]
+  ];
+  const effectivenessItems = [
+    ["Verification Method", display(record.effectivenessVerificationMethod)],
+    ["Verification Result", display(record.effectivenessVerificationResult)],
+    ["Verification Date", display(record.effectivenessVerificationDate)],
+    ["Corrective Action Verified By", display(record.correctiveActionVerifiedBy)]
+  ];
+  const closureItems = [
+    ["Closure Approval", display(record.closureApproval, { required: record.status === "Closed" })],
+    ["Closed By", display(record.closedBy)],
+    ["Closure Date", display(record.closureDate)]
+  ];
   return (
     <div className="print-shell inspection-print-shell nonconformance-print-ready">
-      <section className="print-page inspection-report-page">
-        <header className="inspection-report-header">
-          <div>
-            <span>Nonconformance Report</span>
-            <h1>{record.ncrNumber || record.id}</h1>
-            <p>{record.issueSummary || "No issue summary."}</p>
-          </div>
-          <div className="inspection-report-job">
-            <strong>{record.jobNumber || record.jobId || "-"}</strong>
-            <span>{record.partNumber || record.partName || record.partId || "-"}</span>
-          </div>
-        </header>
-        <div className="traveler-fact-grid traveler-job-grid">
-          <PrintField label="Status" value={record.status} compact />
-          <PrintField label="Reported By" value={record.reportedBy} compact />
-          <PrintField label="Reported At" value={formatDateTime(record.reportedAt)} compact />
-          <PrintField label="Quantity Affected" value={record.quantityAffected} compact />
-          <PrintField label="Disposition" value={record.disposition} compact />
-          <PrintField label="Owner" value={record.owner} compact />
-          <PrintField label="Due Date" value={record.dueDate} compact />
-        </div>
+      <section className="print-page inspection-report-page ncr-report-page">
+        {header("Nonconformance Report", reportState)}
         <section className="inspection-print-section">
-          <h2>Issue</h2>
-          <p>{record.issueDescription || "No issue description."}</p>
+          <h2>NCR Summary</h2>
+          <PrintInfoPanel items={ncrSummaryItems} className="ncr-summary-info" />
         </section>
         <section className="inspection-print-section">
-          <h2>Inspection Context</h2>
-          <p>{inspectionCharacteristicContextText(record.inspectionContext, instruments)}</p>
-          {record.inspectionContext?.instance ? <p>Instance: {record.inspectionContext.instance.label || "-"}</p> : null}
+          <h2>Requirement and Actual Condition</h2>
+          <PrintInfoPanel items={requirementItems} className="ncr-section-info" />
+          <PrintBlock title="Requirement / Specification Violated" value={display(record.requirementViolated, { required: ["Awaiting Disposition", "Awaiting Corrective Action", "Awaiting Verification", "Closed"].includes(record.status) })} />
+          <PrintBlock title="Actual Condition Found" value={display(record.actualConditionFound, { required: ["Awaiting Disposition", "Awaiting Corrective Action", "Awaiting Verification", "Closed"].includes(record.status) })} />
+        </section>
+        {footer(++pageCounter)}
+      </section>
+      <section className="print-page inspection-report-page ncr-report-page">
+        {header("Problem and Containment", "Nonconformance description, risk, customer impact, and containment")}
+        <section className="inspection-print-section">
+          <h2>Nonconformance Description</h2>
+          <PrintBlock title="Description" value={display(record.nonconformanceDescription || record.issueDescription, { required: true })} />
+          <PrintBlock title="Immediate Risk" value={display(record.immediateRisk)} />
+          <PrintInfoPanel items={customerImpactItems} className="ncr-section-info" />
         </section>
         <section className="inspection-print-section">
-          <h2>Containment Action</h2>
-          <p>{record.containmentAction || "No containment action."}</p>
+          <h2>Containment</h2>
+          <PrintInfoPanel items={containmentItems} className="ncr-section-info" />
+          <PrintBlock title="Containment Action" value={display(record.containmentAction, { required: ["Contained", "Awaiting Disposition", "Awaiting Corrective Action", "Awaiting Verification", "Closed"].includes(record.status) })} />
+          <PrintBlock title="Containment Notes" value={display(record.containmentNotes)} />
+        </section>
+        {footer(++pageCounter)}
+      </section>
+      <section className="print-page inspection-report-page ncr-report-page">
+        {header("Disposition and Correction", "Disposition approval, correction, and reinspection")}
+        <section className="inspection-print-section">
+          <h2>Disposition and Correction</h2>
+          <PrintInfoPanel items={dispositionItems} className="ncr-section-info" />
+          <PrintBlock title="Correction Taken" value={display(record.correctionTaken, { required: record.status === "Closed" })} />
+          <PrintBlock title="Rework Instructions" value={display(record.reworkInstructions)} />
+        </section>
+        {footer(++pageCounter)}
+      </section>
+      <section className="print-page inspection-report-page ncr-report-page">
+        {header("Corrective Action and Closure", "Root cause, effectiveness, and closure")}
+        <section className="inspection-print-section">
+          <h2>Root Cause and Corrective Action</h2>
+          <PrintInfoPanel items={rootCauseItems} className="ncr-section-info" />
+          <PrintBlock title="Root Cause" value={display(record.rootCause)} />
+          {record.rootCauseRequired === "No" ? <PrintBlock title="Root Cause Justification" value={display(record.rootCauseJustification, { required: true })} /> : null}
+          <PrintBlock title="Corrective Action Taken" value={display(record.correctiveActionTaken)} />
+          {record.correctiveActionRequired === "No" ? <PrintBlock title="Corrective Action Justification" value={display(record.correctiveActionJustification, { required: true })} /> : null}
         </section>
         <section className="inspection-print-section">
-          <h2>Root Cause Notes</h2>
-          <p>{record.rootCauseNotes || "No root cause notes."}</p>
+          <h2>Effectiveness Verification</h2>
+          <PrintInfoPanel items={effectivenessItems} className="ncr-section-info" />
         </section>
         <section className="inspection-print-section">
-          <h2>Closure Notes</h2>
-          <p>{record.closureNotes || "No closure notes."}</p>
+          <h2>Closure</h2>
+          <PrintInfoPanel items={closureItems} className="ncr-section-info" />
+          <PrintBlock title="Closure Notes" value={display(record.closureNotes)} />
         </section>
-        <section className="inspection-print-section">
-          <h2>Attachments</h2>
-          <table className="print-table compact">
-            <thead>
-              <tr><th>Filename</th><th>Type</th><th>Revision</th><th>Status</th></tr>
-            </thead>
-            <tbody>
-              {(record.attachments || []).map((attachment) => (
-                <tr key={attachment.id}>
-                  <td>{attachment.originalFilename || "-"}</td>
-                  <td>{attachment.fileType || "-"}</td>
-                  <td>{attachment.revisionNumber || 1}</td>
-                  <td>{attachment.active === false ? "Archived" : "Current"}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          {!record.attachments?.length && <div className="empty-inline">No attachments.</div>}
-        </section>
-        {photoAttachments.length ? (
+        {!attachmentRows.length ? (
           <section className="inspection-print-section">
+            <h2>Attachments</h2>
+            <div className="empty-inline">No attachments.</div>
+          </section>
+        ) : null}
+        {footer(++pageCounter)}
+      </section>
+      {attachmentPages.map((pageAttachments, pageIndex) => (
+        <section key={`ncr-attachments-page-${pageIndex}`} className="print-page inspection-report-page ncr-report-page">
+          {header("Attachments", attachmentPages.length > 1 ? `Attachment table ${pageIndex + 1} of ${attachmentPages.length}` : "Attachment table")}
+          <section className="inspection-print-section">
+            <h2>Attachments</h2>
+            <table className="print-table compact">
+              <thead>
+                <tr><th>Filename</th><th>Type</th><th>Revision</th><th>Status</th><th>Uploaded By</th><th>Uploaded Date</th><th>Description</th></tr>
+              </thead>
+              <tbody>
+                {pageAttachments.map((attachment) => (
+                  <tr key={attachment.id}>
+                    <td>{attachment.originalFilename || "-"}</td>
+                    <td>{attachment.attachmentType || attachment.fileType || "-"}</td>
+                    <td>{attachment.revisionNumber || 1}</td>
+                    <td>{attachment.attachmentStatus || attachment.status || (attachment.active === false ? "Archived" : "Current")}</td>
+                    <td>{attachment.uploadedBy || "N/A"}</td>
+                    <td>{attachment.uploadedDate ? formatDateTime(attachment.uploadedDate) : "N/A"}</td>
+                    <td>{attachment.description || "N/A"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </section>
+          {footer(++pageCounter)}
+        </section>
+      ))}
+      {photoPages.map((pagePhotos, pageIndex) => (
+        <section key={`ncr-photo-page-${pageIndex}`} className="print-page inspection-report-page ncr-report-page">
+          {header("Attached Photos", photoPages.length > 1 ? `Photo page ${pageIndex + 1} of ${photoPages.length}` : "Attached photos")}
+        <section className="inspection-print-section">
             <h2>Attached Photos</h2>
             <div className="ncr-print-photo-grid">
-              {photoAttachments.map((attachment) => (
+              {pagePhotos.map((attachment) => (
                 <figure key={attachment.id} className="ncr-print-photo-card">
                   <img src={nonconformanceAttachmentImageSrc(attachment)} alt={attachment.originalFilename} />
                   <figcaption>{attachment.originalFilename}</figcaption>
@@ -9019,48 +11201,181 @@ function PrintNonconformanceReport({ ncrId }) {
               ))}
             </div>
           </section>
-        ) : null}
-      </section>
+          {footer(++pageCounter)}
+        </section>
+      ))}
+      {(auditPages.length ? auditPages : [[]]).map((pageAuditEvents, pageIndex) => (
+        <section key={`ncr-audit-page-${pageIndex}`} className="print-page inspection-report-page ncr-report-page">
+          {header("Audit Log", auditPages.length > 1 ? `Major audit events ${pageIndex + 1} of ${auditPages.length}` : "Major audit events")}
+        <section className="inspection-print-section">
+          <h2>Audit Log</h2>
+          <table className="print-table compact">
+            <thead>
+              <tr><th>Date</th><th>Event</th><th>Changed By</th><th>Message</th></tr>
+            </thead>
+            <tbody>
+              {pageAuditEvents.map((entry) => (
+                <tr key={entry.id}>
+                  <td>{formatDateTime(entry.changedAt)}</td>
+                  <td>{entry.eventType || "-"}</td>
+                  <td>{entry.changedBy || "-"}</td>
+                  <td>{entry.message || "-"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {!pageAuditEvents.length && <div className="empty-inline">No major audit events recorded.</div>}
+        </section>
+          {footer(++pageCounter)}
+        </section>
+      ))}
     </div>
   );
 }
 
-function PrintInspectionReport({ jobId, partId }) {
+function PrintInspectionReport({ jobId, partId, reportId = "", exportOptions = defaultInspectionReportExportOptions() }) {
   const [payload, setPayload] = useState(null);
   const [error, setError] = useState("");
   useEffect(() => {
-    Promise.all([api.loadJob(jobId), api.loadWorkspace()]).then(([job, workspace]) => {
+    Promise.all([api.loadJob(jobId), api.loadWorkspace()]).then(async ([job, workspace]) => {
       const part = job?.parts?.find((item) => item.id === partId);
+      const linkedMaterials = (await Promise.all(
+        Array.from(new Set(part?.requiredMaterialLots || [])).map((materialId) => api.loadMaterial(materialId).catch(() => null))
+      )).filter(Boolean);
+      const materialCerts = materialCertRows(linkedMaterials);
+      const materialAttachmentPages = [];
+      if (defaultInspectionReportExportOptions(exportOptions).includeMaterialCerts) {
+        for (const attachment of materialCerts) {
+          const fileUrl = attachment.storedPath ? api.assetUrl(attachment.storedPath) : "";
+          if (!fileUrl) {
+            continue;
+          }
+          if (isPdfAttachment(attachment)) {
+            try {
+              const pdf = await getDocument(fileUrl).promise;
+              for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+                materialAttachmentPages.push({ ...attachment, fileUrl, renderType: "pdf", pageNumber, pageCount: pdf.numPages });
+              }
+            } catch (_error) {
+              // Non-PDF/non-image attachments remain listed in the material cert table.
+            }
+          } else if (isImageAttachment(attachment)) {
+            materialAttachmentPages.push({ ...attachment, fileUrl, renderType: "image", pageNumber: 1, pageCount: 1 });
+          }
+        }
+      }
+      const inspection = normalizeInspectionPayload(part?.inspection);
+      const report = buildInspectionReportDefaults(job, part, inspection, (inspection.reports || []).find((item) => item.id === reportId) || activeInspectionReport(inspection) || blankInspectionReport(), workspace?.nonconformances || [], linkedMaterials);
+      const snapshot = inspectionReportSnapshot(report, inspection);
+      const gageIds = Array.from(new Set((snapshot.characteristics || []).flatMap((characteristic) => {
+        const ids = [characteristic.gageId];
+        for (const instance of snapshot.instances || []) {
+          const result = instance.results?.[characteristic.id];
+          if (result?.gageId) ids.push(result.gageId);
+        }
+        return ids.map((id) => String(id || "").trim()).filter(Boolean);
+      })));
+      const instrumentBundles = (await Promise.all(gageIds.map((id) => api.loadInstrument(id).catch(() => null)))).filter(Boolean);
       setPayload({
         job,
         part,
-        inspection: normalizeInspectionPayload(part?.inspection),
-        instrumentOptions: normalizeInstrumentOptions(workspace?.instruments || [])
+        inspection,
+        instrumentOptions: normalizeInstrumentOptions(workspace?.instruments || []),
+        instrumentBundles,
+        nonconformances: workspace?.nonconformances || [],
+        linkedMaterials,
+        materialCerts,
+        materialAttachmentPages
       });
     }).catch((err) => setError(err.message || String(err)));
   }, [jobId, partId]);
   if (error) return <Fatal title="Inspection Print Error" message={error} />;
   if (!payload) return <LoadingScreen message="Preparing inspection report..." />;
-  const { job, part, inspection, instrumentOptions } = payload;
-  const characteristicMap = new Map(inspection.characteristics.map((item) => [item.id, item]));
-  const balloonedDocument = latestBalloonedDrawingDocument(part);
+  const { job, part, inspection, instrumentOptions, instrumentBundles = [], nonconformances = [], linkedMaterials = [], materialCerts: loadedMaterialCerts = [], materialAttachmentPages = [] } = payload;
+  const options = defaultInspectionReportExportOptions(exportOptions);
+  const selectedReport = buildInspectionReportDefaults(job, part, inspection, (inspection.reports || []).find((item) => item.id === reportId) || activeInspectionReport(inspection) || blankInspectionReport(), nonconformances, linkedMaterials);
+  const printRelatedNcrNumbers = autoRelatedNcrNumbers(part, nonconformances, selectedReport, job);
+  const materialCerts = loadedMaterialCerts.length ? loadedMaterialCerts : materialCertRows(linkedMaterials);
+  const snapshot = inspectionReportSnapshot(selectedReport, inspection);
+  const characteristicMap = new Map(snapshot.characteristics.map((item) => [item.id, item]));
+  const balloonedDocument = (part?.documents || []).find((item) => item.id === snapshot.balloonedDocumentId) || latestBalloonedDrawingDocument(part);
   const balloonedUrl = balloonedDocument?.storedPath ? api.assetUrl(balloonedDocument.storedPath) : "";
+  const summary = inspectionSummaryCounts(snapshot.characteristics, snapshot.instances);
+  const chartCharacteristics = snapshot.characteristics.filter((characteristic) => snapshot.instances.some((instance) => Number.isFinite(Number(inspectionMeasuredValue(instance.results?.[characteristic.id])))));
+  const chartPages = [];
+  if (options.includeXBarCharts) {
+    for (let index = 0; index < chartCharacteristics.length; index += 3) {
+      chartPages.push(chartCharacteristics.slice(index, index + 3));
+    }
+  }
+  const characteristicPages = options.includeCharacteristics ? chunkList(snapshot.characteristics, 12) : [];
+  const measuredInstancePages = options.includeMeasuredInstances ? chunkList(snapshot.instances, 10) : [];
+  const releasePageNeeded = options.includeReleaseSummary || options.includeToolCertificationHistory;
+  const reportPageCount = 1
+    + (options.includeCharacteristics ? Math.max(characteristicPages.length, 1) : 0)
+    + (options.includeMeasuredInstances ? Math.max(measuredInstancePages.length, 1) : 0)
+    + (releasePageNeeded ? 1 : 0);
+  const totalPages = (options.includeBalloonedDrawing ? 1 : 0) + reportPageCount + (options.includeXBarCharts ? Math.max(chartPages.length, 1) : 0) + (options.includeMaterialCerts ? materialAttachmentPages.length : 0);
+  let pageCounter = 0;
+  const footer = (pageNumber) => (
+    <div className="inspection-print-footer">
+      <span>{selectedReport.reportId || "N/A"}</span>
+      <span>Page {pageNumber} of {totalPages}</span>
+      <span>{formatDateTime(selectedReport.generatedAt) || "N/A"}</span>
+      <span>{selectedReport.status || "Draft"}</span>
+    </div>
+  );
+  const drawingOverviewItems = [
+    ["Drawing File", balloonedDocument ? (balloonedDocument.originalFilename || balloonedDocument.storedFilename) : "No ballooned drawing generated"],
+    ["Drawing Revision", selectedReport.traceability?.drawingRevision],
+    ["Job / Work Order", job.jobNumber || job.id],
+    ["Customer", job.customer || "No customer"]
+  ];
+  const inspectionOverviewItems = [
+    ...(options.includeReportControl ? [
+      ["Inspection Report ID", selectedReport.reportId],
+      ["Report Status", selectedReport.status],
+      ["Final Result", selectedReport.finalResult],
+      ["Inspection Type", selectedReport.inspectionContext?.inspectionType],
+      ["Sampling Plan", selectedReport.inspectionContext?.samplingPlan]
+    ] : []),
+    ["Quantity Ordered", selectedReport.quantitySummary?.quantityOrdered],
+    ["Quantity Inspected", selectedReport.quantitySummary?.quantityInspected],
+    ["Quantity Accepted", selectedReport.quantitySummary?.quantityAccepted],
+    ["Quantity Rejected", selectedReport.quantitySummary?.quantityRejected],
+    ["Revision", selectedReport.traceability?.partRevision || selectedReport.traceability?.drawingRevision],
+    ["Material", selectedReport.traceability?.material],
+    ["Characteristics", snapshot.characteristics.length],
+    ...(options.includeTraceability ? [
+      ["Customer", selectedReport.traceability?.customer],
+      ["Customer PO", selectedReport.traceability?.customerPoNumber],
+      ["Internal Job / Work Order", selectedReport.traceability?.internalJobNumber],
+      ["Sales Order / Quote", selectedReport.traceability?.salesOrderQuoteNumber],
+      ["Part Number", selectedReport.traceability?.partNumber],
+      ["Part Name", selectedReport.traceability?.partName],
+      ["Drawing Revision", selectedReport.traceability?.drawingRevision],
+      ["Model Revision", selectedReport.traceability?.modelRevision],
+      ["Lot / Batch / Serial", selectedReport.traceability?.lotBatchSerialNumber],
+      ...(options.includeNcrLinks ? [["Related NCR", printRelatedNcrNumbers.join(", ")]] : [])
+    ] : [])
+  ];
   return (
     <div className="print-shell inspection-print-shell inspection-print-ready">
-      <section className="print-page inspection-balloon-report-page">
+      {options.includeBalloonedDrawing ? <section className="print-page inspection-balloon-report-page">
         <header className="inspection-report-header">
           <div>
             <span>Ballooned Drawing</span>
             <h1>{part.partNumber || part.partName || "Part"}</h1>
-            <p>{balloonedDocument ? (balloonedDocument.originalFilename || balloonedDocument.storedFilename) : "No ballooned drawing generated."}</p>
           </div>
           <div className="inspection-report-job">
-            <strong>{job.jobNumber || job.id}</strong>
-            <span>{job.customer || "No customer"}</span>
+            <strong>{selectedReport.reportId || "N/A"}</strong>
+            <span>{selectedReport.status || "Draft"}</span>
           </div>
         </header>
+        <PrintInfoPanel items={drawingOverviewItems} className="inspection-cover-meta" />
         <PrintPdfPage fileUrl={balloonedUrl} pageNumber={1} />
-      </section>
+        {footer(++pageCounter)}
+      </section> : null}
       <section className="print-page inspection-report-page">
         <header className="inspection-report-header">
           <div>
@@ -9073,85 +11388,292 @@ function PrintInspectionReport({ jobId, partId }) {
             <span>{job.customer || "No customer"}</span>
           </div>
         </header>
-        <div className="traveler-fact-grid traveler-job-grid">
-          <PrintField label="Quantity" value={part.quantity} compact />
-          <PrintField label="Revision" value={part.revision?.number} compact />
-          <PrintField label="Material" value={part.materialSpec || part.customMaterialText} compact />
-          <PrintField label="Characteristics" value={inspection.characteristics.length} compact />
-        </div>
-        <section className="inspection-print-section">
-          <h2>Characteristics</h2>
-          <table className="print-table compact">
-            <thead>
-              <tr><th>#</th><th>Requirement</th><th>Nominal</th><th>Tolerance</th><th>Tool</th></tr>
-            </thead>
-            <tbody>
-              {inspection.characteristics.map((item) => (
-                <tr key={item.id}>
-                  <td>{item.number}</td>
-                  <td>{item.type}</td>
-                  <td>{[item.nominal, inspection.units].filter(Boolean).join(" ")}</td>
-                  <td>{characteristicToleranceSummary(item) || "-"}</td>
-                  <td>{measurementToolLabel(item, instrumentOptions)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </section>
-        <section className="inspection-print-section">
-          <div className="inspection-section-header-row">
-            <h2>Measured Instances</h2>
-            <div className="inspection-color-key">
-              <span><i className="inspection-color-chip pass" /> In spec</span>
-              <span><i className="inspection-color-chip fail" /> Out of spec</span>
-            </div>
-          </div>
-          <table className="print-table compact">
-            <thead>
-              <tr>
-                <th>Instance</th><th>Inspector</th><th>Date</th>
-                {inspection.characteristics.map((item) => <th key={item.id}>{item.number}</th>)}
-              </tr>
-            </thead>
-            <tbody>
-              {inspection.instances.map((instance) => (
-                <tr key={instance.id}>
-                  <td>{instance.label}</td>
-                  <td>{instance.inspector || "-"}</td>
-                  <td>{String(instance.inspectedAt || "").slice(0, 10)}</td>
-                  {inspection.characteristics.map((characteristic) => {
-                    const value = instance.results?.[characteristic.id] || "";
-                    const status = inspectionResultStatus(characteristicMap.get(characteristic.id), value);
-                    return (
-                      <td key={`${instance.id}-${characteristic.id}`} className={status ? `inspection-print-result-cell ${status.toLowerCase()}` : "inspection-print-result-cell"}>
-                        {value || "-"}
-                      </td>
-                    );
-                  })}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </section>
-        <section className="inspection-print-section">
-          <h2>X-bar Charts</h2>
-          <div className="inspection-chart-grid">
-            {inspection.characteristics.map((characteristic) => (
-              <InspectionXBarChart
-                key={characteristic.id}
-                characteristic={characteristic}
-                instances={inspection.instances}
-                units={inspection.units}
-                instrumentOptions={instrumentOptions}
-              />
-            ))}
-          </div>
-          {!inspection.characteristics.some((characteristic) => inspection.instances.some((instance) => Number.isFinite(Number(String(instance.results?.[characteristic.id] || "").trim())))) ? (
-            <div className="traveler-empty-state">No numeric inspection data available for X-bar charts yet.</div>
-          ) : null}
-        </section>
+        <PrintInfoPanel items={inspectionOverviewItems} className="inspection-overview-info" />
+        {options.includeMaterialCerts ? <InspectionMaterialCerts linkedMaterials={linkedMaterials} materialCerts={materialCerts} /> : null}
+        {footer(++pageCounter)}
       </section>
+      {options.includeCharacteristics ? (characteristicPages.length ? characteristicPages : [[]]).map((pageCharacteristics, pageIndex) => (
+        <section key={`inspection-characteristics-page-${pageIndex}`} className="print-page inspection-report-page inspection-detail-page">
+          <header className="inspection-report-header">
+            <div>
+              <span>Characteristics</span>
+              <h1>{part.partNumber || part.partName || "Part"}</h1>
+              <p>{selectedReport.reportId || "N/A"}</p>
+            </div>
+            <div className="inspection-report-job">
+              <strong>{job.jobNumber || job.id}</strong>
+              <span>{job.customer || "No customer"}</span>
+            </div>
+          </header>
+          <section className="inspection-print-section">
+            <h2>Characteristics{characteristicPages.length > 1 ? ` (${pageIndex + 1} of ${characteristicPages.length})` : ""}</h2>
+            <table className="print-table compact">
+              <thead>
+                <tr><th>#</th><th>Requirement / Description</th><th>Nominal</th><th>Lower</th><th>Upper</th><th>Units</th><th>Gage / Tool ID</th><th>Critical</th></tr>
+              </thead>
+              <tbody>
+                {pageCharacteristics.map((item) => {
+                  const limits = characteristicLimitDisplay(item, "");
+                  return (
+                    <tr key={item.id}>
+                      <td>{item.number}</td>
+                      <td>{item.requirementDescription || item.description || item.type || "N/A"}</td>
+                      <td>{item.nominal || "N/A"}</td>
+                      <td>{limits.lower || "N/A"}</td>
+                      <td>{limits.upper || "N/A"}</td>
+                      <td>{item.units || snapshot.units || "N/A"}</td>
+                      <td>{measurementToolIdLabel(item)}</td>
+                      <td>{item.criticalCharacteristic ? "Yes" : "No"}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+            {!pageCharacteristics.length ? <div className="traveler-empty-state">No inspection characteristics defined.</div> : null}
+          </section>
+          {footer(++pageCounter)}
+        </section>
+      )) : null}
+      {options.includeMeasuredInstances ? (measuredInstancePages.length ? measuredInstancePages : [[]]).map((pageInstances, pageIndex) => (
+        <section key={`inspection-measured-page-${pageIndex}`} className="print-page inspection-report-page inspection-detail-page">
+          <header className="inspection-report-header">
+            <div>
+              <span>Measured Instances</span>
+              <h1>{part.partNumber || part.partName || "Part"}</h1>
+              <p>{selectedReport.reportId || "N/A"}</p>
+            </div>
+            <div className="inspection-report-job">
+              <strong>{job.jobNumber || job.id}</strong>
+              <span>{job.customer || "No customer"}</span>
+            </div>
+          </header>
+          <section className="inspection-print-section">
+            <div className="inspection-section-header-row">
+              <h2>Measured Instances{measuredInstancePages.length > 1 ? ` (${pageIndex + 1} of ${measuredInstancePages.length})` : ""}</h2>
+              <div className="inspection-color-key">
+                <span><i className="inspection-color-chip pass" /> In spec</span>
+                <span><i className="inspection-color-chip fail" /> Out of spec</span>
+              </div>
+            </div>
+            <div className="inspection-selected-summary">
+              <span>Inspected: <strong>{summary.inspected}</strong></span>
+              <span>Accepted: <strong>{summary.accepted}</strong></span>
+              <span>Rejected: <strong>{summary.rejected}</strong></span>
+              <span>Failed Characteristics: <strong>{summary.failedCharacteristics.length ? summary.failedCharacteristics.join(", ") : "None"}</strong></span>
+            </div>
+            <table className="print-table compact">
+              <thead>
+                <tr>
+                  <th>Instance</th><th>Inspector</th><th>Date</th>
+                  {snapshot.characteristics.map((item) => <th key={item.id}>{item.number}</th>)}
+                </tr>
+              </thead>
+              <tbody>
+                {pageInstances.map((instance) => (
+                  <tr key={instance.id}>
+                    <td>{instance.label}</td>
+                    <td>{instance.inspector || "-"}</td>
+                    <td>{String(instance.inspectedAt || "").slice(0, 10)}</td>
+                    {snapshot.characteristics.map((characteristic) => {
+                      const result = instance.results?.[characteristic.id] || {};
+                      const value = inspectionMeasuredValue(result);
+                      const status = inspectionResultStatus(characteristicMap.get(characteristic.id), result);
+                      return (
+                        <td key={`${instance.id}-${characteristic.id}`} className={status ? `inspection-print-result-cell ${status.toLowerCase()}` : "inspection-print-result-cell"}>
+                          {value || "-"}{status === "Fail" ? " FAIL" : ""}
+                        </td>
+                      );
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {!pageInstances.length ? <div className="traveler-empty-state">No measured instances entered.</div> : null}
+          </section>
+          {footer(++pageCounter)}
+        </section>
+      )) : null}
+      {releasePageNeeded ? (
+        <section className="print-page inspection-report-page inspection-detail-page">
+          <header className="inspection-report-header">
+            <div>
+              <span>Release and Tools</span>
+              <h1>{part.partNumber || part.partName || "Part"}</h1>
+              <p>{selectedReport.reportId || "N/A"}</p>
+            </div>
+            <div className="inspection-report-job">
+              <strong>{job.jobNumber || job.id}</strong>
+              <span>{job.customer || "No customer"}</span>
+            </div>
+          </header>
+          {options.includeReleaseSummary ? <section className="inspection-print-section">
+            <h2>Release Summary</h2>
+            <div className="traveler-fact-grid traveler-job-grid">
+              <PrintField label="Generated By" value={selectedReport.generatedBy} compact />
+              <PrintField label="Generated At" value={formatDateTime(selectedReport.generatedAt)} compact />
+              <PrintField label="Released By" value={selectedReport.releasedBy} compact />
+              <PrintField label="Released At" value={formatDateTime(selectedReport.releasedAt)} compact />
+            </div>
+          </section> : null}
+          {options.includeToolCertificationHistory ? <InspectionToolCertificationHistory instrumentBundles={instrumentBundles} /> : null}
+          {footer(++pageCounter)}
+        </section>
+      ) : null}
+      {options.includeXBarCharts && chartPages.length ? chartPages.map((pageCharts, pageIndex) => (
+        <section key={`inspection-chart-page-${pageIndex}`} className="print-page inspection-report-page inspection-chart-page">
+          <header className="inspection-report-header">
+            <div>
+              <span>X-bar Charts</span>
+              <h1>{part.partNumber || part.partName || "Part"}</h1>
+              <p>{selectedReport.reportId || "N/A"}</p>
+            </div>
+            <div className="inspection-report-job">
+              <strong>{job.jobNumber || job.id}</strong>
+              <span>{job.customer || "No customer"}</span>
+            </div>
+          </header>
+          <section className="inspection-print-section">
+            <h2>X-bar Charts</h2>
+            <div className="inspection-chart-grid">
+              {pageCharts.map((characteristic) => (
+                <InspectionXBarChart
+                  key={characteristic.id}
+                  characteristic={characteristic}
+                  instances={snapshot.instances}
+                  units={snapshot.units}
+                  instrumentOptions={instrumentOptions}
+                />
+              ))}
+            </div>
+          </section>
+          {footer(++pageCounter)}
+        </section>
+      )) : options.includeXBarCharts ? (
+        <section className="print-page inspection-report-page inspection-chart-page">
+          <header className="inspection-report-header">
+            <div>
+              <span>X-bar Charts</span>
+              <h1>{part.partNumber || part.partName || "Part"}</h1>
+              <p>{selectedReport.reportId || "N/A"}</p>
+            </div>
+            <div className="inspection-report-job">
+              <strong>{job.jobNumber || job.id}</strong>
+              <span>{job.customer || "No customer"}</span>
+            </div>
+          </header>
+          <section className="inspection-print-section">
+            <div className="traveler-empty-state">No numeric inspection data available for X-bar charts yet.</div>
+          </section>
+          {footer(++pageCounter)}
+        </section>
+      ) : null}
+      {options.includeMaterialCerts ? materialAttachmentPages.map((attachment) => (
+        <section key={`${attachment.id}-${attachment.pageNumber || 1}-${attachment.renderType}`} className="print-page inspection-raw-attachment-page">
+          {attachment.renderType === "pdf" ? (
+            <PrintPdfPage fileUrl={attachment.fileUrl} pageNumber={attachment.pageNumber || 1} bare />
+          ) : attachment.renderType === "image" ? (
+            <PrintImagePage fileUrl={attachment.fileUrl} alt={attachment.filename} bare />
+          ) : (
+            <div className="traveler-empty-state">This material attachment could not be rendered inline.</div>
+          )}
+        </section>
+      )) : null}
     </div>
+  );
+}
+
+function InspectionMaterialCerts({ linkedMaterials = [], materialCerts = [] }) {
+  return (
+    <section className="inspection-print-section">
+      <h2>Material Certs</h2>
+      <table className="print-table compact">
+        <thead>
+          <tr><th>Material</th><th>Supplier</th><th>Lot</th><th>Heat</th><th>Cert / Attachment</th><th>Type</th><th>Rev</th><th>Attached</th></tr>
+        </thead>
+        <tbody>
+          {materialCerts.map((cert) => (
+            <tr key={cert.id}>
+              <td>{[cert.materialSerial, cert.materialType].filter(Boolean).join(" / ") || "N/A"}</td>
+              <td>{cert.supplier || "N/A"}</td>
+              <td>{cert.lotNumber || "N/A"}</td>
+              <td>{cert.heatNumber || "N/A"}</td>
+              <td>{cert.filename || "N/A"}</td>
+              <td>{cert.category || cert.fileType || "N/A"}</td>
+              <td>{cert.revisionNumber || 1}</td>
+              <td>{formatDateTime(cert.attachedAt) || "N/A"}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {!materialCerts.length ? (
+        <div className="empty-inline">
+          {linkedMaterials.length ? "No active material attachments are linked to this part's selected material lots." : "No material lots are linked to this part."}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function InspectionToolCertificationHistory({ instrumentBundles = [] }) {
+  const rows = [];
+  for (const bundle of instrumentBundles || []) {
+    const instrument = bundle.instrument || bundle || {};
+    const calibrations = Array.isArray(bundle.calibrations) ? bundle.calibrations : [];
+    if (!instrument.instrument_id && !instrument.instrumentId) {
+      continue;
+    }
+    if (!calibrations.length) {
+      rows.push({
+        key: `${instrument.instrument_id || instrument.instrumentId}-none`,
+        instrumentId: instrument.instrument_id || instrument.instrumentId,
+        toolName: instrument.tool_name || instrument.toolName || "",
+        calibrationDate: "N/A",
+        nextDueDate: "N/A",
+        result: "No certification history",
+        performedBy: "N/A",
+        certificateNumber: "N/A",
+        traceabilityReference: "N/A"
+      });
+      continue;
+    }
+    for (const calibration of calibrations) {
+      rows.push({
+        key: `${instrument.instrument_id || instrument.instrumentId}-${calibration.calibration_id}`,
+        instrumentId: instrument.instrument_id || instrument.instrumentId,
+        toolName: instrument.tool_name || instrument.toolName || "",
+        calibrationDate: calibration.calibration_date || "N/A",
+        nextDueDate: calibration.next_due_date || "N/A",
+        result: calibration.result || "N/A",
+        performedBy: calibration.performed_by || "N/A",
+        certificateNumber: calibration.certificate_number || "N/A",
+        traceabilityReference: calibration.traceability_reference || "N/A"
+      });
+    }
+  }
+  return (
+    <section className="inspection-print-section">
+      <h2>Tool Certification History</h2>
+      <table className="print-table compact">
+        <thead>
+          <tr><th>Gage / Tool ID</th><th>Tool</th><th>Cert Date</th><th>Next Due</th><th>Result</th><th>Performed By</th><th>Certificate</th><th>Traceability</th></tr>
+        </thead>
+        <tbody>
+          {rows.map((row) => (
+            <tr key={row.key}>
+              <td>{row.instrumentId}</td>
+              <td>{row.toolName || "N/A"}</td>
+              <td>{row.calibrationDate}</td>
+              <td>{row.nextDueDate}</td>
+              <td>{row.result}</td>
+              <td>{row.performedBy}</td>
+              <td>{row.certificateNumber}</td>
+              <td>{row.traceabilityReference}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {!rows.length && <div className="empty-inline">No inspection gages/tools are linked to this report.</div>}
+    </section>
   );
 }
 
@@ -9281,11 +11803,11 @@ function SelectWithInlineAdd({
   );
 }
 
-function TextArea({ label, value, onChange, rows = 4 }) {
+function TextArea({ label, value, onChange, rows = 4, readOnly = false }) {
   return (
     <label className="field full">
       <span>{label}</span>
-      <textarea value={value || ""} rows={rows} onChange={(event) => onChange(event.target.value)} />
+      <textarea value={value || ""} rows={rows} onChange={(event) => onChange(event.target.value)} readOnly={readOnly} />
     </label>
   );
 }
@@ -9362,6 +11884,33 @@ function KanbanPrintDialog({
   );
 }
 
+function InspectionExportDialog({ open, options, onChange, onCancel, onConfirm }) {
+  if (!open) return null;
+  const normalized = defaultInspectionReportExportOptions(options);
+  return (
+    <div className="dialog-backdrop">
+      <div className="dialog-panel narrow">
+        <div className="panel-heading">
+          <h3>Inspection Report Contents</h3>
+        </div>
+        <p>Choose what to include on this inspection report export. These choices only apply to this PDF.</p>
+        <div className="module-toggle-list">
+          {INSPECTION_REPORT_EXPORT_OPTION_DEFINITIONS.map(([key, label]) => (
+            <label className="module-toggle-row" key={key}>
+              <input type="checkbox" checked={normalized[key] !== false} onChange={(event) => onChange(key, event.target.checked)} />
+              <span><strong>{label}</strong></span>
+            </label>
+          ))}
+        </div>
+        <div className="dialog-actions">
+          <button onClick={onCancel}>Cancel</button>
+          <button onClick={onConfirm}><FileDown size={14} /> Export PDF</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function SaveStatePill({ state }) {
   const labels = {
     saving: "Saving...",
@@ -9375,8 +11924,49 @@ function LoadingScreen({ message }) {
   return <div className="setup-screen"><div className="setup-panel"><h1>{message}</h1></div></div>;
 }
 
-function Fatal({ title, message }) {
-  return <div className="fatal"><h1>{title}</h1><p>{message}</p></div>;
+function Fatal({ title, message, stack = "", componentStack = "", onHome }) {
+  const [copied, setCopied] = useState(false);
+  const diagnostic = [
+    `Title: ${title || "AMERP Error"}`,
+    `Message: ${message || "Unknown error"}`,
+    `Route: ${window.location.hash || "/"}`,
+    stack ? `Stack:\n${stack}` : "",
+    componentStack ? `Component stack:\n${componentStack}` : ""
+  ].filter(Boolean).join("\n\n");
+  const copyDiagnostic = async () => {
+    try {
+      await navigator.clipboard.writeText(diagnostic);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1800);
+    } catch (_error) {
+      setCopied(false);
+      window.prompt("Copy this error for troubleshooting:", diagnostic);
+    }
+  };
+  const goHome = () => {
+    if (onHome) {
+      onHome();
+      return;
+    }
+    window.location.hash = "/";
+    window.location.reload();
+  };
+  return (
+    <div className="fatal">
+      <div className="fatal-content">
+        <h1>{title}</h1>
+        <p>{message}</p>
+        <div className="fatal-actions">
+          <button onClick={copyDiagnostic}>{copied ? "Copied" : "Copy Error"}</button>
+          <button onClick={goHome}>Back To Home</button>
+        </div>
+        <details className="fatal-details">
+          <summary>Error details</summary>
+          <pre>{diagnostic}</pre>
+        </details>
+      </div>
+    </div>
+  );
 }
 
 function StatCard({ label, value, accent = false }) {
@@ -9397,9 +11987,41 @@ function PrintField({ label, value, compact = false, className = "" }) {
   );
 }
 
+function printInfoValue(value) {
+  if (value === 0) {
+    return "0";
+  }
+  const normalized = String(value ?? "").trim();
+  return normalized || "-";
+}
+
+function PrintInfoPanel({ items = [], className = "" }) {
+  const rows = (items || []).filter(Boolean);
+  return (
+    <div className={`inspection-info-panel ${className}`.trim()}>
+      {rows.map(([label, value], index) => (
+        <div className="inspection-info-item" key={`${label}-${index}`}>
+          <span>{label}</span>
+          <strong>{printInfoValue(value)}</strong>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function PrintBlock({ title, value }) {
+  return (
+    <div className="traveler-note-block">
+      <strong>{title}</strong>
+      <p>{value || "N/A"}</p>
+    </div>
+  );
+}
+
 function titleForView(view) {
   return {
     jobs: "Jobs",
+    nonconformance: "Nonconformance",
     kanban: "Kanban",
     materials: "Materials",
     metrology: "Gages",
@@ -9411,6 +12033,7 @@ function titleForView(view) {
 function subtitleForView(view) {
   return {
     jobs: "",
+    nonconformance: "",
     kanban: "",
     materials: "",
     metrology: "",

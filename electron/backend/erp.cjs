@@ -75,14 +75,93 @@ const DEFAULT_KANBAN_PRINT_SIZES = [
   { id: "kanban-size-3x5", name: '3" x 5"', widthIn: 3, heightIn: 5 },
   { id: "kanban-size-4x6", name: '4" x 6"', widthIn: 4, heightIn: 6 }
 ];
-const NONCONFORMANCE_STATUS_OPTIONS = ["Open", "Review", "Dispositioned", "Closed"];
-const DEFAULT_NONCONFORMANCE_DISPOSITIONS = ["Use As-Is", "Rework", "Scrap", "Return"];
+const NONCONFORMANCE_STATUS_OPTIONS = [
+  "Open",
+  "Contained",
+  "Awaiting Disposition",
+  "Awaiting Corrective Action",
+  "Awaiting Verification",
+  "Closed",
+  "Cancelled"
+];
+const NONCONFORMANCE_SEVERITY_OPTIONS = ["Minor", "Major", "Critical"];
+const NONCONFORMANCE_SOURCE_OPTIONS = [
+  "Internal Inspection",
+  "Final Inspection",
+  "In-Process Inspection",
+  "Customer Complaint",
+  "Supplier Issue",
+  "Receiving Inspection",
+  "Other"
+];
+const NONCONFORMANCE_DETECTION_METHOD_OPTIONS = [
+  "Caliper",
+  "Micrometer",
+  "CMM",
+  "Pin Gage",
+  "Thread Gage",
+  "Visual",
+  "Functional Test",
+  "Customer Report",
+  "Other"
+];
+const NONCONFORMANCE_REINSPECTION_RESULT_OPTIONS = ["Pass", "Fail", "Not Required"];
+const NONCONFORMANCE_ROOT_CAUSE_CATEGORY_OPTIONS = [
+  "Programming",
+  "Setup",
+  "Tooling",
+  "Machine",
+  "Material",
+  "Inspection",
+  "Documentation",
+  "Supplier",
+  "Training",
+  "Communication",
+  "Process Not Followed",
+  "Process Missing",
+  "Other"
+];
+const NONCONFORMANCE_EFFECTIVENESS_METHOD_OPTIONS = [
+  "Follow-up inspection",
+  "Audit",
+  "Next-job review",
+  "Training record review",
+  "Process/document update review",
+  "Supplier performance review",
+  "Other"
+];
+const NONCONFORMANCE_EFFECTIVENESS_RESULT_OPTIONS = ["Effective", "Not Effective", "Pending", "Not Required"];
+const NONCONFORMANCE_ATTACHMENT_TYPE_OPTIONS = [
+  "Photo",
+  "Drawing",
+  "Inspection Report",
+  "Customer Email",
+  "Supplier Email",
+  "Material Cert",
+  "Rework Instructions",
+  "Other"
+];
+const NONCONFORMANCE_ATTACHMENT_STATUS_OPTIONS = ["Current", "Superseded", "Archived"];
+const DEFAULT_NONCONFORMANCE_DISPOSITIONS = ["Scrap", "Rework", "Remake", "Use As-Is", "Return to Supplier", "Sort / 100% Inspect", "Other"];
 const DEFAULT_ENABLED_MODULES = {
   jobs: true,
+  inspections: true,
   nonconformance: true,
   kanban: true,
   materials: true,
   metrology: true
+};
+const DEFAULT_INSPECTION_REPORT_EXPORT_OPTIONS = {
+  includeBalloonedDrawing: true,
+  includeReportControl: true,
+  includeTraceability: true,
+  includeCharacteristics: true,
+  includeMeasuredInstances: true,
+  includeReleaseSummary: true,
+  includeNcrLinks: true,
+  includeMaterialCerts: true,
+  includeXBarCharts: true,
+  includeToolCertificationHistory: true
 };
 
 function mergeKanbanOrderingNotes(notes, vendorPartNumber) {
@@ -329,6 +408,12 @@ class ERPBackend {
         ? Boolean(preferences.enabledModules[key])
         : fallback
     ]));
+    const inspectionReportExportOptions = Object.fromEntries(Object.entries(DEFAULT_INSPECTION_REPORT_EXPORT_OPTIONS).map(([key, fallback]) => [
+      key,
+      preferences?.inspectionReportExportOptions && Object.prototype.hasOwnProperty.call(preferences.inspectionReportExportOptions, key)
+        ? Boolean(preferences.inspectionReportExportOptions[key])
+        : fallback
+    ]));
     const defaultKanbanPrintSizeId = kanbanPrintSizes.some((item) => item.id === preferences?.defaultKanbanPrintSizeId)
       ? preferences.defaultKanbanPrintSizeId
       : (kanbanPrintSizes[0]?.id || DEFAULT_KANBAN_PRINT_SIZES[0].id);
@@ -341,6 +426,9 @@ class ERPBackend {
       dueSoonDays: Number.isFinite(Number(preferences?.dueSoonDays)) ? Number(preferences.dueSoonDays) : 14,
       jobPrefix: String(preferences?.jobPrefix || "J03C").trim(),
       startingJobNumber: Number.isFinite(Number(preferences?.startingJobNumber)) ? Number(preferences.startingJobNumber) : 600,
+      inspectionReportPrefix: String(preferences?.inspectionReportPrefix || "IR").trim(),
+      startingInspectionReportNumber: Number.isFinite(Number(preferences?.startingInspectionReportNumber)) ? Number(preferences.startingInspectionReportNumber) : 1,
+      inspectionReportExportOptions,
       nonconformancePrefix: String(preferences?.nonconformancePrefix || "NCR").trim(),
       startingNonconformanceNumber: Number.isFinite(Number(preferences?.startingNonconformanceNumber)) ? Number(preferences.startingNonconformanceNumber) : 1,
       kanbanInventoryPrefix: String(preferences?.kanbanInventoryPrefix || "J03C").trim(),
@@ -1662,45 +1750,161 @@ class ERPBackend {
   }
 
   normalizeNonconformance(record) {
+    const text = (value) => String(value || "").trim();
+    const optionValue = (value, options, fallback = "") => {
+      const normalized = text(value);
+      return options.includes(normalized) ? normalized : fallback;
+    };
+    const yesNo = (value, fallback = "No") => {
+      const normalized = text(value);
+      return normalized === "Yes" || normalized === "No" ? normalized : fallback;
+    };
+    const legacyDescription = text(record?.nonconformanceDescription || record?.issueDescription || record?.issue || record?.issueSummary);
+    const legacyRequirement = text(record?.requirementViolated || record?.requirementSpecificationViolated);
+    const legacyActual = text(record?.actualConditionFound || "");
+    const legacyRootCause = text(record?.rootCause || record?.rootCauseNotes);
+    const legacyClosureNotes = text(record?.closureNotes);
+    const legacyContainment = text(record?.containmentAction);
+    const legacyDisposition = text(record?.disposition);
+    const legacyInspectionReference = text(record?.inspectionRecordReference || record?.inspectionContextReference);
+    const active = record?.active !== false;
+    const disposition = legacyDisposition;
+    const customerApprovalRequired = (() => {
+      const explicit = text(record?.customerApprovalRequired);
+      if (explicit === "Yes" || explicit === "No") {
+        return explicit;
+      }
+      if (disposition === "Use As-Is") {
+        return "Yes";
+      }
+      return "No";
+    })();
+    const normalizeAttachment = (attachment) => {
+      const normalized = this.normalizeDocument(attachment);
+      return {
+        ...normalized,
+        attachmentType: optionValue(attachment?.attachmentType || attachment?.category, NONCONFORMANCE_ATTACHMENT_TYPE_OPTIONS, "Other"),
+        attachmentStatus: optionValue(attachment?.attachmentStatus || attachment?.status, NONCONFORMANCE_ATTACHMENT_STATUS_OPTIONS, normalized.active === false ? "Archived" : "Current"),
+        uploadedBy: text(attachment?.uploadedBy || attachment?.reportedBy || ""),
+        uploadedDate: text(attachment?.uploadedDate || attachment?.attachedAt || normalized.attachedAt),
+        description: text(attachment?.description || ""),
+        category: optionValue(attachment?.attachmentType || attachment?.category, NONCONFORMANCE_ATTACHMENT_TYPE_OPTIONS, "Other"),
+        status: optionValue(attachment?.attachmentStatus || attachment?.status, NONCONFORMANCE_ATTACHMENT_STATUS_OPTIONS, normalized.active === false ? "Archived" : "Current")
+      };
+    };
+    const auditLog = Array.isArray(record?.auditLog) ? record.auditLog : [];
     return {
       id: record?.id || randomId("ncr"),
-      ncrNumber: String(record?.ncrNumber || "").trim(),
-      status: NONCONFORMANCE_STATUS_OPTIONS.includes(String(record?.status || "").trim())
-        ? String(record?.status || "").trim()
-        : "Open",
-      jobId: String(record?.jobId || "").trim(),
-      jobNumber: String(record?.jobNumber || "").trim(),
-      partId: String(record?.partId || "").trim(),
-      partNumber: String(record?.partNumber || "").trim(),
-      partName: String(record?.partName || "").trim(),
-      inspectionCharacteristicId: String(record?.inspectionCharacteristicId || "").trim(),
-      inspectionInstanceId: String(record?.inspectionInstanceId || "").trim(),
-      reportedAt: String(record?.reportedAt || nowIso()).trim() || nowIso(),
-      reportedBy: String(record?.reportedBy || "").trim(),
-      quantityAffected: String(record?.quantityAffected || "").trim(),
-      issueSummary: String(record?.issueSummary || "").trim(),
-      issueDescription: String(record?.issueDescription || "").trim(),
-      containmentAction: String(record?.containmentAction || "").trim(),
-      disposition: String(record?.disposition || "").trim(),
-      owner: String(record?.owner || "").trim(),
-      dueDate: String(record?.dueDate || "").trim(),
-      closureNotes: String(record?.closureNotes || "").trim(),
-      rootCauseNotes: String(record?.rootCauseNotes || "").trim(),
-      active: record?.active !== false,
-      archivedAt: String(record?.archivedAt || "").trim(),
-      createdAt: String(record?.createdAt || nowIso()).trim() || nowIso(),
-      updatedAt: String(record?.updatedAt || nowIso()).trim() || nowIso(),
-      attachments: (Array.isArray(record?.attachments) ? record.attachments : []).map((attachment) => this.normalizeDocument(attachment))
+      ncrNumber: text(record?.ncrNumber),
+      status: optionValue(record?.status, NONCONFORMANCE_STATUS_OPTIONS, "Open"),
+      severity: optionValue(record?.severity, NONCONFORMANCE_SEVERITY_OPTIONS, "Minor"),
+      source: optionValue(record?.source, NONCONFORMANCE_SOURCE_OPTIONS, ""),
+      jobId: text(record?.jobId),
+      jobNumber: text(record?.jobNumber || record?.internalJobNumber),
+      customer: text(record?.customer),
+      customerPoNumber: text(record?.customerPoNumber),
+      internalJobNumber: text(record?.internalJobNumber || record?.jobNumber),
+      salesOrderQuoteNumber: text(record?.salesOrderQuoteNumber),
+      partId: text(record?.partId),
+      partNumber: text(record?.partNumber),
+      partName: text(record?.partName),
+      partRevision: text(record?.partRevision),
+      drawingRevision: text(record?.drawingRevision),
+      modelRevision: text(record?.modelRevision),
+      operationNumber: text(record?.operationNumber || record?.operation || record?.opNumber),
+      supplierResponsible: text(record?.supplierResponsible || record?.vendorResponsible),
+      lotBatchSerialNumber: text(record?.lotBatchSerialNumber),
+      quantityMade: text(record?.quantityMade),
+      quantityInspected: text(record?.quantityInspected),
+      quantityAccepted: text(record?.quantityAccepted),
+      quantityRejected: text(record?.quantityRejected),
+      inspectionCharacteristicId: text(record?.inspectionCharacteristicId),
+      inspectionInstanceId: text(record?.inspectionInstanceId),
+      reportedAt: text(record?.reportedAt || record?.dateReported || nowIso()) || nowIso(),
+      reportedBy: text(record?.reportedBy),
+      owner: text(record?.owner),
+      dueDate: text(record?.dueDate),
+      closureDate: text(record?.closureDate),
+      closedBy: text(record?.closedBy),
+      quantityAffected: text(record?.quantityAffected),
+      issueSummary: text(record?.issueSummary),
+      issueDescription: text(record?.issueDescription || legacyDescription),
+      requirementViolated: legacyRequirement,
+      actualConditionFound: legacyActual,
+      detectionMethod: optionValue(record?.detectionMethod, NONCONFORMANCE_DETECTION_METHOD_OPTIONS, ""),
+      inspectionEquipmentId: text(record?.inspectionEquipmentGageId || record?.inspectionEquipmentId),
+      inspectionRecordReference: legacyInspectionReference,
+      relatedCharacteristicNumber: text(record?.relatedCharacteristicNumber),
+      units: text(record?.units),
+      nonconformanceDescription: legacyDescription,
+      immediateRisk: text(record?.immediateRisk),
+      productShipped: yesNo(record?.productShipped),
+      customerNotificationRequired: yesNo(record?.customerNotificationRequired),
+      customerApprovalRequired,
+      customerNotificationDate: text(record?.customerNotificationDate),
+      customerApprovalReference: text(record?.customerApprovalReference),
+      customerApprovalOverrideReason: text(record?.customerApprovalOverrideReason),
+      containmentAction: legacyContainment,
+      containmentDate: text(record?.containmentDate),
+      containmentBy: text(record?.containmentBy),
+      containmentVerifiedBy: text(record?.containmentVerifiedBy),
+      containmentNotes: text(record?.containmentNotes),
+      disposition,
+      correctionTaken: text(record?.correctionTaken),
+      dispositionApprovedBy: text(record?.dispositionApprovedBy),
+      dispositionDate: text(record?.dispositionDate),
+      reworkInstructions: text(record?.reworkInstructions),
+      reinspectionRequired: yesNo(record?.reinspectionRequired),
+      reinspectionResult: optionValue(record?.reinspectionResult, NONCONFORMANCE_REINSPECTION_RESULT_OPTIONS, "Not Required"),
+      rootCauseRequired: yesNo(record?.rootCauseRequired, "Yes"),
+      rootCause: legacyRootCause,
+      rootCauseCategory: optionValue(record?.rootCauseCategory, NONCONFORMANCE_ROOT_CAUSE_CATEGORY_OPTIONS, ""),
+      rootCauseJustification: text(record?.rootCauseJustification),
+      correctiveActionRequired: yesNo(record?.correctiveActionRequired, "Yes"),
+      correctiveActionTaken: text(record?.correctiveActionTaken),
+      correctiveActionOwner: text(record?.correctiveActionOwner),
+      correctiveActionDueDate: text(record?.correctiveActionDueDate),
+      correctiveActionCompletedDate: text(record?.correctiveActionCompletedDate),
+      correctiveActionVerifiedBy: text(record?.correctiveActionVerifiedBy),
+      correctiveActionJustification: text(record?.correctiveActionJustification),
+      effectivenessVerificationMethod: optionValue(record?.effectivenessVerificationMethod, NONCONFORMANCE_EFFECTIVENESS_METHOD_OPTIONS, ""),
+      effectivenessVerificationResult: optionValue(record?.effectivenessVerificationResult, NONCONFORMANCE_EFFECTIVENESS_RESULT_OPTIONS, "Pending"),
+      effectivenessVerificationDate: text(record?.effectivenessVerificationDate),
+      closureNotes: legacyClosureNotes,
+      closureApproval: text(record?.closureApproval),
+      cancellationReason: text(record?.cancellationReason),
+      reopenReason: text(record?.reopenReason),
+      active,
+      archivedAt: text(record?.archivedAt),
+      createdAt: text(record?.createdAt || nowIso()) || nowIso(),
+      createdBy: text(record?.createdBy || record?.reportedBy),
+      updatedAt: text(record?.updatedAt || nowIso()) || nowIso(),
+      auditLog: auditLog.map((entry) => ({
+        id: entry?.id || randomId("ncr-audit"),
+        eventType: text(entry?.eventType || entry?.type),
+        field: text(entry?.field),
+        oldValue: entry?.oldValue ?? "",
+        newValue: entry?.newValue ?? "",
+        changedBy: text(entry?.changedBy || entry?.user),
+        changedAt: text(entry?.changedAt || entry?.timestamp || nowIso()),
+        message: text(entry?.message)
+      })),
+      attachments: (Array.isArray(record?.attachments) ? record.attachments : []).map((attachment) => normalizeAttachment(attachment))
     };
   }
 
   nonconformanceHistoryMarkdown(record) {
+    const recentAudit = [...(record.auditLog || [])]
+      .sort((a, b) => String(b.changedAt || "").localeCompare(String(a.changedAt || "")))
+      .slice(0, 12);
     return [
       `# Nonconformance Report: ${record.ncrNumber || record.id}`,
       "",
       `Generated: ${nowIso()}`,
       "",
       `- Status: ${record.status || "-"}`,
+      `- Severity: ${record.severity || "-"}`,
+      `- Source: ${record.source || "-"}`,
       `- Job: ${record.jobNumber || record.jobId || "-"}`,
       `- Part: ${record.partNumber || record.partName || record.partId || "-"}`,
       `- Reported At: ${record.reportedAt || "-"}`,
@@ -1711,25 +1915,39 @@ class ERPBackend {
       `- Due Date: ${record.dueDate || "-"}`,
       `- Active: ${record.active !== false ? "Yes" : "No"}`,
       "",
-      "## Issue Summary",
+      "## Nonconformance Summary",
       "",
-      record.issueSummary || "No issue summary.",
+      record.issueSummary || record.nonconformanceDescription || "No issue summary.",
       "",
-      "## Issue Description",
+      "## Requirement Violated",
       "",
-      record.issueDescription || "No issue description.",
+      record.requirementViolated || "No requirement listed.",
+      "",
+      "## Actual Condition Found",
+      "",
+      record.actualConditionFound || record.issueDescription || "No actual condition recorded.",
       "",
       "## Containment Action",
       "",
       record.containmentAction || "No containment action.",
       "",
-      "## Root Cause Notes",
+      "## Root Cause",
       "",
-      record.rootCauseNotes || "No root cause notes.",
+      record.rootCause || "No root cause notes.",
+      "",
+      "## Corrective Action",
+      "",
+      record.correctiveActionTaken || "No corrective action recorded.",
       "",
       "## Closure Notes",
       "",
-      record.closureNotes || "No closure notes."
+      record.closureNotes || "No closure notes.",
+      "",
+      "## Audit Summary",
+      "",
+      ...(recentAudit.length
+        ? recentAudit.map((entry) => `- ${entry.changedAt || "-"} | ${entry.eventType || "change"} | ${entry.message || `${entry.field || "field"} updated`}`)
+        : ["- No audit entries recorded."])
     ].join("\n");
   }
 
@@ -1771,21 +1989,312 @@ class ERPBackend {
       id: record.id,
       ncrNumber: record.ncrNumber,
       status: record.status,
+      severity: record.severity,
+      source: record.source,
       disposition: record.disposition,
       jobId: record.jobId,
       jobNumber: record.jobNumber,
+      customer: record.customer,
+      customerPoNumber: record.customerPoNumber,
+      internalJobNumber: record.internalJobNumber,
       partId: record.partId,
       partNumber: record.partNumber,
       partName: record.partName,
+      supplierResponsible: record.supplierResponsible,
+      rootCauseCategory: record.rootCauseCategory,
       reportedAt: record.reportedAt,
       reportedBy: record.reportedBy,
       quantityAffected: record.quantityAffected,
       issueSummary: record.issueSummary,
+      nonconformanceDescription: record.nonconformanceDescription,
       owner: record.owner,
+      dueDate: record.dueDate,
+      closedBy: record.closedBy,
+      closureDate: record.closureDate,
       active: record.active !== false,
       archivedAt: record.archivedAt,
       updatedAt: record.updatedAt
     };
+  }
+
+  getNonconformanceChangedBy(record) {
+    return String(record?.closedBy || record?.owner || record?.reportedBy || record?.createdBy || "Local User").trim() || "Local User";
+  }
+
+  normalizeNonconformanceAttachmentsForAudit(attachments = []) {
+    return (Array.isArray(attachments) ? attachments : []).map((attachment) => ({
+      id: attachment.id,
+      filename: attachment.originalFilename,
+      revisionNumber: attachment.revisionNumber || 1,
+      active: attachment.active !== false,
+      attachmentType: attachment.attachmentType || attachment.category || "Other",
+      status: attachment.attachmentStatus || attachment.status || (attachment.active === false ? "Archived" : "Current")
+    }));
+  }
+
+  buildNonconformanceAuditEntries(previousRecord, nextRecord) {
+    const changedAt = String(nextRecord?.updatedAt || nowIso());
+    const changedBy = this.getNonconformanceChangedBy(nextRecord);
+    const entries = [];
+    const pushEntry = (eventType, message, extra = {}) => {
+      entries.push({
+        id: randomId("ncr-audit"),
+        eventType,
+        field: String(extra.field || "").trim(),
+        oldValue: extra.oldValue ?? "",
+        newValue: extra.newValue ?? "",
+        changedBy,
+        changedAt,
+        message
+      });
+    };
+    if (!previousRecord) {
+      pushEntry("created", `Created NCR ${nextRecord.ncrNumber || nextRecord.id}.`, {
+        newValue: nextRecord.ncrNumber || nextRecord.id
+      });
+      return entries;
+    }
+    const trackedFields = [
+      "ncrNumber",
+      "status",
+      "severity",
+      "source",
+      "customer",
+      "customerPoNumber",
+      "internalJobNumber",
+      "salesOrderQuoteNumber",
+      "partNumber",
+      "partName",
+      "partRevision",
+      "drawingRevision",
+      "modelRevision",
+      "operationNumber",
+      "supplierResponsible",
+      "lotBatchSerialNumber",
+      "quantityMade",
+      "quantityInspected",
+      "quantityAccepted",
+      "quantityRejected",
+      "quantityAffected",
+      "requirementViolated",
+      "actualConditionFound",
+      "detectionMethod",
+      "inspectionEquipmentId",
+      "inspectionRecordReference",
+      "relatedCharacteristicNumber",
+      "units",
+      "issueSummary",
+      "nonconformanceDescription",
+      "immediateRisk",
+      "productShipped",
+      "customerNotificationRequired",
+      "customerApprovalRequired",
+      "customerNotificationDate",
+      "customerApprovalReference",
+      "containmentAction",
+      "containmentDate",
+      "containmentBy",
+      "containmentVerifiedBy",
+      "containmentNotes",
+      "disposition",
+      "correctionTaken",
+      "dispositionApprovedBy",
+      "dispositionDate",
+      "reworkInstructions",
+      "reinspectionRequired",
+      "reinspectionResult",
+      "rootCauseRequired",
+      "rootCause",
+      "rootCauseCategory",
+      "correctiveActionRequired",
+      "correctiveActionTaken",
+      "correctiveActionOwner",
+      "correctiveActionDueDate",
+      "correctiveActionCompletedDate",
+      "correctiveActionVerifiedBy",
+      "effectivenessVerificationMethod",
+      "effectivenessVerificationResult",
+      "effectivenessVerificationDate",
+      "closureNotes",
+      "closureApproval",
+      "closedBy",
+      "closureDate",
+      "cancellationReason",
+      "reopenReason",
+      "owner",
+      "dueDate"
+    ];
+    for (const field of trackedFields) {
+      const oldValue = previousRecord?.[field] ?? "";
+      const newValue = nextRecord?.[field] ?? "";
+      if (JSON.stringify(oldValue) !== JSON.stringify(newValue)) {
+        pushEntry("field_changed", `${field} changed.`, { field, oldValue, newValue });
+      }
+    }
+    if (previousRecord.status !== nextRecord.status) {
+      pushEntry("status_changed", `Status changed from ${previousRecord.status || "-"} to ${nextRecord.status || "-"}.`, {
+        field: "status",
+        oldValue: previousRecord.status,
+        newValue: nextRecord.status
+      });
+      if (previousRecord.status === "Closed" && nextRecord.status !== "Closed") {
+        pushEntry("reopened", `Reopened NCR with reason: ${nextRecord.reopenReason || "No reason provided."}`, {
+          field: "reopenReason",
+          newValue: nextRecord.reopenReason
+        });
+      }
+      if (nextRecord.status === "Cancelled") {
+        pushEntry("cancelled", `Cancelled NCR. Reason: ${nextRecord.cancellationReason || "No reason provided."}`, {
+          field: "cancellationReason",
+          newValue: nextRecord.cancellationReason
+        });
+      }
+      if (nextRecord.status === "Closed") {
+        pushEntry("closed", `Closed NCR ${nextRecord.ncrNumber || nextRecord.id}.`, {
+          field: "closureDate",
+          newValue: nextRecord.closureDate
+        });
+      }
+    }
+    const previousAttachments = this.normalizeNonconformanceAttachmentsForAudit(previousRecord.attachments);
+    const nextAttachments = this.normalizeNonconformanceAttachmentsForAudit(nextRecord.attachments);
+    const previousById = new Map(previousAttachments.map((attachment) => [attachment.id, attachment]));
+    const nextById = new Map(nextAttachments.map((attachment) => [attachment.id, attachment]));
+    for (const attachment of nextAttachments) {
+      if (!previousById.has(attachment.id)) {
+        pushEntry("attachment_added", `Added attachment ${attachment.filename || attachment.id}.`, {
+          field: "attachments",
+          newValue: attachment.filename || attachment.id
+        });
+        continue;
+      }
+      const prior = previousById.get(attachment.id);
+      if (prior.revisionNumber !== attachment.revisionNumber) {
+        pushEntry("attachment_revised", `Revised attachment ${attachment.filename || attachment.id} to rev ${attachment.revisionNumber}.`, {
+          field: "attachments",
+          oldValue: prior.revisionNumber,
+          newValue: attachment.revisionNumber
+        });
+      }
+      if (prior.active !== attachment.active || prior.status !== attachment.status) {
+        pushEntry("attachment_status_changed", `Updated attachment ${attachment.filename || attachment.id} status to ${attachment.status}.`, {
+          field: "attachments",
+          oldValue: prior.status,
+          newValue: attachment.status
+        });
+      }
+    }
+    for (const attachment of previousAttachments) {
+      if (!nextById.has(attachment.id)) {
+        pushEntry("attachment_removed", `Removed attachment ${attachment.filename || attachment.id}.`, {
+          field: "attachments",
+          oldValue: attachment.filename || attachment.id
+        });
+      }
+    }
+    return entries;
+  }
+
+  validateNonconformance(record, previousRecord = null) {
+    const errors = [];
+    const requireField = (condition, value, message) => {
+      if (!condition) {
+        return;
+      }
+      if (!String(value || "").trim()) {
+        errors.push(message);
+      }
+    };
+    const status = record.status || "Open";
+    const quantityAffected = Number(record.quantityAffected || 0);
+    requireField(true, record.ncrNumber, "NCR Number is required.");
+    requireField(true, record.status, "Status is required.");
+    requireField(true, record.reportedBy, "Reported By is required.");
+    requireField(true, record.reportedAt, "Date Reported is required.");
+    requireField(status !== "Closed" && status !== "Cancelled", record.owner, "Owner is required while the NCR is open.");
+    if (status !== "Cancelled") {
+      if (!String(record.quantityAffected || "").trim()) {
+        errors.push("Quantity Affected is required.");
+      } else if (!Number.isFinite(quantityAffected) || quantityAffected <= 0) {
+        errors.push("Quantity Affected must be greater than zero.");
+      }
+    }
+    requireField(true, record.nonconformanceDescription || record.issueDescription, "Nonconformance Description is required.");
+    if (["Contained", "Awaiting Disposition", "Awaiting Corrective Action", "Awaiting Verification", "Closed"].includes(status)) {
+      requireField(true, record.containmentAction, "Containment Action is required before status can move past Open.");
+    }
+    if (String(record.containmentAction || "").trim() && status !== "Open") {
+      requireField(true, record.containmentDate, "Containment Date is required when containment is entered.");
+      requireField(true, record.containmentBy, "Containment By is required when containment is entered.");
+    }
+    if (["Awaiting Disposition", "Awaiting Corrective Action", "Awaiting Verification", "Closed"].includes(status)) {
+      requireField(true, record.requirementViolated, "Requirement / Specification Violated is required before disposition.");
+      requireField(true, record.actualConditionFound, "Actual Condition Found is required before disposition.");
+    }
+    if (record.customerNotificationRequired === "Yes" && status === "Closed") {
+      requireField(true, record.customerNotificationDate, "Customer Notification Date is required before closure.");
+    }
+    if (record.customerApprovalRequired === "Yes" && status === "Closed") {
+      requireField(true, record.customerApprovalReference, "Customer Approval Reference is required before closure.");
+    }
+    if (record.disposition === "Use As-Is" && record.customerApprovalRequired === "No") {
+      requireField(true, record.customerApprovalOverrideReason, "Use As-Is disposition requires a reason if customer approval is overridden.");
+    }
+    if (record.reinspectionRequired === "Yes" && status === "Closed") {
+      if (!["Pass", "Fail"].includes(record.reinspectionResult || "")) {
+        errors.push("Reinspection Result is required before closure.");
+      }
+    }
+    if (record.rootCauseRequired === "No" && ["Awaiting Corrective Action", "Awaiting Verification", "Closed"].includes(status)) {
+      requireField(true, record.rootCauseJustification, "Root Cause justification is required when root cause is marked not required.");
+    }
+    if (record.correctiveActionRequired === "No" && ["Awaiting Verification", "Closed"].includes(status)) {
+      requireField(true, record.correctiveActionJustification, "Corrective Action justification is required when corrective action is marked not required.");
+    }
+    if (record.correctiveActionRequired === "Yes" && ["Awaiting Corrective Action", "Awaiting Verification", "Closed"].includes(status)) {
+      requireField(true, record.rootCause, "Root Cause is required when corrective action is required.");
+      requireField(true, record.correctiveActionTaken, "Corrective Action Taken is required when corrective action is required.");
+      requireField(true, record.correctiveActionOwner, "Corrective Action Owner is required when corrective action is required.");
+      if (status === "Closed") {
+        requireField(true, record.correctiveActionCompletedDate, "Corrective Action Completed Date is required before closure.");
+        requireField(true, record.effectivenessVerificationMethod, "Effectiveness Verification Method is required before closure.");
+        if (record.effectivenessVerificationResult !== "Effective") {
+          errors.push("Effectiveness Verification Result must be Effective before closure.");
+        }
+      }
+    }
+    if (status === "Closed") {
+      requireField(true, record.disposition, "Disposition is required before status can be Closed.");
+      requireField(true, record.correctionTaken, "Correction Taken is required before status can be Closed.");
+      requireField(true, record.closureApproval, "Closure Approval is required before status can be Closed.");
+    }
+    const transitionMap = {
+      Open: ["Open", "Contained", "Cancelled"],
+      Contained: ["Contained", "Awaiting Disposition", "Cancelled"],
+      "Awaiting Disposition": [
+        "Awaiting Disposition",
+        record.correctiveActionRequired === "Yes" ? "Awaiting Corrective Action" : "Awaiting Verification",
+        "Cancelled"
+      ],
+      "Awaiting Corrective Action": ["Awaiting Corrective Action", "Awaiting Verification", "Cancelled"],
+      "Awaiting Verification": ["Awaiting Verification", "Closed", "Cancelled"],
+      Closed: ["Closed"],
+      Cancelled: ["Cancelled"]
+    };
+    if (previousRecord) {
+      if (previousRecord.status === "Closed" && status !== "Closed") {
+        requireField(true, record.reopenReason, "Reopening an NCR requires a reason.");
+      } else if (previousRecord.status !== status) {
+        const allowedTransitions = transitionMap[previousRecord.status] || [previousRecord.status];
+        if (!allowedTransitions.includes(status)) {
+          errors.push(`Invalid status transition from ${previousRecord.status} to ${status}.`);
+        }
+      }
+    }
+    if (status === "Cancelled") {
+      requireField(true, record.cancellationReason, "Cancellation reason is required.");
+    }
+    return errors;
   }
 
   async listNonconformances(filters = {}) {
@@ -1811,6 +2320,30 @@ class ERPBackend {
       if (filters?.partId && record.partId !== filters.partId) return false;
       if (filters?.status && record.status !== filters.status) return false;
       if (filters?.disposition && record.disposition !== filters.disposition) return false;
+      if (filters?.severity && record.severity !== filters.severity) return false;
+      if (filters?.customer && record.customer !== filters.customer) return false;
+      if (filters?.jobNumber && record.jobNumber !== filters.jobNumber) return false;
+      if (filters?.partNumber && record.partNumber !== filters.partNumber) return false;
+      if (filters?.supplier && record.supplierResponsible !== filters.supplier) return false;
+      if (filters?.rootCauseCategory && record.rootCauseCategory !== filters.rootCauseCategory) return false;
+      if (filters?.dateFrom && String(record.reportedAt || "").slice(0, 10) < String(filters.dateFrom)) return false;
+      if (filters?.dateTo && String(record.reportedAt || "").slice(0, 10) > String(filters.dateTo)) return false;
+      if (filters?.query) {
+        const haystack = [
+          record.ncrNumber,
+          record.jobNumber,
+          record.partNumber,
+          record.partName,
+          record.customer,
+          record.issueSummary,
+          record.nonconformanceDescription,
+          record.owner,
+          record.disposition,
+          record.supplierResponsible,
+          record.rootCauseCategory
+        ].join(" ").toLowerCase();
+        if (!haystack.includes(String(filters.query || "").trim().toLowerCase())) return false;
+      }
       return true;
     });
     return filtered.sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
@@ -1836,11 +2369,21 @@ class ERPBackend {
   async saveNonconformance(record) {
     const dataRoot = await this.requireDataFolder();
     const timestamp = nowIso();
+    const previousRecord = record?.id ? await this.loadNonconformance(record.id).catch(() => null) : null;
     const normalized = this.normalizeNonconformance({
       ...record,
-      createdAt: record?.createdAt || timestamp,
+      createdAt: record?.createdAt || previousRecord?.createdAt || timestamp,
+      createdBy: record?.createdBy || previousRecord?.createdBy || record?.reportedBy || "",
       updatedAt: timestamp
     });
+    if (previousRecord?.status === "Closed" && normalized.status === "Closed") {
+      normalized.closedBy = previousRecord.closedBy;
+      normalized.closureDate = previousRecord.closureDate;
+    }
+    if (normalized.status === "Closed" && previousRecord?.status !== "Closed") {
+      normalized.closureDate = normalized.closureDate || timestamp;
+      normalized.closedBy = normalized.closedBy || normalized.owner || normalized.reportedBy || "Local User";
+    }
     const nextNumber = normalizeText(normalized.ncrNumber);
     if (nextNumber) {
       const existingRecords = await this.listNonconformances();
@@ -1849,11 +2392,28 @@ class ERPBackend {
         throw new Error(`NCR number already exists: ${normalized.ncrNumber}`);
       }
     }
+    const validationErrors = this.validateNonconformance(normalized, previousRecord);
+    if (validationErrors.length) {
+      throw new Error(validationErrors[0]);
+    }
+    normalized.auditLog = [
+      ...(previousRecord?.auditLog || []),
+      ...this.buildNonconformanceAuditEntries(previousRecord, normalized)
+    ];
     const root = this.getNonconformanceRoot(dataRoot, normalized.id);
     await ensureDir(path.join(root, "attachments"));
     await writeJson(path.join(root, "ncr.json"), normalized);
     await writeText(path.join(root, "history.md"), this.nonconformanceHistoryMarkdown(normalized));
-    await this.appendAudit("nonconformance_saved", normalized.id, `Saved NCR ${normalized.ncrNumber || normalized.id}.`);
+    const latestAudit = normalized.auditLog[normalized.auditLog.length - 1] || null;
+    await this.appendAudit(
+      latestAudit?.eventType === "reopened" ? "nonconformance_reopened"
+        : latestAudit?.eventType === "closed" ? "nonconformance_closed"
+          : latestAudit?.eventType === "cancelled" ? "nonconformance_cancelled"
+            : "nonconformance_saved",
+      normalized.id,
+      `Saved NCR ${normalized.ncrNumber || normalized.id}.`,
+      latestAudit ? { latestAuditEvent: latestAudit.eventType, latestAuditMessage: latestAudit.message } : {}
+    );
     await this.rebuildIndex();
     return this.loadNonconformance(normalized.id);
   }
@@ -1886,6 +2446,60 @@ class ERPBackend {
     return saved;
   }
 
+  async removeNonconformanceInspectionReferences(ncrNumber) {
+    const normalizedNumber = normalizeText(ncrNumber);
+    if (!normalizedNumber) {
+      return;
+    }
+    const summaries = await this.listJobSummaries();
+    for (const summary of summaries) {
+      const job = await this.loadJob(summary.id).catch(() => null);
+      if (!job) {
+        continue;
+      }
+      let changed = false;
+      for (const part of job.parts || []) {
+        const inspection = this.normalizeInspection(part?.inspection);
+        const reports = (inspection.reports || []).map((report) => {
+          const current = Array.isArray(report.relatedNcrNumbers) ? report.relatedNcrNumbers : [];
+          const nextNumbers = current.filter((value) => normalizeText(value) !== normalizedNumber);
+          if (nextNumbers.length !== current.length) {
+            changed = true;
+            return {
+              ...report,
+              relatedNcrNumbers: nextNumbers,
+              updatedAt: nowIso()
+            };
+          }
+          return report;
+        });
+        if (changed) {
+          part.inspection = { ...inspection, reports };
+        }
+      }
+      if (changed) {
+        await this.saveJob(job);
+      }
+    }
+  }
+
+  async deleteNonconformance(ncrId) {
+    const dataRoot = await this.requireDataFolder();
+    const record = await this.loadNonconformance(ncrId);
+    if (!record) {
+      throw new Error(`Nonconformance record not found: ${ncrId}`);
+    }
+    if (record.active !== false) {
+      throw new Error("Only archived NCRs can be deleted.");
+    }
+    await this.releaseLock("nonconformance", ncrId).catch(() => {});
+    await fs.rm(this.getNonconformanceRoot(dataRoot, ncrId), { recursive: true, force: true });
+    await this.removeNonconformanceInspectionReferences(record.ncrNumber || ncrId);
+    await this.appendAudit("nonconformance_deleted", ncrId, `Deleted archived NCR ${record.ncrNumber || ncrId}.`);
+    await this.rebuildIndex();
+    return { ok: true };
+  }
+
   async copyNonconformanceAttachment(ncrId, sourcePath) {
     const dataRoot = await this.requireDataFolder();
     const record = await this.loadNonconformance(ncrId);
@@ -1893,13 +2507,26 @@ class ERPBackend {
       throw new Error("Nonconformance record not found.");
     }
     const destination = await copyFileUnique(sourcePath, this.getNonconformanceAttachmentsRoot(dataRoot, ncrId), "");
-    return this.normalizeDocument({
-      originalFilename: path.basename(sourcePath),
-      storedFilename: path.basename(destination),
-      storedPath: path.relative(dataRoot, destination).replaceAll("\\", "/"),
-      originalPath: sourcePath,
-      fileType: path.extname(sourcePath).slice(1).toUpperCase()
-    });
+    const extension = path.extname(sourcePath).toLowerCase();
+    const attachmentType = [".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"].includes(extension)
+      ? "Photo"
+      : extension === ".pdf"
+        ? "Drawing"
+        : "Other";
+    return this.normalizeNonconformance({
+      attachments: [{
+        ...this.normalizeDocument({
+          originalFilename: path.basename(sourcePath),
+          storedFilename: path.basename(destination),
+          storedPath: path.relative(dataRoot, destination).replaceAll("\\", "/"),
+          originalPath: sourcePath,
+          fileType: path.extname(sourcePath).slice(1).toUpperCase()
+        }),
+        attachmentType,
+        attachmentStatus: "Current",
+        uploadedDate: nowIso()
+      }]
+    }).attachments[0];
   }
 
   async chooseNonconformanceAttachments(ncrId, mainWindow) {
@@ -1964,17 +2591,17 @@ class ERPBackend {
     if (index < 0) {
       throw new Error("Attachment not found.");
     }
-    attachments[index] = this.normalizeDocument({ ...attachments[index], ...patch });
+    attachments[index] = this.normalizeNonconformance({ attachments: [{ ...attachments[index], ...patch }] }).attachments[0];
     record.attachments = attachments;
     return this.saveNonconformance(record);
   }
 
   async archiveNonconformanceAttachment(ncrId, attachmentId) {
-    return this.updateNonconformanceAttachmentState(ncrId, attachmentId, { active: false, archivedAt: nowIso() });
+    return this.updateNonconformanceAttachmentState(ncrId, attachmentId, { active: false, archivedAt: nowIso(), attachmentStatus: "Archived", status: "Archived" });
   }
 
   async unarchiveNonconformanceAttachment(ncrId, attachmentId) {
-    return this.updateNonconformanceAttachmentState(ncrId, attachmentId, { active: true, archivedAt: "" });
+    return this.updateNonconformanceAttachmentState(ncrId, attachmentId, { active: true, archivedAt: "", attachmentStatus: "Current", status: "Current" });
   }
 
   async reviseNonconformanceAttachment(ncrId, attachmentId, mainWindow = null) {
@@ -2017,6 +2644,8 @@ class ERPBackend {
     attachment.displayName = attachment.originalFilename;
     attachment.active = true;
     attachment.archivedAt = "";
+    attachment.attachmentStatus = "Current";
+    attachment.status = "Current";
     attachment.revisedAt = revisionTimestamp;
     attachment.revisionNumber = Number(attachment.revisionNumber || 1) + 1;
     return this.saveNonconformance(record);
@@ -2075,6 +2704,137 @@ class ERPBackend {
     }
     const next = preferredCandidates[0];
     return `${next.prefix}${String(next.number + 1).padStart(next.digits.length, "0")}`;
+  }
+
+  async generateNextInspectionReportNumber() {
+    const preferences = await this.loadPreferences();
+    const configuredPrefix = String(preferences.inspectionReportPrefix || "").trim();
+    const startingNumber = Number.isFinite(Number(preferences.startingInspectionReportNumber))
+      ? Number(preferences.startingInspectionReportNumber)
+      : 1;
+    const candidates = [];
+    for (const summary of await this.listJobSummaries()) {
+      const job = await this.loadJob(summary.id);
+      for (const part of job?.parts || []) {
+        const inspection = this.normalizeInspection(part?.inspection);
+        for (const report of inspection.reports || []) {
+          const value = String(report.reportId || "").trim();
+          const match = value.match(/^(.*?)(\d+)$/);
+          if (!match) {
+            continue;
+          }
+          candidates.push({
+            prefix: match[1],
+            digits: match[2],
+            number: Number(match[2]),
+            updatedAt: String(report.updatedAt || report.generatedAt || "")
+          });
+        }
+      }
+    }
+    candidates.sort((a, b) => b.number - a.number || String(b.updatedAt).localeCompare(String(a.updatedAt)));
+    const preferredCandidates = configuredPrefix
+      ? candidates.filter((candidate) => candidate.prefix === configuredPrefix)
+      : candidates;
+    if (!preferredCandidates.length) {
+      const digits = Math.max(String(startingNumber).length, 4);
+      return `${configuredPrefix}${String(startingNumber).padStart(digits, "0")}`;
+    }
+    const next = preferredCandidates[0];
+    return `${next.prefix}${String(next.number + 1).padStart(next.digits.length, "0")}`;
+  }
+
+  escapeCsvCell(value) {
+    const text = String(value ?? "");
+    if (/[",\r\n]/.test(text)) {
+      return `"${text.replaceAll("\"", "\"\"")}"`;
+    }
+    return text;
+  }
+
+  async exportNonconformancesCsv(filters = {}, destinationPath = "") {
+    const dataRoot = await this.requireDataFolder();
+    const records = await this.listNonconformances(filters);
+    let outputPath = destinationPath;
+    if (!outputPath) {
+      const result = await dialog.showSaveDialog({
+        title: "Export NCR Summary CSV",
+        defaultPath: path.join(dataRoot, `nonconformances-${nowIso().slice(0, 10)}.csv`),
+        filters: [{ name: "CSV", extensions: ["csv"] }]
+      });
+      if (result.canceled || !result.filePath) {
+        return null;
+      }
+      outputPath = result.filePath;
+    }
+    const statusCounts = NONCONFORMANCE_STATUS_OPTIONS.map((status) => [status, records.filter((record) => record.status === status).length]);
+    const severityCounts = NONCONFORMANCE_SEVERITY_OPTIONS.map((severity) => [severity, records.filter((record) => record.severity === severity).length]);
+    const rows = [
+      ["Generated At", nowIso()],
+      [],
+      ["Status Counts"],
+      ["Status", "Count"],
+      ...statusCounts,
+      [],
+      ["Severity Counts"],
+      ["Severity", "Count"],
+      ...severityCounts,
+      [],
+      [
+        "NCR Number",
+        "Status",
+        "Severity",
+        "Source",
+        "Date Reported",
+        "Reported By",
+        "Owner",
+        "Customer",
+        "Customer PO Number",
+        "Internal Job Number",
+        "Part Number",
+        "Part Name",
+        "Supplier / Vendor Responsible",
+        "Quantity Affected",
+        "Disposition",
+        "Root Cause Category",
+        "Due Date",
+        "Closed By",
+        "Closure Date",
+        "Summary"
+      ],
+      ...records.map((record) => [
+        record.ncrNumber,
+        record.status,
+        record.severity,
+        record.source,
+        record.reportedAt,
+        record.reportedBy,
+        record.owner,
+        record.customer,
+        record.customerPoNumber,
+        record.internalJobNumber || record.jobNumber,
+        record.partNumber,
+        record.partName,
+        record.supplierResponsible,
+        record.quantityAffected,
+        record.disposition,
+        record.rootCauseCategory,
+        record.dueDate,
+        record.closedBy,
+        record.closureDate,
+        record.issueSummary || record.nonconformanceDescription
+      ])
+    ];
+    const csv = rows.map((row) => row.map((cell) => this.escapeCsvCell(cell)).join(",")).join("\r\n");
+    await fs.writeFile(outputPath, csv, "utf8");
+    await this.appendAudit("nonconformance_csv_exported", "nonconformance", `Exported NCR CSV to ${outputPath}.`, {
+      count: records.length
+    });
+    const openError = await shell.openPath(outputPath);
+    if (openError) {
+      console.warn(`Unable to open exported CSV: ${openError}`);
+    }
+    return outputPath;
   }
 
   normalizeParameter(parameter) {
@@ -2247,6 +3007,11 @@ class ERPBackend {
       upperLimit: String(item?.upperLimit || "").trim(),
       gdTolerance: String(item?.gdTolerance || "").trim(),
       gageId: String(item?.gageId || "").trim(),
+      description: String(item?.description || "").trim(),
+      requirementDescription: String(item?.requirementDescription || item?.description || item?.type || "").trim(),
+      inspectionMethod: String(item?.inspectionMethod || "").trim(),
+      calibrationDueDate: String(item?.calibrationDueDate || "").trim(),
+      criticalCharacteristic: item?.criticalCharacteristic === true || String(item?.criticalCharacteristic || "").trim() === "Yes",
       gageText: String(item?.gageText || "").trim(),
       notes: String(item?.notes || "").trim(),
       sourceDrawingDocumentId: String(item?.sourceDrawingDocumentId || "").trim(),
@@ -2256,11 +3021,100 @@ class ERPBackend {
     const normalizeInstance = (item, index) => ({
       id: item?.id || randomId("inspection-instance"),
       label: String(item?.label || `Part ${index + 1}`).trim(),
+      serialNumber: String(item?.serialNumber || "").trim(),
       inspector: String(item?.inspector || "").trim(),
       inspectedAt: String(item?.inspectedAt || nowIso()).trim(),
+      inspectedTime: String(item?.inspectedTime || "").trim(),
       status: String(item?.status || "Open").trim(),
-      results: Object.fromEntries(Object.entries(item?.results || {}).map(([key, value]) => [key, String(value || "").trim()]))
+      measurementNotes: String(item?.measurementNotes || "").trim(),
+      results: Object.fromEntries(Object.entries(item?.results || {}).map(([key, value]) => {
+        if (value && typeof value === "object" && !Array.isArray(value)) {
+          return [key, {
+            value: String(value?.value || "").trim(),
+            passFail: String(value?.passFail || "").trim(),
+            gageId: String(value?.gageId || "").trim(),
+            notes: String(value?.notes || "").trim()
+          }];
+        }
+        return [key, {
+          value: String(value || "").trim(),
+          passFail: "",
+          gageId: "",
+          notes: ""
+        }];
+      }))
     });
+    const normalizeReportAuditEntry = (item) => ({
+      id: item?.id || randomId("inspection-report-audit"),
+      eventType: String(item?.eventType || "updated").trim(),
+      message: String(item?.message || "").trim(),
+      changedBy: String(item?.changedBy || "").trim(),
+      changedAt: String(item?.changedAt || nowIso()).trim(),
+      changedFields: Array.isArray(item?.changedFields) ? item.changedFields.map((field) => String(field || "").trim()).filter(Boolean) : [],
+      oldValue: item?.oldValue ?? null,
+      newValue: item?.newValue ?? null
+    });
+    const normalizeInspectionReport = (item, index) => ({
+      id: item?.id || randomId("inspection-report"),
+      reportId: String(item?.reportId || "").trim(),
+      status: String(item?.status || "Draft").trim() || "Draft",
+      finalResult: String(item?.finalResult || "Pending").trim() || "Pending",
+      generatedAt: String(item?.generatedAt || nowIso()).trim(),
+      generatedBy: String(item?.generatedBy || "").trim(),
+      releasedBy: String(item?.releasedBy || "").trim(),
+      releasedAt: String(item?.releasedAt || "").trim(),
+      voidedBy: String(item?.voidedBy || "").trim(),
+      voidedAt: String(item?.voidedAt || "").trim(),
+      voidReason: String(item?.voidReason || "").trim(),
+      traceability: {
+        customer: String(item?.traceability?.customer || "").trim(),
+        customerPoNumber: String(item?.traceability?.customerPoNumber || "").trim(),
+        internalJobNumber: String(item?.traceability?.internalJobNumber || "").trim(),
+        salesOrderQuoteNumber: String(item?.traceability?.salesOrderQuoteNumber || "").trim(),
+        partNumber: String(item?.traceability?.partNumber || "").trim(),
+        partName: String(item?.traceability?.partName || "").trim(),
+        partRevision: String(item?.traceability?.partRevision || "").trim(),
+        drawingNumber: String(item?.traceability?.drawingNumber || "").trim(),
+        drawingRevision: String(item?.traceability?.drawingRevision || "").trim(),
+        drawingFileName: String(item?.traceability?.drawingFileName || "").trim(),
+        modelFileName: String(item?.traceability?.modelFileName || "").trim(),
+        modelRevision: String(item?.traceability?.modelRevision || "").trim(),
+        material: String(item?.traceability?.material || "").trim(),
+        lotBatchSerialNumber: String(item?.traceability?.lotBatchSerialNumber || "").trim()
+      },
+      inspectionContext: {
+        inspectionType: String(item?.inspectionContext?.inspectionType || "In-Process").trim(),
+        samplingPlan: String(item?.inspectionContext?.samplingPlan || "100% Inspection").trim(),
+        inspectionPlanRevision: String(item?.inspectionContext?.inspectionPlanRevision || "").trim(),
+        notes: String(item?.inspectionContext?.notes || "").trim(),
+        deviations: String(item?.inspectionContext?.deviations || "").trim(),
+        exceptions: String(item?.inspectionContext?.exceptions || "").trim()
+      },
+      quantitySummary: {
+        quantityOrdered: String(item?.quantitySummary?.quantityOrdered || "").trim(),
+        quantityInspected: String(item?.quantitySummary?.quantityInspected || "").trim(),
+        quantityAccepted: String(item?.quantitySummary?.quantityAccepted || "").trim(),
+        quantityRejected: String(item?.quantitySummary?.quantityRejected || "").trim()
+      },
+      relatedNcrNumbers: Array.isArray(item?.relatedNcrNumbers) ? item.relatedNcrNumbers.map((value) => String(value || "").trim()).filter(Boolean) : [],
+      ncrRequired: String(item?.ncrRequired || "No").trim() || "No",
+      ncrJustification: String(item?.ncrJustification || "").trim(),
+      gageExceptionNote: String(item?.gageExceptionNote || "").trim(),
+      snapshot: {
+        units: String(item?.snapshot?.units || inspection?.units || "in").trim() || "in",
+        balloonedDocumentId: String(item?.snapshot?.balloonedDocumentId || "").trim(),
+        characteristics: (Array.isArray(item?.snapshot?.characteristics) ? item.snapshot.characteristics : []).map(normalizeCharacteristic),
+        instances: (Array.isArray(item?.snapshot?.instances) ? item.snapshot.instances : []).map(normalizeInstance)
+      },
+      auditLog: (Array.isArray(item?.auditLog) ? item.auditLog : []).map(normalizeReportAuditEntry),
+      createdAt: String(item?.createdAt || item?.generatedAt || nowIso()).trim(),
+      updatedAt: String(item?.updatedAt || item?.generatedAt || nowIso()).trim(),
+      versionNumber: Number(item?.versionNumber || index + 1) || index + 1
+    });
+    const reports = (Array.isArray(inspection?.reports) ? inspection.reports : []).map(normalizeInspectionReport);
+    const activeReportId = reports.some((item) => item.id === inspection?.activeReportId)
+      ? String(inspection.activeReportId || "").trim()
+      : (reports[0]?.id || "");
     return {
       units: String(inspection?.units || "in").trim() || "in",
       characteristics: (Array.isArray(inspection?.characteristics) ? inspection.characteristics : []).map(normalizeCharacteristic),
@@ -2288,7 +3142,9 @@ class ERPBackend {
         warnings: toDisplayList(item?.warnings),
         errors: toDisplayList(item?.errors)
       })),
-      reviewQueue: (Array.isArray(inspection?.reviewQueue) ? inspection.reviewQueue : []).map(normalizeCharacteristic)
+      reviewQueue: (Array.isArray(inspection?.reviewQueue) ? inspection.reviewQueue : []).map(normalizeCharacteristic),
+      reports,
+      activeReportId
     };
   }
 
@@ -3796,20 +4652,42 @@ class ERPBackend {
 
   async rebuildIndex() {
     const dataRoot = await this.requireDataFolder();
-    const [jobs, nonconformances, kanbanCards, materials, instruments] = await Promise.all([
+    const [jobSummaries, nonconformances, kanbanCards, materials, instruments] = await Promise.all([
       this.listJobSummaries(),
       this.listNonconformances(),
       this.listKanbanCards(),
       this.listMaterials(),
       this.listInstruments()
     ]);
+    const jobs = await Promise.all(jobSummaries.map((summary) => this.loadJob(summary.id)));
     const index = {
       generatedAt: nowIso(),
-      jobs: jobs.map((job) => ({
+      jobs: jobs.filter(Boolean).map((job) => {
+        const inspectionText = (job.parts || []).flatMap((part) => {
+          const inspection = this.normalizeInspection(part?.inspection);
+          return (inspection.reports || []).map((report) => [
+            report.reportId,
+            report.status,
+            report.finalResult,
+            report.traceability?.customer,
+            report.traceability?.internalJobNumber,
+            report.traceability?.partNumber,
+            report.traceability?.drawingRevision,
+            report.quantitySummary?.quantityInspected,
+            report.quantitySummary?.quantityAccepted,
+            report.quantitySummary?.quantityRejected,
+            report.inspectionContext?.inspectionType,
+            report.inspectionContext?.samplingPlan,
+            ...this.relatedInspectionNcrNumbers(job, part, nonconformances, report),
+            report.releasedAt
+          ].join(" "));
+        }).join(" ");
+        return ({
         id: job.id,
         label: `${job.jobNumber || job.id} ${job.customer || ""}`.trim(),
-        searchText: `${job.jobNumber} ${job.customer} ${job.routeSummary}`.toLowerCase()
-      })),
+        searchText: `${job.jobNumber} ${job.customer} ${job.routeSummary} ${inspectionText}`.toLowerCase()
+      });
+      }),
       nonconformances: nonconformances.map((record) => ({
         id: record.id,
         label: `${record.ncrNumber || record.id} ${record.jobNumber || ""} ${record.partNumber || record.partName || ""}`.trim(),
@@ -3835,6 +4713,79 @@ class ERPBackend {
     return index;
   }
 
+  relatedInspectionNcrNumbers(job, part, nonconformances = [], report = {}) {
+    const numbers = [
+      ...(Array.isArray(report?.relatedNcrNumbers) ? report.relatedNcrNumbers : [])
+    ];
+    for (const record of nonconformances || []) {
+      const matchesStableId = record?.partId && record.partId === part?.id;
+      const matchesLegacyIdentity = !record?.partId
+        && record?.partNumber
+        && record.partNumber === part?.partNumber
+        && (!record?.jobId || record.jobId === job?.id || record.jobNumber === job?.jobNumber);
+      if (matchesStableId || matchesLegacyIdentity) {
+        numbers.push(record.ncrNumber || record.id);
+      }
+    }
+    return Array.from(new Set(numbers.map((value) => String(value || "").trim()).filter(Boolean)));
+  }
+
+  async listInspectionReports() {
+    const [jobs, nonconformances] = await Promise.all([
+      Promise.all((await this.listJobSummaries()).map((summary) => this.loadJob(summary.id).catch(() => null))),
+      this.listNonconformances().catch(() => [])
+    ]);
+    const reports = [];
+    for (const job of jobs.filter(Boolean)) {
+      for (const part of job.parts || []) {
+        const inspection = this.normalizeInspection(part?.inspection);
+        const sourceReports = inspection.reports?.length
+          ? inspection.reports
+          : [{
+            id: inspection.activeReportId || "",
+            reportId: "",
+            status: "Draft",
+            finalResult: "Pending",
+            generatedAt: "",
+            releasedAt: "",
+            traceability: {},
+            inspectionContext: {},
+            quantitySummary: {}
+          }];
+        for (const report of sourceReports) {
+          const characteristicCount = report.snapshot?.characteristics?.length || inspection.characteristics?.length || 0;
+          const instanceCount = report.snapshot?.instances?.length || inspection.instances?.length || 0;
+          reports.push({
+            id: report.id || `${job.id}:${part.id}:draft`,
+            reportId: report.reportId || "Draft Inspection",
+            status: report.status || "Draft",
+            finalResult: report.finalResult || "Pending",
+            jobId: job.id,
+            jobNumber: job.jobNumber || "",
+            partId: part.id,
+            partNumber: part.partNumber || "",
+            partName: part.partName || "",
+            customer: report.traceability?.customer || job.customer || "",
+            drawingRevision: report.traceability?.drawingRevision || part.revision?.number || "",
+            inspectionType: report.inspectionContext?.inspectionType || "",
+            samplingPlan: report.inspectionContext?.samplingPlan || "",
+            quantityInspected: report.quantitySummary?.quantityInspected || "",
+            quantityAccepted: report.quantitySummary?.quantityAccepted || "",
+            quantityRejected: report.quantitySummary?.quantityRejected || "",
+            relatedNcrNumbers: this.relatedInspectionNcrNumbers(job, part, nonconformances, report),
+            generatedAt: report.generatedAt || "",
+            releasedAt: report.releasedAt || "",
+            characteristicCount,
+            instanceCount,
+            active: part.active !== false && job.active !== false
+          });
+        }
+      }
+    }
+    reports.sort((left, right) => String(right.generatedAt || right.releasedAt || "").localeCompare(String(left.generatedAt || left.releasedAt || "")));
+    return reports;
+  }
+
   async getDashboardState() {
     const [jobs, materials, instruments, audit] = await Promise.all([
       this.listJobSummaries(),
@@ -3856,9 +4807,10 @@ class ERPBackend {
 
   async loadWorkspace() {
     const dataFolder = await this.requireDataFolder();
-    const [dashboard, jobs, nonconformances, kanbanCards, customers, materials, instruments, templates, libraries, standards, preferences] = await Promise.all([
+    const [dashboard, jobs, inspections, nonconformances, kanbanCards, customers, materials, instruments, templates, libraries, standards, preferences] = await Promise.all([
       this.getDashboardState(),
       this.listJobSummaries(),
+      this.listInspectionReports(),
       this.listNonconformances(),
       this.listKanbanCards(),
       this.listCustomers(),
@@ -3873,6 +4825,7 @@ class ERPBackend {
       dataFolder,
       dashboard,
       jobs,
+      inspections,
       nonconformances,
       kanbanCards,
       customers,
@@ -3889,6 +4842,14 @@ class ERPBackend {
           priorities: ["Low", "Normal", "High", "Hot"],
           instrumentStatuses: ["In service", "Due for calibration", "Overdue", "Retired"],
           nonconformanceStatuses: NONCONFORMANCE_STATUS_OPTIONS,
+          nonconformanceSeverities: NONCONFORMANCE_SEVERITY_OPTIONS,
+          nonconformanceSources: NONCONFORMANCE_SOURCE_OPTIONS,
+          nonconformanceDetectionMethods: NONCONFORMANCE_DETECTION_METHOD_OPTIONS,
+          nonconformanceRootCauseCategories: NONCONFORMANCE_ROOT_CAUSE_CATEGORY_OPTIONS,
+          nonconformanceEffectivenessMethods: NONCONFORMANCE_EFFECTIVENESS_METHOD_OPTIONS,
+          nonconformanceEffectivenessResults: NONCONFORMANCE_EFFECTIVENESS_RESULT_OPTIONS,
+          nonconformanceAttachmentTypes: NONCONFORMANCE_ATTACHMENT_TYPE_OPTIONS,
+          nonconformanceAttachmentStatuses: NONCONFORMANCE_ATTACHMENT_STATUS_OPTIONS,
           kanbanDeepLinkPrefix: KANBAN_DEEP_LINK_PREFIX,
           materialDeepLinkPrefix: MATERIAL_DEEP_LINK_PREFIX
         }
@@ -4801,7 +5762,7 @@ class ERPBackend {
     return outputPath;
   }
 
-  async exportPartInspectionPdf(jobId, partId, destinationPath) {
+  async exportPartInspectionPdf(jobId, partId, destinationPath, reportId = "", options = {}) {
     const dataRoot = await this.requireDataFolder();
     const job = await this.loadJob(jobId);
     const part = job?.parts?.find((item) => item.id === partId);
@@ -4831,11 +5792,23 @@ class ERPBackend {
         sandbox: false
       }
     });
+    const params = new URLSearchParams();
+    if (reportId) {
+      params.set("reportId", reportId);
+    }
+    for (const [key, fallback] of Object.entries(DEFAULT_INSPECTION_REPORT_EXPORT_OPTIONS)) {
+      const enabled = Object.prototype.hasOwnProperty.call(options || {}, key) ? Boolean(options[key]) : fallback;
+      if (!enabled) {
+        params.set(key, "0");
+      }
+    }
+    const query = params.toString();
+    const inspectionRoute = `/print/inspection/${encodeURIComponent(jobId)}/${encodeURIComponent(partId)}${query ? `?${query}` : ""}`;
     if (this.devServerUrl) {
-      await printWindow.loadURL(`${this.devServerUrl}#/print/inspection/${encodeURIComponent(jobId)}/${encodeURIComponent(partId)}`);
+      await printWindow.loadURL(`${this.devServerUrl}#${inspectionRoute}`);
     } else {
       await printWindow.loadFile(path.join(this.app.getAppPath(), "dist", "index.html"), {
-        hash: `/print/inspection/${encodeURIComponent(jobId)}/${encodeURIComponent(partId)}`
+        hash: inspectionRoute
       });
     }
     await this.waitForPrintSelector(printWindow, ".inspection-print-ready");
