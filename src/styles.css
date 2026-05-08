@@ -1594,6 +1594,41 @@ button:disabled:hover {
   background: var(--panel-2);
 }
 
+.inspection-results-entry-cell.pass {
+  background: #dcfce7;
+}
+
+.inspection-results-entry-cell.fail {
+  background: #fee2e2;
+}
+
+.inspection-results-entry-cell.pass input,
+.inspection-results-entry-cell.fail input {
+  background: transparent;
+  font-weight: 700;
+}
+
+.inspection-results-entry-cell.pass input {
+  color: #14532d;
+}
+
+.inspection-results-entry-cell.fail input {
+  color: #7f1d1d;
+}
+
+.inspection-results-header {
+  display: grid;
+  gap: 0.2rem;
+  min-width: 120px;
+  text-align: left;
+}
+
+.inspection-results-header small {
+  color: var(--muted);
+  font-size: 0.72rem;
+  line-height: 1.2;
+}
+
 .inspection-result-chip {
   display: inline-block;
   margin-top: 0.25rem;
@@ -1617,6 +1652,11 @@ button:disabled:hover {
 .balloon-print-shell {
   background: white;
   color: #111827;
+}
+
+.inspection-balloon-report-page {
+  break-after: page;
+  page-break-after: always;
 }
 
 .inspection-report-page,
@@ -1661,6 +1701,134 @@ button:disabled:hover {
 .inspection-print-section h2 {
   margin: 0 0 0.08in;
   font-size: 0.18in;
+}
+
+.inspection-print-drawing-frame {
+  margin-top: 0.14in;
+  border: 1px solid #d1d5db;
+  border-radius: 16px;
+  overflow: hidden;
+  background: white;
+}
+
+.inspection-print-drawing-canvas {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.inspection-section-header-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.2in;
+  margin-bottom: 0.08in;
+}
+
+.inspection-color-key {
+  display: flex;
+  align-items: center;
+  gap: 0.18in;
+  font-size: 0.11in;
+  color: #374151;
+}
+
+.inspection-color-key span {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.06in;
+}
+
+.inspection-color-chip {
+  width: 0.14in;
+  height: 0.14in;
+  border-radius: 4px;
+  display: inline-block;
+  border: 1px solid rgba(17, 24, 39, 0.15);
+}
+
+.inspection-color-chip.pass {
+  background: #dcfce7;
+}
+
+.inspection-color-chip.fail {
+  background: #fee2e2;
+}
+
+.inspection-print-result-cell.pass {
+  background: #dcfce7;
+  color: #14532d;
+  font-weight: 700;
+}
+
+.inspection-print-result-cell.fail {
+  background: #fee2e2;
+  color: #7f1d1d;
+  font-weight: 700;
+}
+
+.inspection-chart-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.16in;
+}
+
+.inspection-chart-card {
+  border: 1px solid #d1d5db;
+  border-radius: 16px;
+  padding: 0.12in;
+  background: white;
+  break-inside: avoid;
+  page-break-inside: avoid;
+}
+
+.inspection-chart-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.12in;
+  margin-bottom: 0.08in;
+  font-size: 0.12in;
+}
+
+.inspection-chart-header span {
+  color: #6b7280;
+}
+
+.inspection-chart-svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.inspection-chart-key {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.12in;
+  margin-top: 0.06in;
+  font-size: 0.1in;
+  color: #4b5563;
+}
+
+.inspection-chart-key span {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.05in;
+}
+
+.inspection-chart-key i {
+  display: inline-block;
+  width: 0.16in;
+  height: 0;
+  border-top: 2px solid currentColor;
+}
+
+.inspection-chart-key .limit-line {
+  color: #dc2626;
+  border-top-style: dashed;
+}
+
+.inspection-chart-key .mean-line {
+  color: #16a34a;
 }
 
 .balloon-print-title {

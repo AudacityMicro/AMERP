@@ -157,10 +157,10 @@ const blankInspectionCharacteristic = (number = "") => ({
   active: true
 });
 
-const blankInspectionInstance = (index = 1) => ({
+const blankInspectionInstance = (index = 1, inspector = "") => ({
   id: uid("inspection-instance"),
   label: `Part ${index}`,
-  inspector: "",
+  inspector,
   inspectedAt: nowIso(),
   status: "Open",
   results: {}
@@ -181,9 +181,14 @@ function renumberInspectionPayload(inspection) {
     number: String(index + 1)
   }));
   const characteristicNumberMap = new Map(characteristics.map((item) => [item.id, item.number]));
+  const instances = (inspection?.instances || []).map((item, index) => ({
+    ...item,
+    label: `Part ${index + 1}`
+  }));
   return {
     ...inspection,
     characteristics,
+    instances,
     balloons: (inspection?.balloons || []).map((balloon) => ({
       ...balloon,
       labelText: characteristicNumberMap.get(balloon.characteristicId) || balloon.labelText || "?"
@@ -673,9 +678,11 @@ function characteristicLimits(characteristic) {
   if (String(characteristic?.toleranceType || "") === "limits") {
     const lower = Number(characteristic?.lowerLimit);
     const upper = Number(characteristic?.upperLimit);
+    const normalizedLower = Number.isFinite(lower) && Number.isFinite(upper) ? Math.min(lower, upper) : lower;
+    const normalizedUpper = Number.isFinite(lower) && Number.isFinite(upper) ? Math.max(lower, upper) : upper;
     return {
-      lower: Number.isFinite(lower) ? lower : null,
-      upper: Number.isFinite(upper) ? upper : null
+      lower: Number.isFinite(normalizedLower) ? normalizedLower : null,
+      upper: Number.isFinite(normalizedUpper) ? normalizedUpper : null
     };
   }
   const nominal = Number(characteristic?.nominal);
@@ -752,6 +759,48 @@ function characteristicToleranceSummary(characteristic) {
     return `+${characteristic.plusTolerance || "-"} / -${characteristic.minusTolerance || characteristic.plusTolerance || "-"}`;
   }
   return "";
+}
+
+function characteristicLimitDisplay(characteristic, units = "") {
+  const { lower, upper } = characteristicLimits(characteristic);
+  return {
+    lower: lower !== null ? [formatDerivedNumber(lower), units].filter(Boolean).join(" ") : "-",
+    upper: upper !== null ? [formatDerivedNumber(upper), units].filter(Boolean).join(" ") : "-"
+  };
+}
+
+function normalizeInstrumentOptions(instruments) {
+  return (instruments || [])
+    .map((payload) => {
+      const source = payload?.instrument || payload || {};
+      const instrumentId = source.instrument_id || source.instrumentId || "";
+      const toolName = source.tool_name || source.toolName || instrumentId;
+      return instrumentId ? { instrumentId, toolName } : null;
+    })
+    .filter(Boolean);
+}
+
+function measurementToolLabel(characteristic, instrumentOptions) {
+  if (!characteristic?.gageId) {
+    return "-";
+  }
+  const match = (instrumentOptions || []).find((item) => item.instrumentId === characteristic.gageId);
+  return match?.toolName || characteristic.gageId;
+}
+
+function latestBalloonedDrawingDocument(part) {
+  const candidates = (part?.documents || [])
+    .filter((document) =>
+      document?.active !== false
+      && String(document?.fileType || "").toUpperCase() === "PDF"
+      && String(document?.description || "").startsWith("Ballooned drawing generated from ")
+    )
+    .sort((left, right) => {
+      const leftTime = Date.parse(left?.attachedAt || "") || 0;
+      const rightTime = Date.parse(right?.attachedAt || "") || 0;
+      return rightTime - leftTime;
+    });
+  return candidates[0] || null;
 }
 
 function instructionStepsFromOperation(operation) {
@@ -1302,10 +1351,17 @@ useEffect(() => api.onDeepLink?.((payload) => {
     setSaveState("saved");
   };
 
-  const openInspection = (partId) => {
+  const openInspectionSetup = (partId) => {
     setSelectedPartId(partId);
     setSelectedOperationId(null);
-    setJobScreen("inspection");
+    setJobScreen("inspection-setup");
+    setSaveState("saved");
+  };
+
+  const openInspectionResults = (partId) => {
+    setSelectedPartId(partId);
+    setSelectedOperationId(null);
+    setJobScreen("inspection-results");
     setSaveState("saved");
   };
 
@@ -1345,17 +1401,24 @@ useEffect(() => api.onDeepLink?.((payload) => {
     }
   };
 
-  const savePartInspection = async (partId, inspection) => {
-    if (!job?.id || !partId) return;
-    const saved = await api.savePartInspection(job.id, partId, inspection);
+  const saveCurrentJobSnapshot = async () => {
+    if (!job) {
+      return null;
+    }
+    const saved = await api.saveJob(job);
     await applySavedJob(saved);
+    return saved;
   };
 
   const extractInspectionFromDrawing = async (partId, source) => {
     if (!job?.id || !partId) return;
     setBusy(true);
     try {
-      const result = await api.extractPartInspectionFromDrawing(job.id, partId, source);
+      const savedJob = await saveCurrentJobSnapshot();
+      if (!savedJob?.id) {
+        return;
+      }
+      const result = await api.extractPartInspectionFromDrawing(savedJob.id, partId, source);
       if (!result) {
         return;
       }
@@ -1372,7 +1435,11 @@ useEffect(() => api.onDeepLink?.((payload) => {
     if (!job?.id || !partId || !drawingDocumentId) return;
     setBusy(true);
     try {
-      const result = await api.generatePartBalloonedDrawingPdf(job.id, partId, drawingDocumentId);
+      const savedJob = await saveCurrentJobSnapshot();
+      if (!savedJob?.id) {
+        return;
+      }
+      const result = await api.generatePartBalloonedDrawingPdf(savedJob.id, partId, drawingDocumentId);
       if (result?.job) {
         await applySavedJob(result.job);
       }
@@ -1388,7 +1455,11 @@ useEffect(() => api.onDeepLink?.((payload) => {
     if (!job?.id || !selectedPartId) return;
     setBusy(true);
     try {
-      const output = await api.exportPartInspectionPdf(job.id, selectedPartId);
+      const savedJob = await saveCurrentJobSnapshot();
+      if (!savedJob?.id) {
+        return;
+      }
+      const output = await api.exportPartInspectionPdf(savedJob.id, selectedPartId);
       if (output) {
         showStatus(`Exported inspection PDF: ${output}`);
       }
@@ -2483,14 +2554,17 @@ useEffect(() => api.onDeepLink?.((payload) => {
       if (jobScreen !== "list" && job) {
         crumbs.push({ label: job.jobNumber || "New Job", onClick: backToJob, active: jobScreen === "job" });
       }
-      if (jobScreen === "part" || jobScreen === "operation" || jobScreen === "inspection") {
+      if (jobScreen === "part" || jobScreen === "operation" || jobScreen === "inspection-setup" || jobScreen === "inspection-results") {
         crumbs.push({ label: selectedPart?.partNumber || selectedPart?.partName || "Part", onClick: backToPart, active: jobScreen === "part" });
       }
       if (jobScreen === "operation") {
         crumbs.push({ label: selectedOperation?.title || `Operation ${selectedOperation?.sequence || ""}`.trim(), onClick: null, active: true });
       }
-      if (jobScreen === "inspection") {
-        crumbs.push({ label: "Inspection", onClick: null, active: true });
+      if (jobScreen === "inspection-setup") {
+        crumbs.push({ label: "Inspection Setup", onClick: null, active: true });
+      }
+      if (jobScreen === "inspection-results") {
+        crumbs.push({ label: "Inspection Results", onClick: null, active: true });
       }
       return {
         breadcrumbs: crumbs,
@@ -2500,8 +2574,10 @@ useEffect(() => api.onDeepLink?.((payload) => {
             ? (job?.jobNumber || "New Job")
             : jobScreen === "part"
               ? (selectedPart?.partNumber || selectedPart?.partName || "Part")
-              : jobScreen === "inspection"
-                ? "Inspection"
+              : jobScreen === "inspection-setup"
+                ? "Inspection Setup"
+              : jobScreen === "inspection-results"
+                ? "Inspection Results"
               : (selectedOperation?.title || "Operation"),
         subtitle: jobScreen === "list"
           ? "Build and run jobs from part to operation."
@@ -2509,14 +2585,17 @@ useEffect(() => api.onDeepLink?.((payload) => {
             ? `${job?.parts?.length || 0} parts`
             : jobScreen === "part"
               ? `${selectedPart?.operations?.length || 0} operations`
-              : jobScreen === "inspection"
+              : jobScreen === "inspection-setup" || jobScreen === "inspection-results"
                 ? `${selectedPart?.inspection?.characteristics?.length || 0} characteristics`
               : `${job?.jobNumber || ""}${selectedPart ? ` / ${selectedPart.partNumber || selectedPart.partName || "Part"}` : ""}`,
         primaryActions: [
           jobScreen === "list" ? <button key="new-job" onClick={createNewJob}><Plus size={15} /> New Job</button> : null,
           jobScreen !== "list" ? <button key="pdf" onClick={exportCurrentJobPdf} disabled={!job || busy}><FileDown size={16} /> PDF</button> : null,
-          jobScreen === "part" ? <button key="inspection" onClick={() => selectedPart && openInspection(selectedPart.id)} disabled={!job || !selectedPart || busy}>Inspection</button> : null,
-          jobScreen === "inspection" ? <button key="inspection-pdf" onClick={() => exportCurrentInspectionPdf()} disabled={!job || !selectedPart || busy}><FileDown size={16} /> Inspection PDF</button> : null
+          jobScreen === "part" ? <button key="inspection-setup" onClick={() => selectedPart && openInspectionSetup(selectedPart.id)} disabled={!job || !selectedPart || busy}>Inspection Setup</button> : null,
+          jobScreen === "part" ? <button key="inspection-results" onClick={() => selectedPart && openInspectionResults(selectedPart.id)} disabled={!job || !selectedPart || busy}>Inspection Results</button> : null,
+          jobScreen === "inspection-setup" || jobScreen === "inspection-results"
+            ? <button key="inspection-pdf" onClick={() => exportCurrentInspectionPdf()} disabled={!job || !selectedPart || busy}><FileDown size={16} /> Inspection PDF</button>
+            : null
         ].filter(Boolean),
         dangerActions: [
           jobScreen !== "list" && job?.active !== false
@@ -2685,7 +2764,8 @@ useEffect(() => api.onDeepLink?.((payload) => {
             onCreateJob={createNewJob}
             onOpenPart={openPart}
             onOpenOperation={openOperation}
-            onOpenInspection={openInspection}
+            onOpenInspectionSetup={openInspectionSetup}
+            onOpenInspectionResults={openInspectionResults}
             onBackToJobList={showJobList}
             onBackToJob={backToJob}
             onBackToPart={backToPart}
@@ -2710,7 +2790,6 @@ useEffect(() => api.onDeepLink?.((payload) => {
         onDeletePartDocument={deletePartDocument}
         onSaveCustomer={saveCustomer}
             onChooseOperationImages={async (jobId, partId, operationId) => api.chooseOperationImages(jobId, partId, operationId)}
-            onSavePartInspection={savePartInspection}
             onExtractInspectionFromDrawing={extractInspectionFromDrawing}
             onGenerateBalloonedDrawingPdf={generateBalloonedDrawingPdf}
             onCreateInlineMaterial={createInlineMaterial}
@@ -3341,7 +3420,8 @@ function JobsView({
   onCreateJob,
   onOpenPart,
   onOpenOperation,
-  onOpenInspection,
+  onOpenInspectionSetup,
+  onOpenInspectionResults,
   onBackToJobList,
   onBackToJob,
   onBackToPart,
@@ -3366,7 +3446,6 @@ function JobsView({
   onDeleteJobDocument,
   onDeletePartDocument,
   onSaveCustomer,
-  onSavePartInspection,
   onExtractInspectionFromDrawing,
   onGenerateBalloonedDrawingPdf,
   onCreateInlineMaterial,
@@ -3443,17 +3522,27 @@ function JobsView({
     return <EmptyState icon={Package} title="No job selected" text="Choose a job from the list or create a new one." actionLabel="New Job" onAction={onCreateJob} />;
   }
 
-  if (jobScreen === "inspection" && selectedPart) {
+  if (jobScreen === "inspection-setup" && selectedPart) {
     return (
-      <PartInspectionScreen
+      <PartInspectionSetupScreen
         busy={busy}
         job={job}
         part={selectedPart}
         instruments={instruments}
         onUpdate={(inspection) => updatePart(selectedPart.id, { inspection })}
-        onSaveInspection={(inspection) => onSavePartInspection(selectedPart.id, inspection)}
         onExtract={(source) => onExtractInspectionFromDrawing(selectedPart.id, source)}
         onGenerateBalloonedPdf={(drawingDocumentId) => onGenerateBalloonedDrawingPdf(selectedPart.id, drawingDocumentId)}
+      />
+    );
+  }
+
+  if (jobScreen === "inspection-results" && selectedPart) {
+    return (
+      <PartInspectionResultsScreen
+        busy={busy}
+        part={selectedPart}
+        instruments={instruments}
+        onUpdate={(inspection) => updatePart(selectedPart.id, { inspection })}
       />
     );
   }
@@ -3508,7 +3597,6 @@ function JobsView({
         onAddOperation={addOperation}
         onImportFusion={onImportFusionToPart}
         onOpenOperation={(operationId) => onOpenOperation(selectedPart.id, operationId)}
-        onOpenInspection={() => onOpenInspection(selectedPart.id)}
         onMoveOperation={(operationId, direction) => moveOperation(selectedPart.id, operationId, direction)}
         materials={materials}
         constants={workspace.constants}
@@ -3781,7 +3869,6 @@ function PartDetailScreen({
   onAddOperation,
   onImportFusion,
   onOpenOperation,
-  onOpenInspection,
   onMoveOperation,
   onCreateInlineMaterial,
   onAddMaterialFamily,
@@ -4060,7 +4147,7 @@ function PdfPagePreview({ fileUrl, pageNumber, zoom, balloons, selectedBalloonId
   );
 }
 
-function PartInspectionScreen({ busy, job, part, instruments, onUpdate, onSaveInspection, onExtract, onGenerateBalloonedPdf }) {
+function PartInspectionSetupScreen({ busy, job, part, instruments, onUpdate, onExtract, onGenerateBalloonedPdf }) {
   const inspection = renumberInspectionPayload(normalizeInspectionPayload(part.inspection));
   const undoStackRef = useRef([]);
   const lastSnapshotRef = useRef(JSON.stringify(inspection));
@@ -4073,14 +4160,7 @@ function PartInspectionScreen({ busy, job, part, instruments, onUpdate, onSaveIn
   const drawings = (part.documents || []).filter((document) => document.active !== false && String(document.fileType || "").toUpperCase() === "PDF");
   const selectedDrawing = drawings.find((document) => document.id === selectedDrawingId) || drawings[0] || null;
   const selectedCharacteristic = inspection.characteristics.find((item) => item.id === selectedCharacteristicId) || inspection.characteristics[0] || null;
-  const instrumentOptions = (instruments || [])
-    .map((payload) => {
-      const source = payload?.instrument || payload || {};
-      const instrumentId = source.instrument_id || source.instrumentId || "";
-      const toolName = source.tool_name || source.toolName || instrumentId;
-      return instrumentId ? { instrumentId, toolName } : null;
-    })
-    .filter(Boolean);
+  const instrumentOptions = normalizeInstrumentOptions(instruments);
   const currentSnapshot = JSON.stringify(inspection);
   if (lastSnapshotRef.current !== currentSnapshot) {
     lastSnapshotRef.current = currentSnapshot;
@@ -4118,24 +4198,6 @@ function PartInspectionScreen({ busy, job, part, instruments, onUpdate, onSaveIn
     applyInspection({ ...inspection, characteristics: [...inspection.characteristics, characteristic] });
     setSelectedCharacteristicId(characteristic.id);
   };
-  const addInstance = () => applyInspection({
-    ...inspection,
-    instances: [...inspection.instances, blankInspectionInstance(inspection.instances.length + 1)]
-  });
-  const updateInstance = (instanceId, patch) => applyInspection({
-    ...inspection,
-    instances: inspection.instances.map((item) => item.id === instanceId ? { ...item, ...patch } : item)
-  });
-  const removeInstance = (instanceId) => applyInspection({
-    ...inspection,
-    instances: inspection.instances.filter((item) => item.id !== instanceId)
-  });
-  const updateResult = (instanceId, characteristicId, value) => applyInspection({
-    ...inspection,
-    instances: inspection.instances.map((item) => item.id === instanceId
-      ? { ...item, results: { ...(item.results || {}), [characteristicId]: value } }
-      : item)
-  });
   useEffect(() => {
     setCurrentPage(1);
     setPageCount(1);
@@ -4330,11 +4392,10 @@ function PartInspectionScreen({ busy, job, part, instruments, onUpdate, onSaveIn
         <div className="panel-heading inline">
           <div>
             <h3>Inspection Plan</h3>
-            <span>{inspection.characteristics.length} characteristics | {inspection.instances.length} inspected instances</span>
+            <span>{inspection.characteristics.length} characteristics</span>
           </div>
           <div className="toolbar">
             <button onClick={addCharacteristic}><Plus size={14} /> Characteristic</button>
-            <button onClick={() => onSaveInspection(inspection)} disabled={busy}>Save Inspection</button>
           </div>
         </div>
         <div className="inspection-plan-table-wrap">
@@ -4380,50 +4441,289 @@ function PartInspectionScreen({ busy, job, part, instruments, onUpdate, onSaveIn
           {!inspection.characteristics.length && <div className="empty-inline">No inspection characteristics yet. Add one manually or extract from a drawing.</div>}
         </div>
       </section>
+    </div>
+  );
+}
 
-      <section className="panel">
+function InspectionResultsTable({ inspection, instrumentOptions, onAddInstance, onUpdateInstance, onUpdateResult, onRemoveInstance }) {
+  return (
+    <section className="panel">
+      <div className="panel-heading inline">
+        <div>
+          <h3>Inspected Parts</h3>
+          <span>Record one measured value per characteristic and part instance.</span>
+        </div>
+        <button onClick={onAddInstance}><Plus size={14} /> Instance</button>
+      </div>
+      <div className="inspection-results-table-wrap">
+        <table className="print-table inspection-results-table">
+          <thead>
+            <tr>
+              <th>Instance</th>
+              <th>Inspector</th>
+              <th>Date</th>
+              {inspection.characteristics.map((characteristic) => {
+                const limits = characteristicLimitDisplay(characteristic, inspection.units);
+                return (
+                  <th key={characteristic.id}>
+                    <div className="inspection-results-header">
+                      <strong>{characteristic.number || "?"}</strong>
+                      <small>Lower: {limits.lower}</small>
+                      <small>Upper: {limits.upper}</small>
+                      <small>Tool: {measurementToolLabel(characteristic, instrumentOptions)}</small>
+                    </div>
+                  </th>
+                );
+              })}
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {inspection.instances.map((instance) => (
+              <tr key={instance.id}>
+                <td><div className="static-field">{instance.label || "-"}</div></td>
+                <td><input value={instance.inspector || ""} onChange={(event) => onUpdateInstance(instance.id, { inspector: event.target.value })} /></td>
+                <td><input type="date" value={String(instance.inspectedAt || "").slice(0, 10)} onChange={(event) => onUpdateInstance(instance.id, { inspectedAt: event.target.value })} /></td>
+                {inspection.characteristics.map((characteristic) => {
+                  const value = instance.results?.[characteristic.id] || "";
+                  const status = inspectionResultStatus(characteristic, value);
+                  return (
+                    <td key={`${instance.id}-${characteristic.id}`} className={status ? `inspection-results-entry-cell ${status.toLowerCase()}` : "inspection-results-entry-cell"}>
+                      <input value={value} onChange={(event) => onUpdateResult(instance.id, characteristic.id, event.target.value)} placeholder={characteristic.type === "GD&T" ? "Pass/Fail" : "Value"} />
+                    </td>
+                  );
+                })}
+                <td><button className="danger subtle square" onClick={() => onRemoveInstance(instance.id)}><X size={13} /></button></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {!inspection.instances.length && <div className="empty-inline">No inspected part instances yet.</div>}
+      </div>
+    </section>
+  );
+}
+
+function PartInspectionResultsScreen({ busy, part, instruments, onUpdate }) {
+  const inspection = renumberInspectionPayload(normalizeInspectionPayload(part.inspection));
+  const instrumentOptions = normalizeInstrumentOptions(instruments);
+  const balloonedDocument = latestBalloonedDrawingDocument(part);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pageCount, setPageCount] = useState(1);
+  const [zoom, setZoom] = useState(null);
+  const [activeScale, setActiveScale] = useState(1);
+  const applyInspection = (next) => onUpdate(renumberInspectionPayload(normalizeInspectionPayload(next)));
+  const previousInspector = String(inspection.instances[inspection.instances.length - 1]?.inspector || "").trim();
+  const addInstance = () => applyInspection({
+    ...inspection,
+    instances: [...inspection.instances, blankInspectionInstance(inspection.instances.length + 1, previousInspector)]
+  });
+  const updateInstance = (instanceId, patch) => applyInspection({
+    ...inspection,
+    instances: inspection.instances.map((item) => item.id === instanceId ? { ...item, ...patch } : item)
+  });
+  const removeInstance = (instanceId) => applyInspection({
+    ...inspection,
+    instances: inspection.instances.filter((item) => item.id !== instanceId)
+  });
+  const updateResult = (instanceId, characteristicId, value) => applyInspection({
+    ...inspection,
+    instances: inspection.instances.map((item) => item.id === instanceId
+      ? { ...item, results: { ...(item.results || {}), [characteristicId]: value } }
+      : item)
+  });
+  const fileUrl = balloonedDocument?.storedPath ? api.assetUrl(balloonedDocument.storedPath) : "";
+
+  useEffect(() => {
+    setCurrentPage(1);
+    setPageCount(1);
+    setZoom(null);
+  }, [balloonedDocument?.id]);
+
+  return (
+    <div className="workflow-stack inspection-screen">
+      <section className="panel inspection-balloon-panel">
         <div className="panel-heading inline">
           <div>
-            <h3>Inspected Parts</h3>
-            <span>Record one measured value per characteristic and part instance.</span>
+            <h3>Ballooned Drawing</h3>
+            <span>{balloonedDocument ? (balloonedDocument.originalFilename || balloonedDocument.storedFilename) : "Generate a ballooned PDF from Inspection Setup to review results here."}</span>
           </div>
-          <button onClick={addInstance}><Plus size={14} /> Instance</button>
         </div>
-        <div className="inspection-results-table-wrap">
-          <table className="print-table inspection-results-table">
-            <thead>
-              <tr>
-                <th>Instance</th>
-                <th>Inspector</th>
-                <th>Date</th>
-                {inspection.characteristics.map((characteristic) => <th key={characteristic.id}>{characteristic.number || "?"}</th>)}
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {inspection.instances.map((instance) => (
-                <tr key={instance.id}>
-                  <td><input value={instance.label || ""} onChange={(event) => updateInstance(instance.id, { label: event.target.value })} /></td>
-                  <td><input value={instance.inspector || ""} onChange={(event) => updateInstance(instance.id, { inspector: event.target.value })} /></td>
-                  <td><input type="date" value={String(instance.inspectedAt || "").slice(0, 10)} onChange={(event) => updateInstance(instance.id, { inspectedAt: event.target.value })} /></td>
-                  {inspection.characteristics.map((characteristic) => {
-                    const value = instance.results?.[characteristic.id] || "";
-                    const status = inspectionResultStatus(characteristic, value);
-                    return (
-                      <td key={`${instance.id}-${characteristic.id}`}>
-                        <input value={value} onChange={(event) => updateResult(instance.id, characteristic.id, event.target.value)} placeholder={characteristic.type === "GD&T" ? "Pass/Fail" : "Value"} />
-                        {status ? <span className={`inspection-result-chip ${status.toLowerCase()}`}>{status}</span> : null}
-                      </td>
-                    );
-                  })}
-                  <td><button className="danger subtle square" onClick={() => removeInstance(instance.id)}><X size={13} /></button></td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          {!inspection.instances.length && <div className="empty-inline">No inspected part instances yet.</div>}
-        </div>
+        {balloonedDocument ? (
+          <>
+            <div className="inspection-preview-toolbar">
+              <button onClick={() => setCurrentPage((current) => Math.max(1, current - 1))} disabled={currentPage <= 1}>Prev Page</button>
+              <span>Page {currentPage}</span>
+              <button onClick={() => setCurrentPage((current) => Math.min(pageCount, current + 1))} disabled={currentPage >= pageCount}>Next Page</button>
+              <button onClick={() => setZoom((current) => Math.max(0.05, Number((((current ?? activeScale) || 1) - 0.15).toFixed(2))))}>-</button>
+              <span>{Math.round(((zoom ?? activeScale) || 1) * 100)}%</span>
+              <button onClick={() => setZoom((current) => Math.min(3, Number((((current ?? activeScale) || 1) + 0.15).toFixed(2))))}>+</button>
+              <button onClick={() => setZoom(null)}>Fit To Screen</button>
+            </div>
+            <PdfPagePreview
+              fileUrl={fileUrl}
+              pageNumber={currentPage}
+              zoom={zoom}
+              balloons={[]}
+              selectedBalloonId=""
+              onDocumentMeta={({ pageCount: nextPageCount, safePageNumber, appliedScale }) => {
+                setPageCount(nextPageCount || 1);
+                setActiveScale(appliedScale || 1);
+                if (safePageNumber !== currentPage) {
+                  setCurrentPage(safePageNumber);
+                }
+              }}
+            />
+          </>
+        ) : (
+          <div className="empty-inline">No ballooned PDF has been generated yet. Open Inspection Setup and generate a ballooned PDF for this part.</div>
+        )}
       </section>
+      <InspectionResultsTable
+        inspection={inspection}
+        instrumentOptions={instrumentOptions}
+        onAddInstance={addInstance}
+        onUpdateInstance={updateInstance}
+        onUpdateResult={updateResult}
+        onRemoveInstance={removeInstance}
+      />
+    </div>
+  );
+}
+
+function PrintPdfPage({ fileUrl, pageNumber = 1 }) {
+  const canvasRef = useRef(null);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    const render = async () => {
+      if (!fileUrl || !canvasRef.current) {
+        return;
+      }
+      try {
+        setError("");
+        const loadingTask = getDocument(fileUrl);
+        const pdf = await loadingTask.promise;
+        const safePageNumber = Math.max(1, Math.min(pdf.numPages, pageNumber || 1));
+        const page = await pdf.getPage(safePageNumber);
+        const baseViewport = page.getViewport({ scale: 1 });
+        const targetWidth = 930;
+        const viewport = page.getViewport({ scale: targetWidth / baseViewport.width });
+        if (cancelled || !canvasRef.current) {
+          return;
+        }
+        const canvas = canvasRef.current;
+        const context = canvas.getContext("2d");
+        canvas.width = viewport.width;
+        canvas.height = viewport.height;
+        canvas.style.width = "100%";
+        canvas.style.height = "auto";
+        await page.render({ canvasContext: context, viewport }).promise;
+      } catch (nextError) {
+        if (!cancelled) {
+          setError(nextError.message || String(nextError));
+        }
+      }
+    };
+    void render();
+    return () => {
+      cancelled = true;
+    };
+  }, [fileUrl, pageNumber]);
+
+  if (!fileUrl) {
+    return <div className="traveler-empty-state">No ballooned drawing available.</div>;
+  }
+  if (error) {
+    return <div className="traveler-empty-state">{error}</div>;
+  }
+  return (
+    <div className="inspection-print-drawing-frame">
+      <canvas ref={canvasRef} className="inspection-print-drawing-canvas" />
+    </div>
+  );
+}
+
+function InspectionXBarChart({ characteristic, instances, units, instrumentOptions }) {
+  const numericPoints = instances
+    .map((instance, index) => {
+      const raw = instance.results?.[characteristic.id];
+      const value = Number(String(raw || "").trim());
+      if (!Number.isFinite(value)) {
+        return null;
+      }
+      return {
+        index,
+        label: instance.label || `Part ${index + 1}`,
+        value,
+        status: inspectionResultStatus(characteristic, raw)
+      };
+    })
+    .filter(Boolean);
+  if (!numericPoints.length) {
+    return null;
+  }
+  const { lower, upper } = characteristicLimits(characteristic);
+  const nominal = numericOrNull(characteristic.nominal);
+  const values = [
+    ...numericPoints.map((item) => item.value),
+    ...(lower !== null ? [lower] : []),
+    ...(upper !== null ? [upper] : []),
+    ...(nominal !== null ? [nominal] : [])
+  ];
+  let min = Math.min(...values);
+  let max = Math.max(...values);
+  if (min === max) {
+    min -= 1;
+    max += 1;
+  }
+  const padding = (max - min) * 0.15 || 1;
+  min -= padding;
+  max += padding;
+  const width = 640;
+  const height = 220;
+  const left = 56;
+  const right = 20;
+  const top = 18;
+  const bottom = 42;
+  const innerWidth = width - left - right;
+  const innerHeight = height - top - bottom;
+  const xFor = (index) => numericPoints.length === 1 ? left + innerWidth / 2 : left + (innerWidth * index) / (numericPoints.length - 1);
+  const yFor = (value) => top + ((max - value) / (max - min)) * innerHeight;
+  const path = numericPoints.map((point, index) => `${index === 0 ? "M" : "L"} ${xFor(index)} ${yFor(point.value)}`).join(" ");
+  const mean = numericPoints.reduce((sum, item) => sum + item.value, 0) / numericPoints.length;
+  const title = `Dim ${characteristic.number || "?"}`;
+
+  return (
+    <div className="inspection-chart-card">
+      <div className="inspection-chart-header">
+        <strong>{title}</strong>
+        <span>{measurementToolLabel(characteristic, instrumentOptions)}</span>
+      </div>
+      <svg viewBox={`0 0 ${width} ${height}`} className="inspection-chart-svg" role="img" aria-label={`${title} X bar chart`}>
+        <rect x={0} y={0} width={width} height={height} fill="white" />
+        <line x1={left} y1={top + innerHeight} x2={width - right} y2={top + innerHeight} stroke="#9ca3af" strokeWidth="1" />
+        <line x1={left} y1={top} x2={left} y2={top + innerHeight} stroke="#9ca3af" strokeWidth="1" />
+        {lower !== null ? <line x1={left} y1={yFor(lower)} x2={width - right} y2={yFor(lower)} stroke="#dc2626" strokeWidth="1.5" strokeDasharray="5 4" /> : null}
+        {upper !== null ? <line x1={left} y1={yFor(upper)} x2={width - right} y2={yFor(upper)} stroke="#dc2626" strokeWidth="1.5" strokeDasharray="5 4" /> : null}
+        {nominal !== null ? <line x1={left} y1={yFor(nominal)} x2={width - right} y2={yFor(nominal)} stroke="#2563eb" strokeWidth="1" strokeDasharray="3 3" /> : null}
+        <line x1={left} y1={yFor(mean)} x2={width - right} y2={yFor(mean)} stroke="#16a34a" strokeWidth="1.5" />
+        <path d={path} fill="none" stroke="#111827" strokeWidth="1.75" />
+        {numericPoints.map((point, index) => (
+          <g key={`${characteristic.id}-${point.index}`}>
+            <circle cx={xFor(index)} cy={yFor(point.value)} r="4.5" fill={point.status === "Fail" ? "#dc2626" : "#16a34a"} />
+            <text x={xFor(index)} y={top + innerHeight + 18} textAnchor="middle" fontSize="10" fill="#374151">{point.label}</text>
+          </g>
+        ))}
+        <text x="8" y={top + 4} fontSize="10" fill="#374151">{formatDerivedNumber(max)} {units}</text>
+        <text x="8" y={top + innerHeight} fontSize="10" fill="#374151">{formatDerivedNumber(min)} {units}</text>
+      </svg>
+      <div className="inspection-chart-key">
+        {lower !== null ? <span><i className="limit-line" /> Lower {formatDerivedNumber(lower)} {units}</span> : null}
+        {upper !== null ? <span><i className="limit-line" /> Upper {formatDerivedNumber(upper)} {units}</span> : null}
+        <span><i className="mean-line" /> X-bar {formatDerivedNumber(mean)} {units}</span>
+      </div>
     </div>
   );
 }
@@ -7806,17 +8106,38 @@ function PrintInspectionReport({ jobId, partId }) {
   const [payload, setPayload] = useState(null);
   const [error, setError] = useState("");
   useEffect(() => {
-    api.loadJob(jobId).then((job) => {
+    Promise.all([api.loadJob(jobId), api.loadWorkspace()]).then(([job, workspace]) => {
       const part = job?.parts?.find((item) => item.id === partId);
-      setPayload({ job, part, inspection: normalizeInspectionPayload(part?.inspection) });
+      setPayload({
+        job,
+        part,
+        inspection: normalizeInspectionPayload(part?.inspection),
+        instrumentOptions: normalizeInstrumentOptions(workspace?.instruments || [])
+      });
     }).catch((err) => setError(err.message || String(err)));
   }, [jobId, partId]);
   if (error) return <Fatal title="Inspection Print Error" message={error} />;
   if (!payload) return <LoadingScreen message="Preparing inspection report..." />;
-  const { job, part, inspection } = payload;
+  const { job, part, inspection, instrumentOptions } = payload;
   const characteristicMap = new Map(inspection.characteristics.map((item) => [item.id, item]));
+  const balloonedDocument = latestBalloonedDrawingDocument(part);
+  const balloonedUrl = balloonedDocument?.storedPath ? api.assetUrl(balloonedDocument.storedPath) : "";
   return (
     <div className="print-shell inspection-print-shell inspection-print-ready">
+      <section className="print-page inspection-balloon-report-page">
+        <header className="inspection-report-header">
+          <div>
+            <span>Ballooned Drawing</span>
+            <h1>{part.partNumber || part.partName || "Part"}</h1>
+            <p>{balloonedDocument ? (balloonedDocument.originalFilename || balloonedDocument.storedFilename) : "No ballooned drawing generated."}</p>
+          </div>
+          <div className="inspection-report-job">
+            <strong>{job.jobNumber || job.id}</strong>
+            <span>{job.customer || "No customer"}</span>
+          </div>
+        </header>
+        <PrintPdfPage fileUrl={balloonedUrl} pageNumber={1} />
+      </section>
       <section className="print-page inspection-report-page">
         <header className="inspection-report-header">
           <div>
@@ -7848,14 +8169,20 @@ function PrintInspectionReport({ jobId, partId }) {
                   <td>{item.type}</td>
                   <td>{[item.nominal, inspection.units].filter(Boolean).join(" ")}</td>
                   <td>{characteristicToleranceSummary(item) || "-"}</td>
-                  <td>{item.gageId || "-"}</td>
+                  <td>{measurementToolLabel(item, instrumentOptions)}</td>
                 </tr>
               ))}
             </tbody>
           </table>
         </section>
         <section className="inspection-print-section">
-          <h2>Measured Instances</h2>
+          <div className="inspection-section-header-row">
+            <h2>Measured Instances</h2>
+            <div className="inspection-color-key">
+              <span><i className="inspection-color-chip pass" /> In spec</span>
+              <span><i className="inspection-color-chip fail" /> Out of spec</span>
+            </div>
+          </div>
           <table className="print-table compact">
             <thead>
               <tr>
@@ -7872,12 +8199,33 @@ function PrintInspectionReport({ jobId, partId }) {
                   {inspection.characteristics.map((characteristic) => {
                     const value = instance.results?.[characteristic.id] || "";
                     const status = inspectionResultStatus(characteristicMap.get(characteristic.id), value);
-                    return <td key={`${instance.id}-${characteristic.id}`}>{value || "-"} {status ? `(${status})` : ""}</td>;
+                    return (
+                      <td key={`${instance.id}-${characteristic.id}`} className={status ? `inspection-print-result-cell ${status.toLowerCase()}` : "inspection-print-result-cell"}>
+                        {value || "-"}
+                      </td>
+                    );
                   })}
                 </tr>
               ))}
             </tbody>
           </table>
+        </section>
+        <section className="inspection-print-section">
+          <h2>X-bar Charts</h2>
+          <div className="inspection-chart-grid">
+            {inspection.characteristics.map((characteristic) => (
+              <InspectionXBarChart
+                key={characteristic.id}
+                characteristic={characteristic}
+                instances={inspection.instances}
+                units={inspection.units}
+                instrumentOptions={instrumentOptions}
+              />
+            ))}
+          </div>
+          {!inspection.characteristics.some((characteristic) => inspection.instances.some((instance) => Number.isFinite(Number(String(instance.results?.[characteristic.id] || "").trim())))) ? (
+            <div className="traveler-empty-state">No numeric inspection data available for X-bar charts yet.</div>
+          ) : null}
         </section>
       </section>
     </div>
