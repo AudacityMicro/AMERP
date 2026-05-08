@@ -1396,6 +1396,10 @@ button:disabled:hover {
   align-items: start;
 }
 
+.inspection-balloon-panel {
+  width: 100%;
+}
+
 .inspection-characteristic-list {
   display: grid;
   gap: 0.65rem;
@@ -1449,14 +1453,35 @@ button:disabled:hover {
   margin-bottom: 0.65rem;
 }
 
+.inspection-selected-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 0.9rem;
+  align-items: center;
+  padding: 0.65rem 0.8rem;
+  margin-bottom: 0.65rem;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--panel-2);
+}
+
+.inspection-selected-summary strong {
+  margin-right: 0.25rem;
+}
+
+.inspection-selected-summary span {
+  color: var(--text);
+  font-size: 0.92rem;
+}
+
 .inspection-preview-shell {
   display: grid;
   gap: 0.45rem;
 }
 
 .inspection-preview-stage {
-  min-height: 720px;
-  max-height: 76vh;
+  min-height: 760px;
+  max-height: 78vh;
   overflow: auto;
   border: 1px solid var(--line);
   border-radius: 18px;
@@ -1465,6 +1490,30 @@ button:disabled:hover {
   display: grid;
   place-items: start center;
   position: relative;
+}
+
+.inspection-plan-table-wrap {
+  overflow-x: auto;
+}
+
+.inspection-plan-table input,
+.inspection-plan-table select {
+  min-width: 78px;
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 0.38rem 0.44rem;
+  background: var(--panel-2);
+}
+
+.inspection-plan-table th,
+.inspection-plan-table td {
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+.inspection-plan-row.selected td {
+  background: rgba(29, 107, 87, 0.08);
 }
 
 .inspection-preview-canvas-wrap {

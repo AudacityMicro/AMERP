@@ -175,6 +175,22 @@ const blankInspection = () => ({
   reviewQueue: []
 });
 
+function renumberInspectionPayload(inspection) {
+  const characteristics = (inspection?.characteristics || []).map((item, index) => ({
+    ...item,
+    number: String(index + 1)
+  }));
+  const characteristicNumberMap = new Map(characteristics.map((item) => [item.id, item.number]));
+  return {
+    ...inspection,
+    characteristics,
+    balloons: (inspection?.balloons || []).map((balloon) => ({
+      ...balloon,
+      labelText: characteristicNumberMap.get(balloon.characteristicId) || balloon.labelText || "?"
+    }))
+  };
+}
+
 const blankMaterial = () => ({
   id: uid("material"),
   serialCode: "",
@@ -686,6 +702,56 @@ function inspectionResultStatus(characteristic, value) {
     return "";
   }
   return (lower !== null && numeric < lower) || (upper !== null && numeric > upper) ? "Fail" : "Pass";
+}
+
+function numericOrNull(value) {
+  const text = String(value ?? "").trim();
+  if (!text) return null;
+  const numeric = Number(text);
+  return Number.isFinite(numeric) ? numeric : null;
+}
+
+function formatDerivedNumber(value) {
+  if (!Number.isFinite(value)) {
+    return "";
+  }
+  const rounded = Math.round(value * 1000000) / 1000000;
+  return `${rounded}`.replace(/\.0+$/, "").replace(/(\.\d*?)0+$/, "$1");
+}
+
+function deriveCharacteristicFields(current, patch) {
+  const next = { ...current, ...patch };
+  const nominal = numericOrNull(next.nominal);
+  const plus = numericOrNull(next.plusTolerance);
+  const minus = numericOrNull(next.minusTolerance);
+  const lower = numericOrNull(next.lowerLimit);
+  const upper = numericOrNull(next.upperLimit);
+  const touchedTolerance = Object.keys(patch).some((key) => ["nominal", "plusTolerance", "minusTolerance"].includes(key));
+  const touchedLimits = Object.keys(patch).some((key) => ["lowerLimit", "upperLimit"].includes(key));
+
+  if (touchedTolerance && nominal !== null && plus !== null && minus !== null) {
+    next.lowerLimit = formatDerivedNumber(nominal - Math.abs(minus));
+    next.upperLimit = formatDerivedNumber(nominal + Math.abs(plus));
+  }
+  if (touchedLimits && lower !== null && upper !== null) {
+    const derivedNominal = (lower + upper) / 2;
+    const derivedTolerance = Math.abs(upper - lower) / 2;
+    next.nominal = formatDerivedNumber(derivedNominal);
+    next.plusTolerance = formatDerivedNumber(derivedTolerance);
+    next.minusTolerance = formatDerivedNumber(derivedTolerance);
+  }
+  return next;
+}
+
+function characteristicToleranceSummary(characteristic) {
+  const { lower, upper } = characteristicLimits(characteristic);
+  if (lower !== null && upper !== null) {
+    return `${formatDerivedNumber(lower)} to ${formatDerivedNumber(upper)}`;
+  }
+  if (characteristic.plusTolerance || characteristic.minusTolerance) {
+    return `+${characteristic.plusTolerance || "-"} / -${characteristic.minusTolerance || characteristic.plusTolerance || "-"}`;
+  }
+  return "";
 }
 
 function instructionStepsFromOperation(operation) {
@@ -2449,6 +2515,7 @@ useEffect(() => api.onDeepLink?.((payload) => {
         primaryActions: [
           jobScreen === "list" ? <button key="new-job" onClick={createNewJob}><Plus size={15} /> New Job</button> : null,
           jobScreen !== "list" ? <button key="pdf" onClick={exportCurrentJobPdf} disabled={!job || busy}><FileDown size={16} /> PDF</button> : null,
+          jobScreen === "part" ? <button key="inspection" onClick={() => selectedPart && openInspection(selectedPart.id)} disabled={!job || !selectedPart || busy}>Inspection</button> : null,
           jobScreen === "inspection" ? <button key="inspection-pdf" onClick={() => exportCurrentInspectionPdf()} disabled={!job || !selectedPart || busy}><FileDown size={16} /> Inspection PDF</button> : null
         ].filter(Boolean),
         dangerActions: [
@@ -3772,7 +3839,6 @@ function PartDetailScreen({
               <span>{part.operations.length} total</span>
             </div>
             <div className="toolbar">
-              <button onClick={onOpenInspection} disabled={busy}>Inspection</button>
               <button onClick={() => onImportFusion(part.id)} disabled={busy}><Import size={14} /> From Fusion</button>
               <select className="compact-select" defaultValue="" disabled={busy} onChange={(event) => event.target.value && onAddOperation(part.id, event.target.value)}>
                 <option value="">Add From Template</option>
@@ -3855,16 +3921,25 @@ function PartDetailScreen({
   );
 }
 
-function PdfPagePreview({ fileUrl, pageNumber, zoom, balloons, selectedBalloonId, onSelectBalloon, onPlaceBalloon, onDocumentMeta }) {
+function PdfPagePreview({ fileUrl, pageNumber, zoom, balloons, selectedBalloonId, onSelectBalloon, onPlaceBalloon, onBeginMoveBalloon, onMoveBalloon, onDocumentMeta }) {
   const canvasRef = useRef(null);
   const wrapperRef = useRef(null);
-  const [renderState, setRenderState] = useState({ pageCount: 0, width: 0, height: 0, loading: false, error: "" });
+  const stageRef = useRef(null);
+  const draggingBalloonIdRef = useRef("");
+  const [renderState, setRenderState] = useState({ pageCount: 0, width: 0, height: 0, scale: 1, loading: false, error: "" });
+  const [resizeTick, setResizeTick] = useState(0);
+
+  useEffect(() => {
+    const handleResize = () => setResizeTick((current) => current + 1);
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
     const render = async () => {
       if (!fileUrl || !canvasRef.current) {
-        setRenderState((current) => ({ ...current, pageCount: 0, width: 0, height: 0, loading: false, error: "" }));
+        setRenderState((current) => ({ ...current, pageCount: 0, width: 0, height: 0, scale: 1, loading: false, error: "" }));
         return;
       }
       setRenderState((current) => ({ ...current, loading: true, error: "" }));
@@ -3873,7 +3948,12 @@ function PdfPagePreview({ fileUrl, pageNumber, zoom, balloons, selectedBalloonId
         const pdf = await loadingTask.promise;
         const safePageNumber = Math.max(1, Math.min(pdf.numPages, pageNumber || 1));
         const page = await pdf.getPage(safePageNumber);
-        const viewport = page.getViewport({ scale: Math.max(0.4, zoom || 1) });
+        const baseViewport = page.getViewport({ scale: 1 });
+        const fitWidth = Math.max(120, (stageRef.current?.clientWidth || 0) - 32);
+        const fitHeight = Math.max(120, (stageRef.current?.clientHeight || 0) - 32);
+        const fitScale = Math.max(0.05, Math.min(fitWidth / baseViewport.width, fitHeight / baseViewport.height));
+        const appliedScale = zoom && zoom > 0 ? zoom : fitScale;
+        const viewport = page.getViewport({ scale: appliedScale });
         if (cancelled || !canvasRef.current) {
           return;
         }
@@ -3885,18 +3965,19 @@ function PdfPagePreview({ fileUrl, pageNumber, zoom, balloons, selectedBalloonId
         canvas.style.height = `${viewport.height}px`;
         await page.render({ canvasContext: context, viewport }).promise;
         if (!cancelled) {
-          onDocumentMeta?.({ pageCount: pdf.numPages, safePageNumber });
+          onDocumentMeta?.({ pageCount: pdf.numPages, safePageNumber, appliedScale });
           setRenderState({
             pageCount: pdf.numPages,
             width: viewport.width,
             height: viewport.height,
+            scale: appliedScale,
             loading: false,
             error: ""
           });
         }
       } catch (error) {
         if (!cancelled) {
-          setRenderState({ pageCount: 0, width: 0, height: 0, loading: false, error: error.message || String(error) });
+          setRenderState({ pageCount: 0, width: 0, height: 0, scale: 1, loading: false, error: error.message || String(error) });
         }
       }
     };
@@ -3904,7 +3985,7 @@ function PdfPagePreview({ fileUrl, pageNumber, zoom, balloons, selectedBalloonId
     return () => {
       cancelled = true;
     };
-  }, [fileUrl, pageNumber, zoom]);
+  }, [fileUrl, pageNumber, zoom, resizeTick]);
 
   const place = (event) => {
     if (!wrapperRef.current || !renderState.width || !renderState.height) return;
@@ -3914,9 +3995,32 @@ function PdfPagePreview({ fileUrl, pageNumber, zoom, balloons, selectedBalloonId
     onPlaceBalloon?.({ x, y });
   };
 
+  useEffect(() => {
+    const move = (event) => {
+      if (!draggingBalloonIdRef.current || !wrapperRef.current || !renderState.width || !renderState.height) {
+        return;
+      }
+      const rect = wrapperRef.current.getBoundingClientRect();
+      const x = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
+      const y = Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height));
+      onMoveBalloon?.(draggingBalloonIdRef.current, { x, y });
+    };
+    const stop = () => {
+      draggingBalloonIdRef.current = "";
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", stop);
+    window.addEventListener("pointercancel", stop);
+    return () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", stop);
+      window.removeEventListener("pointercancel", stop);
+    };
+  }, [onMoveBalloon, renderState.height, renderState.width]);
+
   return (
     <div className="inspection-preview-shell">
-      <div className="inspection-preview-stage" onClick={place}>
+      <div ref={stageRef} className="inspection-preview-stage" onClick={place}>
         {fileUrl ? (
           <div
             ref={wrapperRef}
@@ -3930,9 +4034,12 @@ function PdfPagePreview({ fileUrl, pageNumber, zoom, balloons, selectedBalloonId
                 type="button"
                 className={`inspection-balloon ${balloon.characteristicId === selectedBalloonId ? "selected" : ""}`}
                 style={{ left: `${balloon.x * 100}%`, top: `${balloon.y * 100}%` }}
-                onClick={(event) => {
+                onPointerDown={(event) => {
                   event.stopPropagation();
+                  event.preventDefault();
                   onSelectBalloon?.(balloon.characteristicId);
+                  onBeginMoveBalloon?.(balloon.id);
+                  draggingBalloonIdRef.current = balloon.id;
                 }}
               >
                 {balloon.labelText || "?"}
@@ -3947,27 +4054,54 @@ function PdfPagePreview({ fileUrl, pageNumber, zoom, balloons, selectedBalloonId
       </div>
       <div className="inspection-preview-meta">
         <span>{renderState.pageCount ? `Page ${pageNumber} of ${renderState.pageCount}` : "No page loaded"}</span>
-        <span>{Math.round((zoom || 1) * 100)}%</span>
+        <span>{Math.round((renderState.scale || 1) * 100)}%</span>
       </div>
     </div>
   );
 }
 
 function PartInspectionScreen({ busy, job, part, instruments, onUpdate, onSaveInspection, onExtract, onGenerateBalloonedPdf }) {
-  const inspection = normalizeInspectionPayload(part.inspection);
+  const inspection = renumberInspectionPayload(normalizeInspectionPayload(part.inspection));
+  const undoStackRef = useRef([]);
+  const lastSnapshotRef = useRef(JSON.stringify(inspection));
   const [selectedDrawingId, setSelectedDrawingId] = useState(inspection.characteristics.find((item) => item.sourceDrawingDocumentId)?.sourceDrawingDocumentId || "");
   const [selectedCharacteristicId, setSelectedCharacteristicId] = useState(inspection.characteristics[0]?.id || "");
   const [currentPage, setCurrentPage] = useState(1);
   const [pageCount, setPageCount] = useState(1);
-  const [zoom, setZoom] = useState(1.35);
+  const [zoom, setZoom] = useState(null);
+  const [activeScale, setActiveScale] = useState(1);
   const drawings = (part.documents || []).filter((document) => document.active !== false && String(document.fileType || "").toUpperCase() === "PDF");
   const selectedDrawing = drawings.find((document) => document.id === selectedDrawingId) || drawings[0] || null;
   const selectedCharacteristic = inspection.characteristics.find((item) => item.id === selectedCharacteristicId) || inspection.characteristics[0] || null;
-  const instrumentOptions = (instruments || []).map((payload) => payload.instrument || payload);
-  const applyInspection = (next) => onUpdate(normalizeInspectionPayload(next));
+  const instrumentOptions = (instruments || [])
+    .map((payload) => {
+      const source = payload?.instrument || payload || {};
+      const instrumentId = source.instrument_id || source.instrumentId || "";
+      const toolName = source.tool_name || source.toolName || instrumentId;
+      return instrumentId ? { instrumentId, toolName } : null;
+    })
+    .filter(Boolean);
+  const currentSnapshot = JSON.stringify(inspection);
+  if (lastSnapshotRef.current !== currentSnapshot) {
+    lastSnapshotRef.current = currentSnapshot;
+  }
+
+  const applyInspection = (next, options = {}) => {
+    const normalizedNext = renumberInspectionPayload(normalizeInspectionPayload(next));
+    const nextSnapshot = JSON.stringify(normalizedNext);
+    if (options.recordHistory !== false && nextSnapshot !== lastSnapshotRef.current) {
+      undoStackRef.current = [...undoStackRef.current.slice(-39), JSON.parse(lastSnapshotRef.current)];
+    }
+    lastSnapshotRef.current = nextSnapshot;
+    onUpdate(normalizedNext);
+  };
+  const updateUnits = (value) => applyInspection({
+    ...inspection,
+    units: value
+  });
   const updateCharacteristic = (characteristicId, patch) => applyInspection({
     ...inspection,
-    characteristics: inspection.characteristics.map((item) => item.id === characteristicId ? { ...item, ...patch } : item)
+    characteristics: inspection.characteristics.map((item) => item.id === characteristicId ? deriveCharacteristicFields(item, patch) : item)
   });
   const removeCharacteristic = (characteristicId) => applyInspection({
     ...inspection,
@@ -3980,7 +4114,7 @@ function PartInspectionScreen({ busy, job, part, instruments, onUpdate, onSaveIn
     })
   });
   const addCharacteristic = () => {
-    const characteristic = blankInspectionCharacteristic(String(inspection.characteristics.length + 1));
+    const characteristic = blankInspectionCharacteristic();
     applyInspection({ ...inspection, characteristics: [...inspection.characteristics, characteristic] });
     setSelectedCharacteristicId(characteristic.id);
   };
@@ -4005,7 +4139,44 @@ function PartInspectionScreen({ busy, job, part, instruments, onUpdate, onSaveIn
   useEffect(() => {
     setCurrentPage(1);
     setPageCount(1);
+    setZoom(null);
   }, [selectedDrawing?.id]);
+
+  useEffect(() => {
+    const handleKeydown = (event) => {
+      const tagName = String(event.target?.tagName || "").toLowerCase();
+      if (["input", "textarea", "select"].includes(tagName) || event.target?.isContentEditable) {
+        return;
+      }
+      if ((event.ctrlKey || event.metaKey) && !event.shiftKey && String(event.key || "").toLowerCase() === "z") {
+        const previous = undoStackRef.current.pop();
+        if (!previous) {
+          return;
+        }
+        event.preventDefault();
+        lastSnapshotRef.current = JSON.stringify(previous);
+        onUpdate(previous);
+        return;
+      }
+      if (!event.ctrlKey && !event.metaKey && !event.altKey && String(event.key || "") === "Delete") {
+        const target = inspection.balloons.find((item) =>
+          item.characteristicId === selectedCharacteristic?.id
+          && item.sourceDrawingDocumentId === selectedDrawing?.id
+          && Number(item.pageNumber || 1) === currentPage
+        );
+        if (!target) {
+          return;
+        }
+        event.preventDefault();
+        applyInspection({
+          ...inspection,
+          balloons: inspection.balloons.filter((item) => item.id !== target.id)
+        });
+      }
+    };
+    window.addEventListener("keydown", handleKeydown);
+    return () => window.removeEventListener("keydown", handleKeydown);
+  }, [applyInspection, currentPage, inspection, onUpdate, selectedCharacteristic?.id, selectedDrawing?.id]);
 
   const placeBalloon = ({ x, y }) => {
     if (!selectedDrawing || !selectedCharacteristic) return;
@@ -4017,7 +4188,7 @@ function PartInspectionScreen({ busy, job, part, instruments, onUpdate, onSaveIn
       pageNumber: currentPage,
       x,
       y,
-      labelText: selectedCharacteristic.number || selectedCharacteristic.label || "?",
+      labelText: selectedCharacteristic.number || "?",
       confidence: existing?.confidence || "",
       placementSource: "manual"
     };
@@ -4027,6 +4198,21 @@ function PartInspectionScreen({ busy, job, part, instruments, onUpdate, onSaveIn
         ? inspection.balloons.map((item) => item.id === existing.id ? balloon : item)
         : [...inspection.balloons, balloon]
     });
+  };
+  const beginMoveBalloon = (balloonId) => {
+    if (!inspection.balloons.some((item) => item.id === balloonId)) {
+      return;
+    }
+    undoStackRef.current = [...undoStackRef.current.slice(-39), JSON.parse(lastSnapshotRef.current)];
+  };
+  const moveBalloon = (balloonId, position) => {
+    const target = inspection.balloons.find((item) => item.id === balloonId);
+    if (!target) return;
+    setSelectedCharacteristicId(target.characteristicId);
+    applyInspection({
+      ...inspection,
+      balloons: inspection.balloons.map((item) => item.id === balloonId ? { ...item, ...position } : item)
+    }, { recordHistory: false });
   };
   const acceptReviewItem = (itemId) => {
     const item = inspection.reviewQueue.find((candidate) => candidate.id === itemId);
@@ -4047,136 +4233,153 @@ function PartInspectionScreen({ busy, job, part, instruments, onUpdate, onSaveIn
 
   return (
     <div className="workflow-stack inspection-screen">
-      <div className="record-grid inspection-top-grid">
-        <section className="panel">
-          <div className="panel-heading inline">
-            <div>
-              <h3>Inspection Plan</h3>
-              <span>{inspection.characteristics.length} characteristics | {inspection.instances.length} inspected instances</span>
+      <section className="panel inspection-balloon-panel">
+        <div className="panel-heading inline">
+          <div>
+            <h3>Drawing Balloons</h3>
+            <span>Select a characteristic, then click the drawing preview to place its balloon.</span>
+          </div>
+          <div className="toolbar">
+            <button onClick={() => onExtract({ upload: true })} disabled={busy}>Upload + AI Extract</button>
+            <button onClick={() => selectedDrawing && onExtract({ documentId: selectedDrawing.id })} disabled={busy || !selectedDrawing}>AI Extract</button>
+            <button onClick={() => selectedDrawing && onGenerateBalloonedPdf(selectedDrawing.id)} disabled={busy || !selectedDrawing}>Ballooned PDF</button>
+          </div>
+        </div>
+        <div className="form-grid compact-3">
+          <label className="field">
+            <span>PDF Drawing</span>
+            <select value={selectedDrawing?.id || ""} onChange={(event) => setSelectedDrawingId(event.target.value)}>
+              {!drawings.length && <option value="">No PDF drawings attached</option>}
+              {drawings.map((document) => <option key={document.id} value={document.id}>{document.originalFilename}</option>)}
+            </select>
+          </label>
+          <label className="field">
+            <span>Selected Balloon</span>
+            <select value={selectedCharacteristic?.id || ""} onChange={(event) => setSelectedCharacteristicId(event.target.value)}>
+              {!inspection.characteristics.length && <option value="">No characteristics</option>}
+              {inspection.characteristics.map((characteristic) => <option key={characteristic.id} value={characteristic.id}>{characteristic.number || "?"} - {characteristic.type}</option>)}
+            </select>
+          </label>
+          <label className="field">
+            <span>Drawing Units</span>
+            <select value={inspection.units || "in"} onChange={(event) => updateUnits(event.target.value)}>
+              {["in", "mm", "deg", "text"].map((unit) => <option key={unit} value={unit}>{unit}</option>)}
+            </select>
+          </label>
+        </div>
+        <div className="inspection-preview-toolbar">
+          <button onClick={() => setCurrentPage((current) => Math.max(1, current - 1))} disabled={!selectedDrawing || currentPage <= 1}>Prev Page</button>
+          <span>Page {currentPage}</span>
+          <button onClick={() => setCurrentPage((current) => Math.min(pageCount, current + 1))} disabled={!selectedDrawing || currentPage >= pageCount}>Next Page</button>
+          <button onClick={() => setZoom((current) => Math.max(0.05, Number((((current ?? activeScale) || 1) - 0.15).toFixed(2))))} disabled={!selectedDrawing}>-</button>
+          <span>{Math.round(((zoom ?? activeScale) || 1) * 100)}%</span>
+          <button onClick={() => setZoom((current) => Math.min(3, Number((((current ?? activeScale) || 1) + 0.15).toFixed(2))))} disabled={!selectedDrawing}>+</button>
+          <button onClick={() => setZoom(null)} disabled={!selectedDrawing}>Fit To Screen</button>
+        </div>
+        {selectedCharacteristic ? (
+          <div className="inspection-selected-summary">
+            <strong>Selected Dimension {selectedCharacteristic.number || "?"}</strong>
+            <span>{selectedCharacteristic.type}</span>
+            <span>Nominal: {[selectedCharacteristic.nominal, inspection.units].filter(Boolean).join(" ") || "-"}</span>
+            <span>Tolerance: {characteristicToleranceSummary(selectedCharacteristic) || "-"}</span>
+          </div>
+        ) : null}
+        <PdfPagePreview
+          fileUrl={drawingUrl}
+          pageNumber={currentPage}
+          zoom={zoom}
+          balloons={visibleBalloons}
+          selectedBalloonId={selectedCharacteristic?.id || ""}
+          onSelectBalloon={setSelectedCharacteristicId}
+          onPlaceBalloon={placeBalloon}
+          onBeginMoveBalloon={beginMoveBalloon}
+          onMoveBalloon={moveBalloon}
+          onDocumentMeta={({ pageCount: nextPageCount, safePageNumber, appliedScale }) => {
+            setPageCount(nextPageCount || 1);
+            setActiveScale(appliedScale || 1);
+            if (safePageNumber !== currentPage) {
+              setCurrentPage(safePageNumber);
+            }
+          }}
+        />
+        {inspection.reviewQueue.length ? (
+          <div className="subpanel top-gap">
+            <div className="subpanel-header">
+              <div>
+                <h4>AI Review Queue</h4>
+                <span>{inspection.reviewQueue.length} uncertain dimensions</span>
+              </div>
             </div>
-            <div className="toolbar">
-              <button onClick={addCharacteristic}><Plus size={14} /> Characteristic</button>
-              <button onClick={() => onSaveInspection(inspection)} disabled={busy}>Save Inspection</button>
+            <div className="record-list">
+              {inspection.reviewQueue.map((item) => (
+                <div key={item.id} className="inline-card">
+                  <strong>{item.number} - {item.type}</strong>
+                  <span>{[item.nominal, inspection.units, item.gdTolerance || `${item.plusTolerance || ""}/${item.minusTolerance || ""}`].filter(Boolean).join(" ")}</span>
+                  <div className="tiny-toolbar">
+                    <button onClick={() => acceptReviewItem(item.id)}>Accept</button>
+                    <button className="danger subtle" onClick={() => rejectReviewItem(item.id)}>Reject</button>
+                  </div>
+                </div>
+              ))}
             </div>
           </div>
-          <div className="inspection-characteristic-list">
-            {inspection.characteristics.map((characteristic) => (
-              <div key={characteristic.id} className={`inspection-characteristic-card ${selectedCharacteristic?.id === characteristic.id ? "selected" : ""}`}>
-                <button className="inspection-characteristic-select" onClick={() => setSelectedCharacteristicId(characteristic.id)}>
-                  <strong>{characteristic.number || "?"}</strong>
-                  <span>{characteristic.label || characteristic.type || "Characteristic"}</span>
-                </button>
-                <div className="form-grid compact-4">
-                  <TextField label="Number" value={characteristic.number} onChange={(value) => updateCharacteristic(characteristic.id, { number: value })} />
-                  <TextField label="Label" value={characteristic.label} onChange={(value) => updateCharacteristic(characteristic.id, { label: value })} />
-                  <label className="field">
-                    <span>Type</span>
-                    <select value={characteristic.type || "Dimension"} onChange={(event) => updateCharacteristic(characteristic.id, { type: event.target.value })}>
+        ) : null}
+      </section>
+
+      <section className="panel">
+        <div className="panel-heading inline">
+          <div>
+            <h3>Inspection Plan</h3>
+            <span>{inspection.characteristics.length} characteristics | {inspection.instances.length} inspected instances</span>
+          </div>
+          <div className="toolbar">
+            <button onClick={addCharacteristic}><Plus size={14} /> Characteristic</button>
+            <button onClick={() => onSaveInspection(inspection)} disabled={busy}>Save Inspection</button>
+          </div>
+        </div>
+        <div className="inspection-plan-table-wrap">
+          <table className="print-table inspection-plan-table">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Type</th>
+                <th>Nominal</th>
+                <th>+ Tol</th>
+                <th>- Tol</th>
+                <th>Lower</th>
+                <th>Upper</th>
+                <th>Measuring Tool</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {inspection.characteristics.map((characteristic) => (
+                <tr key={characteristic.id} className={selectedCharacteristic?.id === characteristic.id ? "inspection-plan-row selected" : "inspection-plan-row"}>
+                  <td onClick={() => setSelectedCharacteristicId(characteristic.id)}><strong>{characteristic.number || "-"}</strong></td>
+                  <td>
+                    <select value={characteristic.type || "Dimension"} onChange={(event) => updateCharacteristic(characteristic.id, { type: event.target.value })} onFocus={() => setSelectedCharacteristicId(characteristic.id)}>
                       {["Dimension", "GD&T", "Thread", "Surface Finish", "Note"].map((type) => <option key={type} value={type}>{type}</option>)}
                     </select>
-                  </label>
-                  <TextField label="Units" value={characteristic.units} onChange={(value) => updateCharacteristic(characteristic.id, { units: value })} />
-                  <TextField label="Nominal" value={characteristic.nominal} onChange={(value) => updateCharacteristic(characteristic.id, { nominal: value })} />
-                  <TextField label="+ Tol" value={characteristic.plusTolerance} onChange={(value) => updateCharacteristic(characteristic.id, { plusTolerance: value, toleranceType: "plusMinus" })} />
-                  <TextField label="- Tol" value={characteristic.minusTolerance} onChange={(value) => updateCharacteristic(characteristic.id, { minusTolerance: value, toleranceType: "plusMinus" })} />
-                  <TextField label="GD&T / Datums" value={[characteristic.gdTolerance, characteristic.datums].filter(Boolean).join(" | ")} onChange={(value) => updateCharacteristic(characteristic.id, { gdTolerance: value, toleranceType: "gdandt" })} />
-                  <TextField label="Lower Limit" value={characteristic.lowerLimit} onChange={(value) => updateCharacteristic(characteristic.id, { lowerLimit: value, toleranceType: "limits" })} />
-                  <TextField label="Upper Limit" value={characteristic.upperLimit} onChange={(value) => updateCharacteristic(characteristic.id, { upperLimit: value, toleranceType: "limits" })} />
-                  <label className="field">
-                    <span>Measuring Tool</span>
-                    <select value={characteristic.gageId || ""} onChange={(event) => updateCharacteristic(characteristic.id, { gageId: event.target.value })}>
+                  </td>
+                  <td><input value={characteristic.nominal || ""} onChange={(event) => updateCharacteristic(characteristic.id, { nominal: event.target.value })} onFocus={() => setSelectedCharacteristicId(characteristic.id)} /></td>
+                  <td><input value={characteristic.plusTolerance || ""} onChange={(event) => updateCharacteristic(characteristic.id, { plusTolerance: event.target.value, toleranceType: "plusMinus" })} onFocus={() => setSelectedCharacteristicId(characteristic.id)} /></td>
+                  <td><input value={characteristic.minusTolerance || ""} onChange={(event) => updateCharacteristic(characteristic.id, { minusTolerance: event.target.value, toleranceType: "plusMinus" })} onFocus={() => setSelectedCharacteristicId(characteristic.id)} /></td>
+                  <td><input value={characteristic.lowerLimit || ""} onChange={(event) => updateCharacteristic(characteristic.id, { lowerLimit: event.target.value, toleranceType: "limits" })} onFocus={() => setSelectedCharacteristicId(characteristic.id)} /></td>
+                  <td><input value={characteristic.upperLimit || ""} onChange={(event) => updateCharacteristic(characteristic.id, { upperLimit: event.target.value, toleranceType: "limits" })} onFocus={() => setSelectedCharacteristicId(characteristic.id)} /></td>
+                  <td>
+                    <select value={characteristic.gageId || ""} onChange={(event) => updateCharacteristic(characteristic.id, { gageId: event.target.value })} onFocus={() => setSelectedCharacteristicId(characteristic.id)}>
                       <option value="">No linked gage</option>
-                      {instrumentOptions.map((instrument) => <option key={instrument.instrument_id} value={instrument.instrument_id}>{instrument.tool_name || instrument.instrument_id}</option>)}
+                      {instrumentOptions.map((instrument) => <option key={instrument.instrumentId} value={instrument.instrumentId}>{instrument.toolName || instrument.instrumentId}</option>)}
                     </select>
-                  </label>
-                  <TextField label="Tool Fallback" value={characteristic.gageText} onChange={(value) => updateCharacteristic(characteristic.id, { gageText: value })} />
-                </div>
-                <TextArea label="Inspection Notes" value={characteristic.notes || ""} onChange={(value) => updateCharacteristic(characteristic.id, { notes: value })} rows={2} />
-                <div className="toolbar">
-                  <button className="danger subtle" onClick={() => removeCharacteristic(characteristic.id)}><X size={14} /> Remove</button>
-                </div>
-              </div>
-            ))}
-            {!inspection.characteristics.length && <div className="empty-inline">No inspection characteristics yet. Add one manually or extract from a drawing.</div>}
-          </div>
-        </section>
-
-        <section className="panel">
-          <div className="panel-heading inline">
-            <div>
-              <h3>Drawing Balloons</h3>
-              <span>Select a characteristic, then click the drawing preview to place its balloon.</span>
-            </div>
-            <div className="toolbar">
-              <button onClick={() => onExtract({ upload: true })} disabled={busy}>Upload + AI Extract</button>
-              <button onClick={() => selectedDrawing && onExtract({ documentId: selectedDrawing.id })} disabled={busy || !selectedDrawing}>AI Extract</button>
-              <button onClick={() => selectedDrawing && onGenerateBalloonedPdf(selectedDrawing.id)} disabled={busy || !selectedDrawing}>Ballooned PDF</button>
-            </div>
-          </div>
-          <div className="form-grid compact-2">
-            <label className="field">
-              <span>PDF Drawing</span>
-              <select value={selectedDrawing?.id || ""} onChange={(event) => setSelectedDrawingId(event.target.value)}>
-                {!drawings.length && <option value="">No PDF drawings attached</option>}
-                {drawings.map((document) => <option key={document.id} value={document.id}>{document.originalFilename}</option>)}
-              </select>
-            </label>
-            <label className="field">
-              <span>Selected Balloon</span>
-              <select value={selectedCharacteristic?.id || ""} onChange={(event) => setSelectedCharacteristicId(event.target.value)}>
-                {!inspection.characteristics.length && <option value="">No characteristics</option>}
-                {inspection.characteristics.map((characteristic) => <option key={characteristic.id} value={characteristic.id}>{characteristic.number || "?"} - {characteristic.label || characteristic.type}</option>)}
-              </select>
-            </label>
-          </div>
-          <div className="inspection-preview-toolbar">
-            <button onClick={() => setCurrentPage((current) => Math.max(1, current - 1))} disabled={!selectedDrawing || currentPage <= 1}>Prev Page</button>
-            <span>Page {currentPage}</span>
-            <button onClick={() => setCurrentPage((current) => Math.min(pageCount, current + 1))} disabled={!selectedDrawing || currentPage >= pageCount}>Next Page</button>
-            <button onClick={() => setZoom((current) => Math.max(0.6, Number((current - 0.15).toFixed(2))))} disabled={!selectedDrawing}>-</button>
-            <span>{Math.round(zoom * 100)}%</span>
-            <button onClick={() => setZoom((current) => Math.min(3, Number((current + 0.15).toFixed(2))))} disabled={!selectedDrawing}>+</button>
-            <button onClick={() => setZoom(1.35)} disabled={!selectedDrawing}>Reset View</button>
-          </div>
-          <PdfPagePreview
-            fileUrl={drawingUrl}
-            pageNumber={currentPage}
-            zoom={zoom}
-            balloons={visibleBalloons}
-            selectedBalloonId={selectedCharacteristic?.id || ""}
-            onSelectBalloon={setSelectedCharacteristicId}
-            onPlaceBalloon={placeBalloon}
-            onDocumentMeta={({ pageCount: nextPageCount, safePageNumber }) => {
-              setPageCount(nextPageCount || 1);
-              if (safePageNumber !== currentPage) {
-                setCurrentPage(safePageNumber);
-              }
-            }}
-          />
-          {inspection.reviewQueue.length ? (
-            <div className="subpanel top-gap">
-              <div className="subpanel-header">
-                <div>
-                  <h4>AI Review Queue</h4>
-                  <span>{inspection.reviewQueue.length} uncertain dimensions</span>
-                </div>
-              </div>
-              <div className="record-list">
-                {inspection.reviewQueue.map((item) => (
-                  <div key={item.id} className="inline-card">
-                    <strong>{item.number} - {item.label || item.type}</strong>
-                    <span>{[item.nominal, item.units, item.gdTolerance || `${item.plusTolerance || ""}/${item.minusTolerance || ""}`].filter(Boolean).join(" ")}</span>
-                    <div className="tiny-toolbar">
-                      <button onClick={() => acceptReviewItem(item.id)}>Accept</button>
-                      <button className="danger subtle" onClick={() => rejectReviewItem(item.id)}>Reject</button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          ) : null}
-        </section>
-      </div>
+                  </td>
+                  <td><button className="danger subtle square" onClick={() => removeCharacteristic(characteristic.id)}><X size={13} /></button></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {!inspection.characteristics.length && <div className="empty-inline">No inspection characteristics yet. Add one manually or extract from a drawing.</div>}
+        </div>
+      </section>
 
       <section className="panel">
         <div className="panel-heading inline">
@@ -7636,16 +7839,16 @@ function PrintInspectionReport({ jobId, partId }) {
           <h2>Characteristics</h2>
           <table className="print-table compact">
             <thead>
-              <tr><th>#</th><th>Requirement</th><th>Nominal</th><th>Tolerance / GD&T</th><th>Tool</th></tr>
+              <tr><th>#</th><th>Requirement</th><th>Nominal</th><th>Tolerance</th><th>Tool</th></tr>
             </thead>
             <tbody>
               {inspection.characteristics.map((item) => (
                 <tr key={item.id}>
                   <td>{item.number}</td>
-                  <td>{item.label || item.type}</td>
-                  <td>{[item.nominal, item.units].filter(Boolean).join(" ")}</td>
-                  <td>{item.gdTolerance || (item.toleranceType === "limits" ? `${item.lowerLimit || "-"} to ${item.upperLimit || "-"}` : `+${item.plusTolerance || "-"} / -${item.minusTolerance || item.plusTolerance || "-"}`)}</td>
-                  <td>{item.gageText || item.gageId || "-"}</td>
+                  <td>{item.type}</td>
+                  <td>{[item.nominal, inspection.units].filter(Boolean).join(" ")}</td>
+                  <td>{characteristicToleranceSummary(item) || "-"}</td>
+                  <td>{item.gageId || "-"}</td>
                 </tr>
               ))}
             </tbody>
