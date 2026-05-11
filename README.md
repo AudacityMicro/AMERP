@@ -51,6 +51,8 @@ The command files prefer a known Codex Node runtime when present, then fall back
 - `Nonconformance`: ISO 9001-style NCR listing, part-linked NCR editor, attachments, CSV export, and NCR reports.
 - `Settings`: numbering, module visibility, customer/options lists, operation templates, reusable libraries, print sizes, branding, AI key, and controlled lists.
 
+`Settings > System` also includes an `ISO 9001 compliance features` toggle. Turning it off hides compliance-specific inspection/NCR navigation and audit-heavy quality fields without deleting existing records.
+
 ## Job And Quality Flow
 
 The primary hierarchy is:

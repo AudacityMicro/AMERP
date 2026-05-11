@@ -36,10 +36,23 @@ const PRIMARY_MODULES = [
   { id: "materials", label: "Materials", icon: Database },
   { id: "metrology", label: "Gages", icon: Gauge }
 ];
+const ISO9001_MODULE_IDS = new Set(["inspections", "nonconformance"]);
+const iso9001ComplianceEnabled = (preferences = {}) => preferences?.iso9001ComplianceEnabled !== false;
 const normalizeEnabledModules = (value = {}) => Object.fromEntries(PRIMARY_MODULES.map((module) => [
   module.id,
   Object.prototype.hasOwnProperty.call(value || {}, module.id) ? Boolean(value[module.id]) : true
 ]));
+const effectiveEnabledModules = (value = {}, preferences = {}) => {
+  const normalized = normalizeEnabledModules(value);
+  if (!iso9001ComplianceEnabled(preferences)) {
+    return {
+      ...normalized,
+      inspections: false,
+      nonconformance: false
+    };
+  }
+  return normalized;
+};
 const firstEnabledModuleId = (enabledModules) => PRIMARY_MODULES.find((module) => enabledModules[module.id])?.id || "settings";
 const INSPECTION_REPORT_EXPORT_OPTION_DEFINITIONS = [
   ["includeBalloonedDrawing", "Ballooned drawing page"],
@@ -1782,7 +1795,8 @@ function Workspace() {
 
   const [selectedTemplateId, setSelectedTemplateId] = useState(null);
   const [lastIndexMaintenance, setLastIndexMaintenance] = useState(0);
-  const enabledModules = normalizeEnabledModules(workspace?.preferences?.enabledModules);
+  const complianceEnabled = iso9001ComplianceEnabled(workspace?.preferences);
+  const enabledModules = effectiveEnabledModules(workspace?.preferences?.enabledModules, workspace?.preferences);
   const moduleIsEnabled = (moduleId) => moduleId === "settings" || enabledModules[moduleId] !== false;
   const firstAvailableView = firstEnabledModuleId(enabledModules);
 
@@ -1888,7 +1902,16 @@ useEffect(() => api.onDeepLink?.((payload) => {
       return;
     }
     setView(firstAvailableView);
-  }, [workspace?.preferences?.enabledModules, view]);
+  }, [workspace?.preferences?.enabledModules, workspace?.preferences?.iso9001ComplianceEnabled, view]);
+
+  useEffect(() => {
+    if (complianceEnabled || view !== "jobs") {
+      return;
+    }
+    if (jobScreen === "inspection-setup" || jobScreen === "inspection-results" || jobScreen === "nonconformance") {
+      setJobScreen(selectedPartId ? "part" : selectedJobId ? "job" : "list");
+    }
+  }, [complianceEnabled, view, jobScreen, selectedPartId, selectedJobId]);
 
   useEffect(() => {
     if ((view === "jobs" && jobScreen === "list")
@@ -3732,9 +3755,9 @@ useEffect(() => api.onDeepLink?.((payload) => {
         primaryActions: [
           jobScreen === "list" ? <button key="new-job" onClick={createNewJob}><Plus size={15} /> New Job</button> : null,
           jobScreen !== "list" ? <button key="pdf" onClick={exportCurrentJobPdf} disabled={!job || busy}><FileDown size={16} /> PDF</button> : null,
-          jobScreen === "part" ? <button key="inspection-setup" onClick={() => selectedPart && openInspectionSetup(selectedPart.id)} disabled={!job || !selectedPart || busy}>Inspection Setup</button> : null,
-          jobScreen === "part" ? <button key="inspection-results" onClick={() => selectedPart && openInspectionResults(selectedPart.id)} disabled={!job || !selectedPart || busy}>Inspection Results</button> : null,
-          jobScreen === "part" ? <button key="part-ncr" onClick={() => selectedPart && openPartNonconformance(selectedPart.id)} disabled={!job || !selectedPart || busy}>Nonconformance</button> : null,
+          complianceEnabled && jobScreen === "part" ? <button key="inspection-setup" onClick={() => selectedPart && openInspectionSetup(selectedPart.id)} disabled={!job || !selectedPart || busy}>Inspection Setup</button> : null,
+          complianceEnabled && jobScreen === "part" ? <button key="inspection-results" onClick={() => selectedPart && openInspectionResults(selectedPart.id)} disabled={!job || !selectedPart || busy}>Inspection Results</button> : null,
+          complianceEnabled && jobScreen === "part" ? <button key="part-ncr" onClick={() => selectedPart && openPartNonconformance(selectedPart.id)} disabled={!job || !selectedPart || busy}>Nonconformance</button> : null,
           jobScreen === "inspection-setup" || jobScreen === "inspection-results"
             ? <button key="inspection-pdf" onClick={openInspectionExportDialog} disabled={!job || !selectedPart || busy}><FileDown size={16} /> Inspection PDF</button>
             : null,
@@ -9852,6 +9875,9 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
     windowTitle: workspace.preferences?.windowTitle || "AMERP",
     appIconPath: workspace.preferences?.appIconPath || ""
   });
+  const [complianceSettings, setComplianceSettings] = useState({
+    iso9001ComplianceEnabled: iso9001ComplianceEnabled(workspace.preferences)
+  });
   const [moduleSettings, setModuleSettings] = useState(normalizeEnabledModules(workspace.preferences?.enabledModules));
   const [jobSettings, setJobSettings] = useState({
     jobPrefix: workspace.preferences?.jobPrefix || "J03C",
@@ -9908,6 +9934,9 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
       appTagline: workspace.preferences?.appTagline || "Operator ERP",
       windowTitle: workspace.preferences?.windowTitle || "AMERP",
       appIconPath: workspace.preferences?.appIconPath || ""
+    });
+    setComplianceSettings({
+      iso9001ComplianceEnabled: iso9001ComplianceEnabled(workspace.preferences)
     });
     setModuleSettings(normalizeEnabledModules(workspace.preferences?.enabledModules));
     setJobSettings({
@@ -10078,6 +10107,13 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
     }
   };
 
+  useEffect(() => {
+    if (complianceSettings.iso9001ComplianceEnabled || !["inspections", "nonconformance"].includes(activeSettingsTab)) {
+      return;
+    }
+    setActiveSettingsTab("system");
+  }, [activeSettingsTab, complianceSettings.iso9001ComplianceEnabled]);
+
   useAutoSave({
     value: brandingSettings,
     resetKey: `branding-settings:${workspace.dataFolder}:${workspace.preferences?.appTitle || ""}:${workspace.preferences?.appTagline || ""}:${workspace.preferences?.windowTitle || ""}:${workspace.preferences?.appIconPath || ""}`,
@@ -10089,6 +10125,19 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
         appTagline: String(current.appTagline || "").trim() || "Operator ERP",
         windowTitle: String(current.windowTitle || "").trim() || "AMERP",
         appIconPath: String(current.appIconPath || "").trim()
+      }, { silent: true });
+      return current;
+    }
+  });
+
+  useAutoSave({
+    value: complianceSettings,
+    resetKey: `compliance-settings:${workspace.dataFolder}:${workspace.preferences?.iso9001ComplianceEnabled !== false}`,
+    enabled: true,
+    isReady: (current) => Boolean(current),
+    save: async (current) => {
+      await onSavePreferences({
+        iso9001ComplianceEnabled: current.iso9001ComplianceEnabled !== false
       }, { silent: true });
       return current;
     }
@@ -10327,8 +10376,10 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
   const settingsTabs = [
     ["system", "System"],
     ["jobs", "Jobs"],
-    ["inspections", "Inspections"],
-    ["nonconformance", "Nonconformance"],
+    ...(complianceSettings.iso9001ComplianceEnabled ? [
+      ["inspections", "Inspections"],
+      ["nonconformance", "Nonconformance"]
+    ] : []),
     ["kanban", "Kanban"],
     ["materials", "Materials"],
     ["gages", "Gages"],
@@ -10484,6 +10535,27 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
           <div className={`subpanel ${activeSettingsTab === "system" ? "" : "settings-section-hidden"}`}>
             <div className="subpanel-header">
               <div>
+                <h4>Compliance Mode</h4>
+                <span>Hide or show ISO 9001-specific quality workflows without deleting saved records.</span>
+              </div>
+            </div>
+            <div className="module-toggle-list">
+              <label className="module-toggle-row">
+                <input
+                  type="checkbox"
+                  checked={complianceSettings.iso9001ComplianceEnabled !== false}
+                  onChange={(event) => setComplianceSettings({ iso9001ComplianceEnabled: event.target.checked })}
+                />
+                <span>
+                  <strong>ISO 9001 compliance features</strong>
+                  <small>Turns on inspection reports, NCR workflows, release/audit fields, NCR links, and compliance-heavy report controls. Turn off for a simpler shop-floor app.</small>
+                </span>
+              </label>
+            </div>
+          </div>
+          <div className={`subpanel ${activeSettingsTab === "system" ? "" : "settings-section-hidden"}`}>
+            <div className="subpanel-header">
+              <div>
                 <h4>Modules</h4>
                 <span>Turn major workspaces on or off in the left navigation.</span>
               </div>
@@ -10493,7 +10565,8 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
                 <label className="module-toggle-row" key={module.id}>
                   <input
                     type="checkbox"
-                    checked={moduleSettings[module.id] !== false}
+                    checked={ISO9001_MODULE_IDS.has(module.id) && !complianceSettings.iso9001ComplianceEnabled ? false : moduleSettings[module.id] !== false}
+                    disabled={ISO9001_MODULE_IDS.has(module.id) && !complianceSettings.iso9001ComplianceEnabled}
                     onChange={(event) => setModuleSettings((current) => ({
                       ...normalizeEnabledModules(current),
                       [module.id]: event.target.checked
@@ -10501,7 +10574,7 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
                   />
                   <span>
                     <strong>{module.label}</strong>
-                    <small>{module.id === "metrology" ? "Gage records and calibration tracking." : `${module.label} workspace.`}</small>
+                    <small>{ISO9001_MODULE_IDS.has(module.id) && !complianceSettings.iso9001ComplianceEnabled ? "Hidden while ISO 9001 compliance features are off." : module.id === "metrology" ? "Gage records and calibration tracking." : `${module.label} workspace.`}</small>
                   </span>
                 </label>
               ))}

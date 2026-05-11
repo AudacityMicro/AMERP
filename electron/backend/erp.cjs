@@ -447,6 +447,7 @@ class ERPBackend {
       appTagline: String(preferences?.appTagline || "Operator ERP").trim() || "Operator ERP",
       windowTitle: String(preferences?.windowTitle || "AMERP").trim() || "AMERP",
       appIconPath: String(preferences?.appIconPath || "").trim(),
+      iso9001ComplianceEnabled: preferences?.iso9001ComplianceEnabled === false ? false : true,
       enabledModules,
       dueSoonDays: Number.isFinite(Number(preferences?.dueSoonDays)) ? Number(preferences.dueSoonDays) : 14,
       jobPrefix: String(preferences?.jobPrefix || "J03C").trim(),

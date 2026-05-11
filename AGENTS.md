@@ -70,6 +70,7 @@ The scripts prefer the Codex bundled Node runtime when present, then fall back t
 - `Inspections`: global list of existing part inspection reports with links back to job/part context.
 - `Nonconformance`: global NCR list/detail, part-level NCR creation, ISO 9001-friendly stepper editor, attachments, CSV export, and NCR PDFs.
 - `Settings`: module visibility, numbering, controlled lists, operation templates, reusable libraries, print-size presets, branding, AI key, and quality defaults.
+- `Settings > System` includes `iso9001ComplianceEnabled`. When false, ISO-specific inspection/NCR navigation and compliance-heavy fields should be hidden non-destructively; saved records must remain intact.
 
 ## Data Folder Layout
 
