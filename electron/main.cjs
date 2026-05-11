@@ -1,4 +1,5 @@
 const { app, BrowserWindow, ipcMain, net, protocol } = require("electron");
+const fs = require("node:fs");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
 
@@ -87,6 +88,17 @@ function registerDeepLinkProtocol() {
   app.setAsDefaultProtocolClient("amerp");
 }
 
+function resolvePythonPath() {
+  if (process.env.CODEX_PYTHON) {
+    return process.env.CODEX_PYTHON;
+  }
+  const codexPython = "C:\\Users\\AJ\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\python\\python.exe";
+  if (fs.existsSync(codexPython)) {
+    return codexPython;
+  }
+  return "python";
+}
+
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 if (!hasSingleInstanceLock) {
   app.quit();
@@ -133,7 +145,7 @@ app.whenReady().then(async () => {
   backend = new ERPBackend({
     app,
     devServerUrl: process.env.VITE_DEV_SERVER_URL || "",
-    pythonPath: process.env.CODEX_PYTHON || "C:\\Users\\AJ\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\python\\python.exe"
+    pythonPath: resolvePythonPath()
   });
 
   protocol.handle("amerp", async (request) => {

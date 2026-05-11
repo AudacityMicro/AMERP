@@ -42,12 +42,14 @@ This repository is a local-first `Electron + React` ERP for jobshops. Preserve t
 
 ## Run And Handoff Scripts
 
+- `Install-AMERP.cmd` is the friend-friendly installer wrapper.
+- `Install-AMERP.ps1` downloads the latest GitHub ZIP, installs/verifies Node.js and Python, installs dependencies, builds, creates a desktop shortcut, and launches the app.
 - `Setup-AMERP.cmd` installs dependencies with `pnpm` and builds the app. Use this on a fresh computer.
 - `Start-App.cmd` starts the built Electron app from `dist/`.
 - `Start-Dev.cmd` starts Vite and Electron for development.
 - `Build-App.cmd` rebuilds the renderer bundle.
 
-The scripts prefer the Codex bundled Node runtime when present, then fall back to installed Node.js on `PATH`.
+The scripts prefer the Codex bundled Node runtime when present, then fall back to installed Node.js on `PATH`. The installer does not require Git; it downloads the GitHub ZIP directly. Python plus `pypdf` are required for PDF import parsers.
 
 ## Domain Model
 

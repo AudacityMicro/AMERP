@@ -8,10 +8,12 @@ The selected AMERP data folder is the source of truth. Business records are stor
 
 For a new Windows computer:
 
-1. Install Node.js LTS from https://nodejs.org if it is not already installed.
-2. Copy or clone this repository.
-3. Run `Setup-AMERP.cmd` once from the project folder.
-4. Run `Start-App.cmd` to open the built app.
+1. Download AMERP from GitHub with `Code -> Download ZIP`.
+2. Extract the ZIP.
+3. Double-click `Install-AMERP.cmd`.
+4. Use the new `AMERP` desktop shortcut.
+
+The installer downloads the latest AMERP from GitHub, installs Node.js LTS and Python through `winget` when they are missing, installs JavaScript and Python dependencies, builds the app, creates a desktop shortcut, and launches AMERP.
 
 For development:
 
@@ -25,6 +27,7 @@ The app prompts for an AMERP data folder on first use. Keep that folder backed u
 
 Preferred Windows entry points:
 
+- `Install-AMERP.cmd` is the friend-friendly installer. It downloads the latest GitHub version into `%USERPROFILE%\AMERP`, installs prerequisites/dependencies, builds, creates a desktop shortcut, and starts the app.
 - `Setup-AMERP.cmd` installs dependencies with `pnpm` and builds the renderer.
 - `Start-App.cmd` launches the built Electron app from `dist/`.
 - `Start-Dev.cmd` launches the development app.
@@ -36,7 +39,7 @@ Package scripts are also available:
 - `npm run dev`
 - `npm run build`
 
-The command files prefer a known Codex Node runtime when present, then fall back to installed Node.js on `PATH`.
+The command files prefer a known Codex Node runtime when present, then fall back to installed Node.js on `PATH`. Git is not required for the installer because it downloads the GitHub ZIP directly.
 
 ## Current Workspaces
 
@@ -131,11 +134,12 @@ python -m py_compile scripts/import_materials_sqlite.py
 node node_modules/vite/bin/vite.js build
 ```
 
-`node_modules/` and `dist/` are intentionally ignored by git. A receiving computer should run `Setup-AMERP.cmd` after cloning or copying the repository.
+`node_modules/` and `dist/` are intentionally ignored by git. A receiving computer should run `Install-AMERP.cmd` for a full install or `Setup-AMERP.cmd` if the repository is already in its final folder.
 
 ## Troubleshooting
 
-- If Electron is missing, run `Setup-AMERP.cmd`.
+- If Electron is missing, run `Install-AMERP.cmd` or `Setup-AMERP.cmd`.
+- If Node.js or Python is missing and `winget` cannot install it automatically, install Node.js LTS from https://nodejs.org and Python from https://www.python.org/downloads/, then run `Install-AMERP.cmd` again.
 - If built files are missing, run `Build-App.cmd`.
 - If the app reports a stale record lock, confirm no other AMERP instance is open, then reopen the app. Lock files live under the selected data folder in `locks/`.
 - If a PDF export fails, rebuild with `Build-App.cmd` and retry.

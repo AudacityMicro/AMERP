@@ -12,6 +12,7 @@ AMERP is a local-first ERP for jobshops that need practical ISO 9001-style trace
 - No server process.
 - No cloud login dependency.
 - Optional OpenAI API usage only for user-triggered AI assistance.
+- Windows handoff installer that downloads the GitHub ZIP and installs local prerequisites/dependencies.
 
 ## Source Of Truth
 
