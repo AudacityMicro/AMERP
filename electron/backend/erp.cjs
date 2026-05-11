@@ -177,6 +177,31 @@ function mergeKanbanOrderingNotes(notes, vendorPartNumber) {
   return trimmedNotes ? `${trimmedNotes}\n${line}` : line;
 }
 
+function pdfTimestamp(date = new Date()) {
+  const pad = (value) => String(value).padStart(2, "0");
+  return [
+    date.getFullYear(),
+    pad(date.getMonth() + 1),
+    pad(date.getDate())
+  ].join("-") + "_" + [
+    pad(date.getHours()),
+    pad(date.getMinutes()),
+    pad(date.getSeconds())
+  ].join("-");
+}
+
+async function uniquePdfPath(folder, filenameStem) {
+  await ensureDir(folder);
+  const stem = safeFileName(filenameStem, "document");
+  let candidate = `${stem}.pdf`;
+  let counter = 2;
+  while (await pathExists(path.join(folder, candidate))) {
+    candidate = `${stem}-${counter}.pdf`;
+    counter += 1;
+  }
+  return path.join(folder, candidate);
+}
+
 class ERPBackend {
   constructor({ app, devServerUrl, pythonPath }) {
     this.app = app;
@@ -1321,10 +1346,12 @@ class ERPBackend {
     const effectiveHeight = Number(selectedSize.heightIn || 4) * 0.93;
     let outputPath = destinationPath;
     if (!outputPath) {
-      const exportFolder = path.join(dataRoot, "kanban-cards");
-      await ensureDir(exportFolder);
+      const exportFolder = path.join(this.getKanbanRoot(dataRoot, card.id), "print");
       const sizeSuffix = safeFileName(selectedSize.name || `${selectedSize.widthIn}x${selectedSize.heightIn}`);
-      outputPath = path.join(exportFolder, `${safeFileName(card.internalInventoryNumber || card.itemName || card.id)}-${sizeSuffix}-kanban-card.pdf`);
+      outputPath = await uniquePdfPath(
+        exportFolder,
+        `${safeFileName(card.internalInventoryNumber || card.itemName || card.id)}-${sizeSuffix}-kanban-card-${pdfTimestamp()}`
+      );
     }
 
     const printWindow = new BrowserWindow({
@@ -1385,10 +1412,12 @@ class ERPBackend {
     const effectiveHeight = Number(selectedSize.heightIn || 4) * 0.93;
     let outputPath = destinationPath;
     if (!outputPath) {
-      const exportFolder = path.join(dataRoot, "material-labels");
-      await ensureDir(exportFolder);
+      const exportFolder = path.join(this.getMaterialRoot(dataRoot, material.id), "print");
       const sizeSuffix = safeFileName(selectedSize.name || `${selectedSize.widthIn}x${selectedSize.heightIn}`);
-      outputPath = path.join(exportFolder, `${safeFileName(material.serialCode || material.materialType || material.id)}-${sizeSuffix}-material-label.pdf`);
+      outputPath = await uniquePdfPath(
+        exportFolder,
+        `${safeFileName(material.serialCode || material.materialType || material.id)}-${sizeSuffix}-material-label-${pdfTimestamp()}`
+      );
     }
 
     const printWindow = new BrowserWindow({
@@ -2245,13 +2274,13 @@ class ERPBackend {
         errors.push("Reinspection Result is required before closure.");
       }
     }
-    if (record.rootCauseRequired === "No" && ["Awaiting Corrective Action", "Awaiting Verification", "Closed"].includes(status)) {
+    if (record.rootCauseRequired === "No" && ["Awaiting Verification", "Closed"].includes(status)) {
       requireField(true, record.rootCauseJustification, "Root Cause justification is required when root cause is marked not required.");
     }
     if (record.correctiveActionRequired === "No" && ["Awaiting Verification", "Closed"].includes(status)) {
       requireField(true, record.correctiveActionJustification, "Corrective Action justification is required when corrective action is marked not required.");
     }
-    if (record.correctiveActionRequired === "Yes" && ["Awaiting Corrective Action", "Awaiting Verification", "Closed"].includes(status)) {
+    if (record.correctiveActionRequired === "Yes" && ["Awaiting Verification", "Closed"].includes(status)) {
       requireField(true, record.rootCause, "Root Cause is required when corrective action is required.");
       requireField(true, record.correctiveActionTaken, "Corrective Action Taken is required when corrective action is required.");
       requireField(true, record.correctiveActionOwner, "Corrective Action Owner is required when corrective action is required.");
@@ -5712,15 +5741,10 @@ class ERPBackend {
     }
     let outputPath = destinationPath;
     if (!outputPath) {
-      const result = await dialog.showSaveDialog({
-        title: "Export Job Packet PDF",
-        defaultPath: path.join(dataRoot, `${safeFileName(job.jobNumber || job.id)}-traveler.pdf`),
-        filters: [{ name: "PDF", extensions: ["pdf"] }]
-      });
-      if (result.canceled || !result.filePath) {
-        return null;
-      }
-      outputPath = result.filePath;
+      outputPath = await uniquePdfPath(
+        path.join(this.getJobRoot(dataRoot, jobId), "print"),
+        `${safeFileName(job.jobNumber || job.id)}-traveler-${pdfTimestamp()}`
+      );
     }
 
     const printWindow = new BrowserWindow({
@@ -5771,15 +5795,10 @@ class ERPBackend {
     }
     let outputPath = destinationPath;
     if (!outputPath) {
-      const result = await dialog.showSaveDialog({
-        title: "Export Inspection Results PDF",
-        defaultPath: path.join(dataRoot, `${safeFileName(job.jobNumber || job.id)}-${safeFileName(part.partNumber || part.partName || part.id)}-inspection.pdf`),
-        filters: [{ name: "PDF", extensions: ["pdf"] }]
-      });
-      if (result.canceled || !result.filePath) {
-        return null;
-      }
-      outputPath = result.filePath;
+      outputPath = await uniquePdfPath(
+        path.join(this.getPartRoot(dataRoot, jobId, partId), "inspection", "reports"),
+        `${safeFileName(job.jobNumber || job.id)}-${safeFileName(part.partNumber || part.partName || part.id)}-inspection-${pdfTimestamp()}`
+      );
     }
     const printWindow = new BrowserWindow({
       show: false,
@@ -5834,15 +5853,10 @@ class ERPBackend {
     }
     let outputPath = destinationPath;
     if (!outputPath) {
-      const result = await dialog.showSaveDialog({
-        title: "Export NCR PDF",
-        defaultPath: path.join(dataRoot, `${safeFileName(record.ncrNumber || record.id)}-nonconformance.pdf`),
-        filters: [{ name: "PDF", extensions: ["pdf"] }]
-      });
-      if (result.canceled || !result.filePath) {
-        return null;
-      }
-      outputPath = result.filePath;
+      outputPath = await uniquePdfPath(
+        path.join(this.getNonconformanceRoot(dataRoot, ncrId), "print"),
+        `${safeFileName(record.ncrNumber || record.id)}-nonconformance-${pdfTimestamp()}`
+      );
     }
     const printWindow = new BrowserWindow({
       show: false,
@@ -5892,7 +5906,7 @@ class ERPBackend {
     if (!sourcePath || !(await pathExists(sourcePath))) {
       throw new Error("Source drawing PDF could not be found.");
     }
-    const outputFilename = `${safeFileName(part.partNumber || part.partName || part.id)}-ballooned-${safeFileName(document.originalFilename || document.storedFilename || "drawing.pdf").replace(/\.pdf$/i, "")}.pdf`;
+    const outputFilename = `${safeFileName(part.partNumber || part.partName || part.id)}-ballooned-${safeFileName(document.originalFilename || document.storedFilename || "drawing.pdf").replace(/\.pdf$/i, "")}-${pdfTimestamp()}.pdf`;
     const outputPath = path.join(this.getPartDocumentsRoot(dataRoot, jobId, partId), outputFilename);
     const sourceBytes = await fs.readFile(sourcePath);
     const pdfDoc = await PDFDocument.load(sourceBytes);

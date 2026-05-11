@@ -6459,13 +6459,13 @@ function getNonconformanceValidationMessages(record) {
   if (record.reinspectionRequired === "Yes" && status === "Closed" && !["Pass", "Fail"].includes(record.reinspectionResult || "")) {
     errors.push("Reinspection Result is required before closure.");
   }
-  if (record.rootCauseRequired === "No" && ["Awaiting Corrective Action", "Awaiting Verification", "Closed"].includes(status)) {
+  if (record.rootCauseRequired === "No" && ["Awaiting Verification", "Closed"].includes(status)) {
     requireField(true, record.rootCauseJustification, "Root Cause justification is required.");
   }
   if (record.correctiveActionRequired === "No" && ["Awaiting Verification", "Closed"].includes(status)) {
     requireField(true, record.correctiveActionJustification, "Corrective Action justification is required.");
   }
-  if (record.correctiveActionRequired === "Yes" && ["Awaiting Corrective Action", "Awaiting Verification", "Closed"].includes(status)) {
+  if (record.correctiveActionRequired === "Yes" && ["Awaiting Verification", "Closed"].includes(status)) {
     requireField(true, record.rootCause, "Root Cause is required when corrective action is required.");
     requireField(true, record.correctiveActionTaken, "Corrective Action Taken is required when corrective action is required.");
     requireField(true, record.correctiveActionOwner, "Corrective Action Owner is required when corrective action is required.");
@@ -6521,7 +6521,540 @@ function allowedNcrStatuses(record) {
   return statusOptions.filter((option) => options.has(option));
 }
 
+const NCR_STEPS = [
+  { id: "issue", label: "1. Issue" },
+  { id: "containment", label: "2. Containment" },
+  { id: "disposition", label: "3. Disposition" },
+  { id: "corrective", label: "4. Corrective Action" },
+  { id: "closure", label: "5. Closure" }
+];
+
+const NCR_CUSTOMER_INVOLVEMENT_OPTIONS = ["None", "Customer notified", "Customer approval required"];
+const NCR_PRODUCT_ESCAPE_OPTIONS = ["Not shipped", "Shipped / customer escaped"];
+const NCR_REINSPECTION_STATE_OPTIONS = ["Not required", "Required - pending", "Passed", "Failed"];
+const NCR_CORRECTIVE_ACTION_LEVEL_OPTIONS = ["Not required", "Root cause only", "Corrective action required"];
+
+function ncrStepForStatus(status = "Open") {
+  if (status === "Contained") return "containment";
+  if (status === "Awaiting Disposition") return "disposition";
+  if (status === "Awaiting Corrective Action" || status === "Awaiting Verification") return "corrective";
+  if (status === "Closed" || status === "Cancelled") return "closure";
+  return "issue";
+}
+
+function ncrCustomerInvolvement(record) {
+  if (record.customerApprovalRequired === "Yes") return "Customer approval required";
+  if (record.customerNotificationRequired === "Yes") return "Customer notified";
+  return "None";
+}
+
+function ncrPatchForCustomerInvolvement(value) {
+  if (value === "Customer approval required") {
+    return { customerNotificationRequired: "Yes", customerApprovalRequired: "Yes" };
+  }
+  if (value === "Customer notified") {
+    return { customerNotificationRequired: "Yes", customerApprovalRequired: "No", customerApprovalReference: "" };
+  }
+  return {
+    customerNotificationRequired: "No",
+    customerApprovalRequired: "No",
+    customerNotificationDate: "",
+    customerApprovalReference: "",
+    customerApprovalOverrideReason: ""
+  };
+}
+
+function ncrProductEscape(record) {
+  return record.productShipped === "Yes" ? "Shipped / customer escaped" : "Not shipped";
+}
+
+function ncrPatchForProductEscape(value) {
+  return { productShipped: value === "Shipped / customer escaped" ? "Yes" : "No" };
+}
+
+function ncrReinspectionState(record) {
+  if (record.reinspectionRequired !== "Yes") return "Not required";
+  if (record.reinspectionResult === "Pass") return "Passed";
+  if (record.reinspectionResult === "Fail") return "Failed";
+  return "Required - pending";
+}
+
+function ncrPatchForReinspectionState(value) {
+  if (value === "Passed") return { reinspectionRequired: "Yes", reinspectionResult: "Pass" };
+  if (value === "Failed") return { reinspectionRequired: "Yes", reinspectionResult: "Fail" };
+  if (value === "Required - pending") return { reinspectionRequired: "Yes", reinspectionResult: "" };
+  return { reinspectionRequired: "No", reinspectionResult: "Not Required" };
+}
+
+function ncrCorrectiveActionLevel(record) {
+  if (record.correctiveActionRequired === "Yes") return "Corrective action required";
+  if (record.rootCauseRequired === "Yes") return "Root cause only";
+  return "Not required";
+}
+
+function ncrPatchForCorrectiveActionLevel(value) {
+  if (value === "Corrective action required") {
+    return { rootCauseRequired: "Yes", correctiveActionRequired: "Yes", effectivenessVerificationResult: "Pending" };
+  }
+  if (value === "Root cause only") {
+    return {
+      rootCauseRequired: "Yes",
+      correctiveActionRequired: "No",
+      effectivenessVerificationMethod: "Not Required",
+      effectivenessVerificationResult: "Not Required",
+      effectivenessVerificationDate: ""
+    };
+  }
+  return {
+    rootCauseRequired: "No",
+    correctiveActionRequired: "No",
+    effectivenessVerificationMethod: "Not Required",
+    effectivenessVerificationResult: "Not Required",
+    effectivenessVerificationDate: ""
+  };
+}
+
+function ncrReadOnlyContextGroups(record, instruments = []) {
+  const context = ncrInspectionContextSummary(record, instruments);
+  return [
+    {
+      title: "Report",
+      items: [
+        ["NCR Number", record.ncrNumber || record.id],
+        ["Status", record.status],
+        ["Date Reported", formatDateTime(record.reportedAt)],
+        ["Reported By", record.reportedBy],
+        ["Owner", record.owner],
+        ["Due Date", record.dueDate]
+      ]
+    },
+    {
+      title: "Traceability",
+      items: [
+        ["Customer", record.customer],
+        ["Customer PO", record.customerPoNumber],
+        ["Job / Work Order", record.internalJobNumber || record.jobNumber],
+        ["Sales / Quote", record.salesOrderQuoteNumber],
+        ["Part", [record.partNumber, record.partName].filter(Boolean).join(" / ")],
+        ["Part Revision", record.partRevision],
+        ["Drawing Revision", record.drawingRevision],
+        ["Model Revision", record.modelRevision],
+        ["Material / Batch", record.lotBatchSerialNumber],
+        ["Supplier / Vendor", record.supplierResponsible]
+      ]
+    },
+    {
+      title: "Inspection",
+      items: [
+        ["Inspection Report", record.inspectionRecordReference],
+        ["Characteristic", record.relatedCharacteristicNumber],
+        ["Gage / Tool", record.inspectionEquipmentId],
+        ["Units", record.units],
+        ["Context", context]
+      ]
+    },
+    {
+      title: "Quantities",
+      items: [
+        ["Made", record.quantityMade],
+        ["Inspected", record.quantityInspected],
+        ["Accepted", record.quantityAccepted],
+        ["Rejected", record.quantityRejected],
+        ["Affected", record.quantityAffected]
+      ]
+    }
+  ];
+}
+
 function NonconformanceDetailScreen({
+  record,
+  onChange,
+  instruments,
+  preferences,
+  constants,
+  onApplyTemplate,
+  onAddAttachments,
+  onOpenAttachment,
+  onOpenAttachmentRevision,
+  onArchiveAttachment,
+  onUnarchiveAttachment,
+  onReviseAttachment,
+  onDeleteAttachment
+}) {
+  const readOnly = record.status === "Closed";
+  const [activeStep, setActiveStep] = useState(() => ncrStepForStatus(record.status));
+  useEffect(() => {
+    setActiveStep(ncrStepForStatus(record.status));
+  }, [record.id]);
+  const validationErrors = getNonconformanceValidationMessages(record);
+  const dispositions = Array.from(new Set(["", ...(preferences?.nonconformanceDispositions || []), record.disposition || ""])).filter((item, index) => item || index === 0);
+  const severityOptions = ["", ...(constants?.nonconformanceSeverities || ["Minor", "Major", "Critical"])];
+  const sourceOptions = ["", ...(constants?.nonconformanceSources || [])];
+  const rootCauseCategoryOptions = ["", ...(constants?.nonconformanceRootCauseCategories || [])];
+  const effectivenessMethodOptions = ["", ...(constants?.nonconformanceEffectivenessMethods || [])];
+  const effectivenessResultOptions = constants?.nonconformanceEffectivenessResults || ["Effective", "Not Effective", "Pending", "Not Required"];
+  const contextGroups = ncrReadOnlyContextGroups(record, instruments);
+  const customerInvolvement = ncrCustomerInvolvement(record);
+  const productEscape = ncrProductEscape(record);
+  const reinspectionState = ncrReinspectionState(record);
+  const correctiveActionLevel = ncrCorrectiveActionLevel(record);
+  const showCustomerFields = productEscape !== "Not shipped" || customerInvolvement !== "None";
+  const showCustomerApproval = customerInvolvement === "Customer approval required";
+  const showReworkInstructions = Boolean(record.reworkInstructions || ["Rework", "Remake", "Sort / 100% Inspect"].includes(record.disposition));
+  const showRootCause = correctiveActionLevel !== "Not required";
+  const showCorrectiveAction = correctiveActionLevel === "Corrective action required";
+  const photoAttachments = (record.attachments || []).filter((attachment) => {
+    const filename = String(attachment.storedFilename || attachment.originalFilename || "").toLowerCase();
+    return [".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"].some((extension) => filename.endsWith(extension));
+  });
+
+  const applyPatch = (patch) => {
+    const next = { ...record, ...patch };
+    if (Object.prototype.hasOwnProperty.call(patch, "disposition") && patch.disposition === "Use As-Is" && next.customerApprovalRequired !== "Yes" && !next.customerApprovalOverrideReason) {
+      next.customerApprovalRequired = "Yes";
+      next.customerNotificationRequired = "Yes";
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, "status") && patch.status === "Closed") {
+      next.closedBy = next.closedBy || next.owner || next.reportedBy || "";
+      next.closureDate = next.closureDate || nowIso().slice(0, 10);
+    }
+    onChange(next);
+  };
+
+  const lifecycleActions = [
+    ["Mark Contained", "Contained"],
+    ["Send to Disposition", "Awaiting Disposition"],
+    ["Send to Corrective Action", "Awaiting Corrective Action"],
+    ["Send to Verification", "Awaiting Verification"],
+    ["Close NCR", "Closed"],
+    ["Cancel NCR", "Cancelled"]
+  ];
+  const allowedStatuses = allowedNcrStatuses(record);
+  const lifecycleState = (targetStatus) => {
+    const allowed = allowedStatuses.includes(targetStatus);
+    const projected = {
+      ...record,
+      status: targetStatus,
+      cancellationReason: targetStatus === "Cancelled" ? (record.cancellationReason || "pending") : record.cancellationReason
+    };
+    const errors = targetStatus === "Cancelled" ? [] : getNonconformanceValidationMessages(projected);
+    return {
+      disabled: readOnly || !allowed || errors.length > 0,
+      reason: !allowed ? "Not available from current status." : errors[0] || ""
+    };
+  };
+  const changeStatus = (targetStatus) => {
+    if (targetStatus === "Cancelled" && !String(record.cancellationReason || "").trim()) {
+      const reason = window.prompt("Enter a cancellation reason for this NCR.");
+      if (!reason?.trim()) {
+        return;
+      }
+      applyPatch({ status: targetStatus, cancellationReason: reason.trim() });
+      setActiveStep("closure");
+      return;
+    }
+    applyPatch({ status: targetStatus });
+    setActiveStep(ncrStepForStatus(targetStatus));
+  };
+
+  const renderContext = () => (
+    <section className="panel ncr-context-panel">
+      <div className="panel-heading inline">
+        <div>
+          <h3>NCR Context</h3>
+          <span>Autofilled from job, part, inspection, gage, and material records.</span>
+        </div>
+        <div className="inline-chip">{record.status || "Open"}</div>
+      </div>
+      <div className="ncr-context-grid">
+        {contextGroups.map((group) => (
+          <div key={group.title} className="ncr-context-card">
+            <h4>{group.title}</h4>
+            <dl>
+              {group.items.map(([label, value]) => (
+                <React.Fragment key={`${group.title}-${label}`}>
+                  <dt>{label}</dt>
+                  <dd>{ncrFieldValue(value)}</dd>
+                </React.Fragment>
+              ))}
+            </dl>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+
+  const renderLifecycle = () => (
+    <section className="panel ncr-lifecycle-panel">
+      <div className="panel-heading">
+        <div>
+          <h3>Lifecycle</h3>
+          <span>Only valid next actions are enabled.</span>
+        </div>
+      </div>
+      <div className="ncr-lifecycle-actions">
+        {lifecycleActions.map(([label, targetStatus]) => {
+          const state = lifecycleState(targetStatus);
+          return (
+            <button
+              key={targetStatus}
+              type="button"
+              className={targetStatus === "Cancelled" ? "danger subtle" : targetStatus === "Closed" ? "primary-button" : ""}
+              onClick={() => changeStatus(targetStatus)}
+              disabled={state.disabled}
+              title={state.reason}
+            >
+              {label}
+            </button>
+          );
+        })}
+      </div>
+    </section>
+  );
+
+  const renderIssueStep = () => (
+    <section className="panel ncr-step-panel">
+      <div className="panel-heading inline">
+        <div>
+          <h3>Issue</h3>
+          <span>Define what failed and what requirement was violated.</span>
+        </div>
+        <div className="toolbar">
+          <div className="field slim-field">
+            <span>Quick Template</span>
+            <select value="" onChange={(event) => {
+              const nextTemplate = NCR_QUICK_TEMPLATES.find((item) => item.id === event.target.value);
+              if (nextTemplate) {
+                onApplyTemplate(nextTemplate.patch);
+              }
+            }} disabled={readOnly}>
+              <option value="">Apply Template</option>
+              {NCR_QUICK_TEMPLATES.map((template) => <option key={template.id} value={template.id}>{template.label}</option>)}
+            </select>
+          </div>
+        </div>
+      </div>
+      <div className="form-grid compact-4">
+        <TextField label="NCR Number *" value={record.ncrNumber || ""} onChange={(value) => applyPatch({ ncrNumber: value })} readOnly={readOnly} />
+        <TextField label="Reported By *" value={record.reportedBy || ""} onChange={(value) => applyPatch({ reportedBy: value, createdBy: record.createdBy || value })} readOnly={readOnly} />
+        <TextField label="Owner *" value={record.owner || ""} onChange={(value) => applyPatch({ owner: value })} readOnly={readOnly} />
+        <TextField label="Quantity Affected *" value={record.quantityAffected || ""} onChange={(value) => applyPatch({ quantityAffected: value })} readOnly={readOnly} />
+        <SelectField label="Severity" value={record.severity || "Minor"} options={severityOptions} onChange={(value) => applyPatch({ severity: value })} disabled={readOnly} />
+        <SelectField label="Source" value={record.source || ""} options={sourceOptions} onChange={(value) => applyPatch({ source: value })} emptyLabel="Choose source" disabled={readOnly} />
+        <SelectField label="Product Escape" value={productEscape} options={NCR_PRODUCT_ESCAPE_OPTIONS} onChange={(value) => applyPatch(ncrPatchForProductEscape(value))} disabled={readOnly} />
+        <SelectField label="Customer Involvement" value={customerInvolvement} options={NCR_CUSTOMER_INVOLVEMENT_OPTIONS} onChange={(value) => applyPatch(ncrPatchForCustomerInvolvement(value))} disabled={readOnly} />
+        {showCustomerFields ? <TextField label="Customer Notification Date" type="date" value={record.customerNotificationDate || ""} onChange={(value) => applyPatch({ customerNotificationDate: value })} readOnly={readOnly} /> : null}
+        {showCustomerApproval ? <TextField label="Customer Approval Reference" value={record.customerApprovalReference || ""} onChange={(value) => applyPatch({ customerApprovalReference: value })} readOnly={readOnly} /> : null}
+        {record.disposition === "Use As-Is" && customerInvolvement !== "Customer approval required" ? <TextField label="Approval Override Reason" value={record.customerApprovalOverrideReason || ""} onChange={(value) => applyPatch({ customerApprovalOverrideReason: value })} readOnly={readOnly} /> : null}
+        <TextField label="Short Title" value={record.issueSummary || ""} onChange={(value) => applyPatch({ issueSummary: value })} readOnly={readOnly} />
+      </div>
+      <TextArea label="Requirement / Specification Violated *" value={record.requirementViolated || ""} onChange={(value) => applyPatch({ requirementViolated: value })} rows={2} readOnly={readOnly} />
+      <TextArea label="Actual Condition Found *" value={record.actualConditionFound || ""} onChange={(value) => applyPatch({ actualConditionFound: value })} rows={2} readOnly={readOnly} />
+      <TextArea label="Nonconformance Description *" value={record.nonconformanceDescription || record.issueDescription || ""} onChange={(value) => applyPatch({ nonconformanceDescription: value, issueDescription: value })} rows={3} readOnly={readOnly} />
+      <TextArea label="Immediate Risk" value={record.immediateRisk || ""} onChange={(value) => applyPatch({ immediateRisk: value })} rows={2} readOnly={readOnly} />
+    </section>
+  );
+
+  const renderContainmentStep = () => (
+    <section className="panel ncr-step-panel">
+      <div className="panel-heading">
+        <div>
+          <h3>Containment</h3>
+          <span className="muted-note">Containment protects the customer immediately. It is not the same as correction or corrective action.</span>
+        </div>
+      </div>
+      <div className="form-grid compact-4">
+        <TextField label="Containment Date" type="date" value={record.containmentDate || ""} onChange={(value) => applyPatch({ containmentDate: value })} readOnly={readOnly} />
+        <TextField label="Containment By" value={record.containmentBy || ""} onChange={(value) => applyPatch({ containmentBy: value })} readOnly={readOnly} />
+        <TextField label="Containment Verified By" value={record.containmentVerifiedBy || ""} onChange={(value) => applyPatch({ containmentVerifiedBy: value })} readOnly={readOnly} />
+      </div>
+      <TextArea label="Containment Action *" value={record.containmentAction || ""} onChange={(value) => applyPatch({ containmentAction: value })} rows={3} readOnly={readOnly} />
+      <TextArea label="Containment Notes" value={record.containmentNotes || ""} onChange={(value) => applyPatch({ containmentNotes: value })} rows={2} readOnly={readOnly} />
+    </section>
+  );
+
+  const renderDispositionStep = () => (
+    <section className="panel ncr-step-panel">
+      <div className="panel-heading">
+        <div>
+          <h3>Disposition and Correction</h3>
+          <span className="muted-note">Correction is what physically happened to the affected product.</span>
+        </div>
+      </div>
+      <div className="form-grid compact-4">
+        <SelectField label="Disposition" value={record.disposition || ""} options={dispositions} emptyLabel="Choose disposition" onChange={(value) => applyPatch({ disposition: value })} disabled={readOnly} />
+        <TextField label="Approved By" value={record.dispositionApprovedBy || ""} onChange={(value) => applyPatch({ dispositionApprovedBy: value })} readOnly={readOnly} />
+        <TextField label="Disposition Date" type="date" value={record.dispositionDate || ""} onChange={(value) => applyPatch({ dispositionDate: value })} readOnly={readOnly} />
+        <SelectField label="Reinspection" value={reinspectionState} options={NCR_REINSPECTION_STATE_OPTIONS} onChange={(value) => applyPatch(ncrPatchForReinspectionState(value))} disabled={readOnly} />
+      </div>
+      <TextArea label="Correction Taken *" value={record.correctionTaken || ""} onChange={(value) => applyPatch({ correctionTaken: value })} rows={3} readOnly={readOnly} />
+      {showReworkInstructions ? <TextArea label="Rework Instructions" value={record.reworkInstructions || ""} onChange={(value) => applyPatch({ reworkInstructions: value })} rows={2} readOnly={readOnly} /> : null}
+    </section>
+  );
+
+  const renderCorrectiveStep = () => (
+    <section className="panel ncr-step-panel">
+      <div className="panel-heading">
+        <div>
+          <h3>Corrective Action</h3>
+          <span className="muted-note">Corrective action changes the system to reduce recurrence risk.</span>
+        </div>
+      </div>
+      <div className="form-grid compact-4">
+        <SelectField label="Corrective Action Level" value={correctiveActionLevel} options={NCR_CORRECTIVE_ACTION_LEVEL_OPTIONS} onChange={(value) => applyPatch(ncrPatchForCorrectiveActionLevel(value))} disabled={readOnly} />
+        {showRootCause ? <SelectField label="Root Cause Category" value={record.rootCauseCategory || ""} options={rootCauseCategoryOptions} emptyLabel="Choose category" onChange={(value) => applyPatch({ rootCauseCategory: value })} disabled={readOnly} /> : null}
+        {showCorrectiveAction ? <TextField label="Corrective Action Owner" value={record.correctiveActionOwner || ""} onChange={(value) => applyPatch({ correctiveActionOwner: value })} readOnly={readOnly} /> : null}
+        {showCorrectiveAction ? <TextField label="Corrective Action Due Date" type="date" value={record.correctiveActionDueDate || ""} onChange={(value) => applyPatch({ correctiveActionDueDate: value })} readOnly={readOnly} /> : null}
+        {showCorrectiveAction ? <TextField label="Completed Date" type="date" value={record.correctiveActionCompletedDate || ""} onChange={(value) => applyPatch({ correctiveActionCompletedDate: value })} readOnly={readOnly} /> : null}
+        {showCorrectiveAction ? <TextField label="Verified By" value={record.correctiveActionVerifiedBy || ""} onChange={(value) => applyPatch({ correctiveActionVerifiedBy: value })} readOnly={readOnly} /> : null}
+        {showCorrectiveAction ? <SelectField label="Verification Method" value={record.effectivenessVerificationMethod || ""} options={effectivenessMethodOptions} emptyLabel="Choose method" onChange={(value) => applyPatch({ effectivenessVerificationMethod: value })} disabled={readOnly} /> : null}
+        {showCorrectiveAction ? <SelectField label="Verification Result" value={record.effectivenessVerificationResult || "Pending"} options={effectivenessResultOptions} onChange={(value) => applyPatch({ effectivenessVerificationResult: value })} disabled={readOnly} /> : null}
+        {showCorrectiveAction ? <TextField label="Verification Date" type="date" value={record.effectivenessVerificationDate || ""} onChange={(value) => applyPatch({ effectivenessVerificationDate: value })} readOnly={readOnly} /> : null}
+      </div>
+      {showRootCause ? <TextArea label="Root Cause" value={record.rootCause || record.rootCauseNotes || ""} onChange={(value) => applyPatch({ rootCause: value, rootCauseNotes: value })} rows={3} readOnly={readOnly} /> : null}
+      {correctiveActionLevel === "Not required" ? <TextArea label="Root Cause Not Required Justification" value={record.rootCauseJustification || ""} onChange={(value) => applyPatch({ rootCauseJustification: value })} rows={2} readOnly={readOnly} /> : null}
+      {showCorrectiveAction ? <TextArea label="Corrective Action Taken" value={record.correctiveActionTaken || ""} onChange={(value) => applyPatch({ correctiveActionTaken: value })} rows={3} readOnly={readOnly} /> : null}
+      {correctiveActionLevel !== "Corrective action required" ? <TextArea label="Corrective Action Not Required Justification" value={record.correctiveActionJustification || ""} onChange={(value) => applyPatch({ correctiveActionJustification: value })} rows={2} readOnly={readOnly} /> : null}
+    </section>
+  );
+
+  const renderClosureStep = () => (
+    <section className="panel ncr-step-panel">
+      <div className="panel-heading">
+        <div>
+          <h3>Closure</h3>
+          <span>Closure is blocked until containment, correction, and verification requirements are complete.</span>
+        </div>
+      </div>
+      <div className="form-grid compact-4">
+        <TextField label="Closure Approval" value={record.closureApproval || ""} onChange={(value) => applyPatch({ closureApproval: value })} readOnly={readOnly} />
+        <TextField label="Closed By" value={record.closedBy || ""} onChange={(value) => applyPatch({ closedBy: value })} readOnly />
+        <TextField label="Closure Date" type="date" value={String(record.closureDate || "").slice(0, 10)} onChange={(value) => applyPatch({ closureDate: value })} readOnly />
+        {record.status === "Cancelled" ? <TextField label="Cancellation Reason" value={record.cancellationReason || ""} onChange={(value) => applyPatch({ cancellationReason: value })} readOnly={readOnly} /> : null}
+        {record.reopenReason ? <TextField label="Reopen Reason" value={record.reopenReason || ""} onChange={(value) => applyPatch({ reopenReason: value })} readOnly={readOnly} /> : null}
+      </div>
+      <TextArea label="Closure Notes" value={record.closureNotes || ""} onChange={(value) => applyPatch({ closureNotes: value })} rows={3} readOnly={readOnly} />
+    </section>
+  );
+
+  const renderActiveStep = () => ({
+    issue: renderIssueStep,
+    containment: renderContainmentStep,
+    disposition: renderDispositionStep,
+    corrective: renderCorrectiveStep,
+    closure: renderClosureStep
+  }[activeStep] || renderIssueStep)();
+
+  return (
+    <div className="workflow-stack ncr-stepper-workflow">
+      {validationErrors.length ? (
+        <section className="panel validation-summary danger">
+          <div className="panel-heading">
+            <div>
+              <h3>Validation</h3>
+              <span>{validationErrors.length} issue{validationErrors.length === 1 ? "" : "s"} blocking advancement or closure.</span>
+            </div>
+          </div>
+          <div className="stack-list compact-list">
+            {validationErrors.map((error) => <div key={error} className="validation-message">{error}</div>)}
+          </div>
+        </section>
+      ) : null}
+      {renderContext()}
+      <section className="panel ncr-stepper-panel">
+        <div className="ncr-stepper">
+          {NCR_STEPS.map((step) => (
+            <button
+              key={step.id}
+              type="button"
+              className={`ncr-step-button ${activeStep === step.id ? "active" : ""}`}
+              onClick={() => setActiveStep(step.id)}
+            >
+              {step.label}
+            </button>
+          ))}
+        </div>
+      </section>
+      {renderActiveStep()}
+      {renderLifecycle()}
+      <div className="record-grid job-detail-columns">
+        <DocumentsPanel
+          title="Attachments"
+          documents={record.attachments || []}
+          onAddDocuments={onAddAttachments}
+          onOpenDocument={onOpenAttachment}
+          onOpenRevision={onOpenAttachmentRevision}
+          onArchiveDocument={(attachmentId, _filename, archived) => {
+            if (archived) {
+              void onUnarchiveAttachment(attachmentId);
+              return;
+            }
+            void onArchiveAttachment(attachmentId);
+          }}
+          onDeleteDocument={(attachmentId, filename) => {
+            if (window.confirm(`Delete archived attachment ${filename}? This cannot be undone.`)) {
+              void onDeleteAttachment(attachmentId);
+            }
+          }}
+          onReviseDocument={onReviseAttachment}
+          emptyText="No NCR attachments attached yet."
+          readOnly={readOnly}
+        />
+        <section className="panel">
+          <div className="panel-heading">
+            <div>
+              <h3>Audit Log</h3>
+              <span>{record.auditLog?.length || 0} recorded event{record.auditLog?.length === 1 ? "" : "s"}</span>
+            </div>
+          </div>
+          <div className="table-wrap compact">
+            <table className="detail-table">
+              <thead>
+                <tr>
+                  <th>Date</th>
+                  <th>Event</th>
+                  <th>Changed By</th>
+                  <th>Message</th>
+                </tr>
+              </thead>
+              <tbody>
+                {[...(record.auditLog || [])].sort((a, b) => String(b.changedAt || "").localeCompare(String(a.changedAt || ""))).slice(0, 8).map((entry) => (
+                  <tr key={entry.id}>
+                    <td>{formatDateTime(entry.changedAt)}</td>
+                    <td>{entry.eventType || "-"}</td>
+                    <td>{entry.changedBy || "-"}</td>
+                    <td>{entry.message || "-"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {!record.auditLog?.length && <div className="empty-inline">No audit entries recorded yet.</div>}
+          </div>
+        </section>
+      </div>
+      {photoAttachments.length ? (
+        <section className="panel">
+          <div className="panel-heading">
+            <div>
+              <h3>Photos</h3>
+              <span>{photoAttachments.length} image attachments</span>
+            </div>
+          </div>
+          <div className="document-list">
+            {photoAttachments.map((attachment) => (
+              <div key={attachment.id} className="document-card">
+                <strong>{attachment.originalFilename}</strong>
+                <img className="ncr-photo-preview" src={nonconformanceAttachmentImageSrc(attachment)} alt={attachment.originalFilename} />
+              </div>
+            ))}
+          </div>
+        </section>
+      ) : null}
+    </div>
+  );
+}
+
+function LegacyNonconformanceDetailScreen({
   record,
   onChange,
   instruments,
@@ -6940,7 +7473,7 @@ function PartNonconformanceScreen({
   const selectedRecordIsSaved = Boolean(record?.id && partRecords.some((item) => item.id === record.id));
   return (
     <div className="workflow-stack">
-      <div className="record-grid job-detail-columns">
+      <div className="ncr-part-workflow">
         <section className="panel">
           <div className="panel-heading inline">
             <div>

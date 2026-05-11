@@ -865,6 +865,88 @@ button:disabled:hover {
   padding-block: 0.75rem;
 }
 
+.ncr-part-workflow {
+  display: grid;
+  gap: 0.75rem;
+  align-items: start;
+}
+
+.ncr-stepper-workflow {
+  gap: 0.75rem;
+}
+
+.ncr-context-panel {
+  padding-bottom: 0.9rem;
+}
+
+.ncr-context-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.6rem;
+}
+
+.ncr-context-card {
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--panel-2);
+  padding: 0.7rem;
+  min-width: 0;
+}
+
+.ncr-context-card h4 {
+  margin: 0 0 0.45rem;
+}
+
+.ncr-context-card dl {
+  display: grid;
+  grid-template-columns: minmax(90px, auto) minmax(0, 1fr);
+  gap: 0.25rem 0.55rem;
+  margin: 0;
+}
+
+.ncr-context-card dt {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.ncr-context-card dd {
+  margin: 0;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.ncr-stepper-panel {
+  padding: 0.55rem;
+}
+
+.ncr-stepper {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 0.4rem;
+}
+
+.ncr-step-button {
+  justify-content: center;
+  font-weight: 800;
+}
+
+.ncr-step-button.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: white;
+}
+
+.ncr-step-panel {
+  display: grid;
+  gap: 0.65rem;
+}
+
+.ncr-lifecycle-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
 .record-row-primary,
 .record-row-meta {
   display: flex;

@@ -1,78 +1,141 @@
 # AMERP
 
-AMERP is a local-first `Electron + React` ERP for jobshops, geared toward ISO9001-style traceability and quality records.
+AMERP is a local-first `Electron + React` ERP for small jobshops. It is built around job, part, material, inspection, and quality traceability without requiring a server or cloud account.
 
-Phase 1 centers the workflow on:
+The selected AMERP data folder is the source of truth. Business records are stored as readable JSON and Markdown files, and generated PDFs/assets are stored beside the records they belong to.
 
-- `Job -> Part -> ordered Operations`
-- setup documentation and traveler packets
-- material cert and lot traceability
-- metrology / calibration visibility for inspection tools
-- part-linked inspection and nonconformance records
-- a human-readable canonical file tree with generated Markdown history records
+## Handoff Quick Start
 
-## Current Architecture
+For a new Windows computer:
 
-- `electron/main.cjs`
-  - Electron shell and IPC wiring
-- `electron/backend/erp.cjs`
-  - file-backed repositories, importers, audit trail, lock handling, and PDF export
-- `src/main.jsx`
-  - unified ERP UI and print packet renderer
-- `src/styles.css`
-  - main application and print styling
-- `scripts/import_materials_sqlite.py`
-  - SQLite export helper for importing legacy Materials-Database records
+1. Install Node.js LTS from https://nodejs.org if it is not already installed.
+2. Copy or clone this repository.
+3. Run `Setup-AMERP.cmd` once from the project folder.
+4. Run `Start-App.cmd` to open the built app.
 
-## Local Run
+For development:
 
-Preferred Windows entrypoints:
+1. Run `Setup-AMERP.cmd` once.
+2. Run `Start-Dev.cmd` for the Vite + Electron development app.
+3. Run `Build-App.cmd` before sending a build to another computer.
 
-- `Start-App.cmd`
-- `Start-Dev.cmd`
-- `Build-App.cmd`
+The app prompts for an AMERP data folder on first use. Keep that folder backed up; it contains the real ERP records.
 
-You can also use:
+## Run Commands
+
+Preferred Windows entry points:
+
+- `Setup-AMERP.cmd` installs dependencies with `pnpm` and builds the renderer.
+- `Start-App.cmd` launches the built Electron app from `dist/`.
+- `Start-Dev.cmd` launches the development app.
+- `Build-App.cmd` rebuilds the renderer bundle.
+
+Package scripts are also available:
 
 - `npm start`
 - `npm run dev`
 - `npm run build`
 
-The scripts are configured to prefer a known-good Node path before falling back to `PATH`, because some Windows environments expose a broken `node` resolution.
+The command files prefer a known Codex Node runtime when present, then fall back to installed Node.js on `PATH`.
 
-## Canonical Data Root
+## Current Workspaces
 
-The selected ERP data folder is the system of record. It contains:
+- `Jobs`: job headers, parts, operations, travelers, Xometry/Subtract imports, attachments, and archive workflows.
+- `Materials`: material lots, cert attachments, traceability, usage references, and material labels.
+- `Gages`: metrology equipment, calibration history, status, and inspection-tool references.
+- `Kanban`: purchasing cards with QR codes, AI-assisted URL enrichment, card PDFs, archive/unarchive, and controlled lists.
+- `Inspections`: global listing for part-scoped inspection reports.
+- `Nonconformance`: ISO 9001-style NCR listing, part-linked NCR editor, attachments, CSV export, and NCR reports.
+- `Settings`: numbering, module visibility, customer/options lists, operation templates, reusable libraries, print sizes, branding, AI key, and controlled lists.
+
+## Job And Quality Flow
+
+The primary hierarchy is:
+
+```text
+Job -> Part -> ordered Operations
+```
+
+Parts can also hold:
+
+- managed part attachments
+- selected material lots
+- inspection setup and inspection reports
+- ballooned drawings
+- linked nonconformance records
+
+Inspection reports are versioned under the part inspection data. NCRs are stored in the top-level `nonconformances/` root but always keep stable links back to the originating job and part.
+
+## Imports
+
+Current one-time import flows include:
+
+- Xometry traveler PDFs into an existing job as part shells.
+- Xometry purchase-order PDFs into new jobs.
+- Subtract Manufacturing purchase-order PDFs into new jobs.
+- Fusion/setup-sheet imports into part operations.
+- Legacy Materials-Database import through `scripts/import_materials_sqlite.py`.
+
+The importer paths are intentionally separate. Do not merge unrelated parser logic.
+
+## Documents And PDFs
+
+Attachments are managed copies inside the AMERP data folder, not external links. Attachment revision history is preserved, and archived attachments are hidden by default.
+
+Generated PDFs save automatically into the appropriate record folder and open after generation:
+
+- job travelers under `jobs/<job-id>/print/`
+- inspection reports under `jobs/<job-id>/parts/<part-id>/inspection/reports/`
+- ballooned drawings as part attachments
+- NCR reports under `nonconformances/<ncr-id>/print/`
+- Kanban cards under `kanban/<card-id>/print/`
+- material labels under `materials/<material-id>/print/`
+
+PDF filenames include the record identity, report/card size when relevant, and a date/time stamp.
+
+## Data Folder Layout
+
+Typical data roots include:
 
 - `config/`
-- `jobs/`
-- `nonconformances/`
-- `materials/`
-- `metrology/`
-- `templates/operations/`
-- `libraries/`
-- `audit/`
-- `cache/`
-- `locks/`
+- `jobs/<job-id>/job.json`
+- `jobs/<job-id>/parts/<part-id>/part.json`
+- `jobs/<job-id>/parts/<part-id>/operations/<seq>-<slug>/operation.json`
+- `materials/<material-id>/material.json`
+- `metrology/instruments/<instrument-id>/`
+- `kanban/<card-id>/card.json`
+- `nonconformances/<ncr-id>/ncr.json`
+- `templates/operations/*.json`
+- `libraries/*.json`
+- `audit/audit-log.jsonl`
+- `cache/search-index.json`
+- `locks/*.json`
 
-All business data is stored as readable JSON and Markdown companion files. The search index under `cache/` is disposable.
+The `cache/` folder is rebuildable and is not authoritative.
 
-## Legacy Imports
+## Optional AI Features
 
-Phase 1 includes one-time import flows for:
+Kanban enrichment and image generation use the OpenAI API only when the user sets an API key in `Settings > AI` and manually runs an AI-assisted action or imports/refreshes a Kanban card URL. The key is local to the preferences JSON for this desktop app.
 
-- `SetupSheetGenerator`
-- `Materials-Database`
-- `Metrology-Tracker`
+Core ERP records do not depend on cloud services.
 
-After import, AMERP becomes the authoritative application for those records.
+## Validation
 
-## NCR Workflow
+Before sharing a build, run:
 
-AMERP includes an ISO-friendly nonconformance workflow that is created from a part and then managed either from the part workspace or the top-level `Nonconformance` module.
+```powershell
+node --check electron/backend/erp.cjs
+node --check electron/main.cjs
+node --check electron/preload.cjs
+python -m py_compile scripts/import_materials_sqlite.py
+node node_modules/vite/bin/vite.js build
+```
 
-- NCRs are file-backed under `nonconformances/<ncr-id>/`
-- records preserve traceability to job, part, inspection context, attachments, and audit entries
-- closure is validation-gated so containment, disposition/correction, and verification remain distinct
-- closed NCRs are read-only until explicitly reopened with a reason
-- NCR PDF export produces a grouped audit-style report, and the module can export NCR summary CSV files
+`node_modules/` and `dist/` are intentionally ignored by git. A receiving computer should run `Setup-AMERP.cmd` after cloning or copying the repository.
+
+## Troubleshooting
+
+- If Electron is missing, run `Setup-AMERP.cmd`.
+- If built files are missing, run `Build-App.cmd`.
+- If the app reports a stale record lock, confirm no other AMERP instance is open, then reopen the app. Lock files live under the selected data folder in `locks/`.
+- If a PDF export fails, rebuild with `Build-App.cmd` and retry.
