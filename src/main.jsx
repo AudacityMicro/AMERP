@@ -5327,7 +5327,7 @@ function PartDetailScreen({
   );
 }
 
-function PdfPagePreview({ fileUrl, pageNumber, zoom, balloons, selectedBalloonId, onSelectBalloon, onPlaceBalloon, onBeginMoveBalloon, onMoveBalloon, onDocumentMeta }) {
+function PdfPagePreview({ fileUrl, pageNumber, zoom, balloons, selectedBalloonId, isAiExtracting = false, onSelectBalloon, onPlaceBalloon, onBeginMoveBalloon, onMoveBalloon, onDocumentMeta }) {
   const canvasRef = useRef(null);
   const wrapperRef = useRef(null);
   const stageRef = useRef(null);
@@ -5457,6 +5457,12 @@ function PdfPagePreview({ fileUrl, pageNumber, zoom, balloons, selectedBalloonId
         )}
         {renderState.loading ? <div className="inspection-preview-status">Rendering drawing…</div> : null}
         {renderState.error ? <div className="inspection-preview-status error">{renderState.error}</div> : null}
+        {isAiExtracting ? (
+          <div className="inspection-ai-extract-overlay" role="status" aria-live="polite">
+            <div className="inspection-ai-extract-spinner" />
+            <strong>AI extracting drawing data...</strong>
+          </div>
+        ) : null}
       </div>
       <div className="inspection-preview-meta">
         <span>{renderState.pageCount ? `Page ${pageNumber} of ${renderState.pageCount}` : "No page loaded"}</span>
@@ -5476,6 +5482,7 @@ function PartInspectionSetupScreen({ busy, job, part, instruments, onUpdate, onE
   const [pageCount, setPageCount] = useState(1);
   const [zoom, setZoom] = useState(null);
   const [activeScale, setActiveScale] = useState(1);
+  const [extractingDrawingId, setExtractingDrawingId] = useState("");
   const drawings = (part.documents || []).filter((document) => document.active !== false && String(document.fileType || "").toUpperCase() === "PDF");
   const selectedDrawing = drawings.find((document) => document.id === selectedDrawingId) || drawings[0] || null;
   const selectedCharacteristic = inspection.characteristics.find((item) => item.id === selectedCharacteristicId) || inspection.characteristics[0] || null;
@@ -5611,6 +5618,15 @@ function PartInspectionSetupScreen({ busy, job, part, instruments, onUpdate, onE
   });
   const drawingUrl = selectedDrawing?.storedPath ? api.assetUrl(selectedDrawing.storedPath) : "";
   const visibleBalloons = inspection.balloons.filter((balloon) => balloon.sourceDrawingDocumentId === selectedDrawing?.id && Number(balloon.pageNumber || 1) === currentPage);
+  const isExtractingDrawing = Boolean(extractingDrawingId);
+  const extractFromDrawing = async (source) => {
+    setExtractingDrawingId(source?.documentId || selectedDrawing?.id || "upload");
+    try {
+      await onExtract(source);
+    } finally {
+      setExtractingDrawingId("");
+    }
+  };
 
   return (
     <div className="workflow-stack inspection-screen">
@@ -5621,8 +5637,8 @@ function PartInspectionSetupScreen({ busy, job, part, instruments, onUpdate, onE
             <span>Select a characteristic, then click the drawing preview to place its balloon.</span>
           </div>
           <div className="toolbar">
-            <button onClick={() => onExtract({ upload: true })} disabled={busy}>Upload + AI Extract</button>
-            <button onClick={() => selectedDrawing && onExtract({ documentId: selectedDrawing.id })} disabled={busy || !selectedDrawing}>AI Extract</button>
+            <button onClick={() => extractFromDrawing({ upload: true })} disabled={busy || isExtractingDrawing}>Upload + AI Extract</button>
+            <button onClick={() => selectedDrawing && extractFromDrawing({ documentId: selectedDrawing.id })} disabled={busy || isExtractingDrawing || !selectedDrawing}>AI Extract</button>
             <button onClick={() => selectedDrawing && onGenerateBalloonedPdf(selectedDrawing.id)} disabled={busy || !selectedDrawing}>Ballooned PDF</button>
           </div>
         </div>
@@ -5671,6 +5687,7 @@ function PartInspectionSetupScreen({ busy, job, part, instruments, onUpdate, onE
           zoom={zoom}
           balloons={visibleBalloons}
           selectedBalloonId={selectedCharacteristic?.id || ""}
+          isAiExtracting={isExtractingDrawing}
           onSelectBalloon={setSelectedCharacteristicId}
           onPlaceBalloon={placeBalloon}
           onBeginMoveBalloon={beginMoveBalloon}

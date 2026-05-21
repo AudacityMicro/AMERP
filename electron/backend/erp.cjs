@@ -46,6 +46,7 @@ const {
 } = require("./inspection-ai.cjs");
 
 const CONFIG_FILE = "amerp-config.json";
+const AI_SETTINGS_FILE = "ai-settings.json";
 const LOCK_TTL_MS = 15 * 60 * 1000;
 const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"]);
 const KANBAN_DEEP_LINK_PREFIX = "amerp://open/kanban/";
@@ -284,8 +285,18 @@ class ERPBackend {
     }
 
     const preferencesPath = this.getPreferencesPath(root);
+    const aiSettingsPath = this.getAiSettingsPath(root);
     const existingPreferences = await readJson(preferencesPath, null);
-    const normalizedPreferences = this.normalizePreferences(existingPreferences || {});
+    const existingAiSettings = await readJson(aiSettingsPath, null);
+    const legacyOpenaiApiKey = String(existingPreferences?.openaiApiKey || "").trim();
+    const normalizedAiSettings = this.normalizeAiSettings(existingAiSettings || { openaiApiKey: legacyOpenaiApiKey });
+    if (!existingAiSettings || JSON.stringify(existingAiSettings) !== JSON.stringify(normalizedAiSettings)) {
+      await writeJson(aiSettingsPath, normalizedAiSettings);
+    }
+    const normalizedPreferences = this.stripAiSettingsFromPreferences(this.normalizePreferences({
+      ...(existingPreferences || {}),
+      openaiApiKey: normalizedAiSettings.openaiApiKey
+    }));
     if (!existingPreferences || JSON.stringify(existingPreferences) !== JSON.stringify(normalizedPreferences)) {
       await writeJson(preferencesPath, normalizedPreferences);
     }
@@ -345,6 +356,22 @@ class ERPBackend {
 
   getPreferencesPath(dataRoot) {
     return path.join(dataRoot, "config", "preferences.json");
+  }
+
+  getAiSettingsPath(dataRoot) {
+    return path.join(dataRoot, "config", AI_SETTINGS_FILE);
+  }
+
+  normalizeAiSettings(settings) {
+    return {
+      openaiApiKey: String(settings?.openaiApiKey || "").trim()
+    };
+  }
+
+  stripAiSettingsFromPreferences(preferences) {
+    const next = { ...(preferences || {}) };
+    delete next.openaiApiKey;
+    return next;
   }
 
   normalizeMaterialFamilies(materialFamilies) {
@@ -481,14 +508,36 @@ class ERPBackend {
 
   async loadPreferences(dataRoot = null) {
     const root = dataRoot || await this.requireDataFolder();
-    return this.normalizePreferences(await readJson(this.getPreferencesPath(root), {}));
+    const preferences = await readJson(this.getPreferencesPath(root), {});
+    const aiSettings = await this.loadAiSettings(root);
+    return this.normalizePreferences({ ...preferences, openaiApiKey: aiSettings.openaiApiKey });
+  }
+
+  async loadAiSettings(dataRoot = null) {
+    const root = dataRoot || await this.requireDataFolder();
+    const preferences = await readJson(this.getPreferencesPath(root), {});
+    const settings = await readJson(this.getAiSettingsPath(root), {});
+    return this.normalizeAiSettings({
+      ...settings,
+      openaiApiKey: settings?.openaiApiKey || preferences?.openaiApiKey || ""
+    });
+  }
+
+  async saveAiSettings(dataRoot, settings) {
+    const normalized = this.normalizeAiSettings(settings);
+    await writeJson(this.getAiSettingsPath(dataRoot), normalized);
+    return normalized;
   }
 
   async savePreferences(preferences) {
     const dataRoot = await this.requireDataFolder();
     const current = await this.loadPreferences(dataRoot);
+    const hasOpenaiApiKey = Object.prototype.hasOwnProperty.call(preferences || {}, "openaiApiKey");
     const next = this.normalizePreferences({ ...current, ...(preferences || {}) });
-    await writeJson(this.getPreferencesPath(dataRoot), next);
+    if (hasOpenaiApiKey) {
+      await this.saveAiSettings(dataRoot, { openaiApiKey: next.openaiApiKey });
+    }
+    await writeJson(this.getPreferencesPath(dataRoot), this.stripAiSettingsFromPreferences(next));
     await this.appendAudit("preferences_saved", "preferences", "Saved application settings.");
     return next;
   }

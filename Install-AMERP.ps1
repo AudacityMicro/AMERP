@@ -140,9 +140,12 @@ try {
   $DataDir = [IO.Path]::GetFullPath($DataDir)
 
   Write-Host "AMERP installer"
+  Write-Host "Public beta install path: GitHub ZIP -> local build -> desktop shortcut"
   Write-Host "Repository: $RepoZipUrl"
   Write-Host "Install folder: $InstallDir"
   Write-Host "Suggested data folder: $DataDir"
+  Write-Host "This installer will verify or install Node.js LTS and Python, install AMERP dependencies, build the app, and create a desktop shortcut."
+  Write-Host "It is safe to rerun this installer to refresh the application files; your ERP data folder is separate."
 
   if ($DryRun) {
     Write-Host ""
@@ -176,6 +179,7 @@ try {
   New-Item -ItemType Directory -Force -Path $DataDir | Out-Null
 
   Write-Step "Installing dependencies and building AMERP"
+  Write-Host "Running Setup-AMERP.cmd in: $InstallDir"
   $setupPath = Join-Path $InstallDir "Setup-AMERP.cmd"
   if (-not (Test-Path $setupPath)) {
     throw "Setup-AMERP.cmd was not found in $InstallDir."
@@ -195,6 +199,7 @@ try {
   Write-Host "AMERP is installed."
   Write-Host "On first launch, choose or create this data folder: $DataDir"
   Write-Host "You can start AMERP from the desktop shortcut or from: $(Join-Path $InstallDir "Start-App.cmd")"
+  Write-Host "To update later, download the latest GitHub ZIP and run Install-AMERP.cmd again."
 
   if (-not $NoLaunch) {
     Write-Step "Starting AMERP"

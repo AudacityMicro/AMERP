@@ -15,6 +15,21 @@ For a new Windows computer:
 
 The installer downloads the latest AMERP from GitHub, installs Node.js LTS and Python through `winget` when they are missing, installs JavaScript and Python dependencies, builds the app, creates a desktop shortcut, and launches AMERP.
 
+The installer is safe to rerun. It refreshes the application folder and leaves the separate AMERP data folder alone.
+
+## Public Beta Checklist
+
+Before sharing a public beta:
+
+1. Run `npm.cmd run release:check`.
+2. Confirm Trivy completes with zero vulnerabilities for `pnpm-lock.yaml`.
+3. Confirm the production build completes and only the known Vite chunk-size warning remains.
+4. Install from a fresh GitHub ZIP with `Install-AMERP.cmd` on a clean Windows machine.
+5. Launch AMERP, choose a new data folder, create a job, add a part, and export a job traveler PDF.
+6. Create or open one material, Kanban card, inspection report, and NCR enough to confirm major navigation and PDF export paths.
+7. Reopen AMERP and confirm the data persists.
+8. Do not publish a GitHub release, tag, or package until the release audit says the branch is ready.
+
 For development:
 
 1. Run `Setup-AMERP.cmd` once.
@@ -120,7 +135,7 @@ The `cache/` folder is rebuildable and is not authoritative.
 
 ## Optional AI Features
 
-Kanban enrichment and image generation use the OpenAI API only when the user sets an API key in `Settings > AI` and manually runs an AI-assisted action or imports/refreshes a Kanban card URL. The key is local to the preferences JSON for this desktop app.
+Kanban enrichment, image generation, and drawing inspection extraction use the OpenAI API only when the user sets an API key in `Settings > AI` and manually runs an AI-assisted action. The key is stored in the selected AMERP data folder at `config/ai-settings.json`.
 
 Core ERP records do not depend on cloud services.
 
@@ -129,11 +144,18 @@ Core ERP records do not depend on cloud services.
 Before sharing a build, run:
 
 ```powershell
-node --check electron/backend/erp.cjs
-node --check electron/main.cjs
-node --check electron/preload.cjs
-python -m py_compile scripts/import_materials_sqlite.py
-node node_modules/vite/bin/vite.js build
+npm.cmd run release:check
+```
+
+For faster local iteration, the release check is split into:
+
+```powershell
+npm.cmd run check:syntax
+npm.cmd run check:python
+npm.cmd test
+npm.cmd run audit:deps
+npm.cmd run secret:scan
+npm.cmd run build
 ```
 
 `node_modules/` and `dist/` are intentionally ignored by git. A receiving computer should run `Install-AMERP.cmd` for a full install or `Setup-AMERP.cmd` if the repository is already in its final folder.

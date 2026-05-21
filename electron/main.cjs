@@ -99,9 +99,222 @@ function resolvePythonPath() {
   return "python";
 }
 
+function configureUserDataOverride() {
+  if (!process.env.AMERP_USER_DATA_FOLDER) {
+    return;
+  }
+  app.setPath("userData", path.resolve(process.env.AMERP_USER_DATA_FOLDER));
+}
+
+configureUserDataOverride();
+
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 if (!hasSingleInstanceLock) {
   app.quit();
+}
+
+function isPlainObject(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function jsonSize(value) {
+  try {
+    return Buffer.byteLength(JSON.stringify(value), "utf8");
+  } catch {
+    return Infinity;
+  }
+}
+
+function requireText(value, label, { maxLength = 250, allowEmpty = false } = {}) {
+  if (typeof value !== "string") {
+    throw new Error(`${label} must be text.`);
+  }
+  if (!allowEmpty && !value.trim()) {
+    throw new Error(`${label} is required.`);
+  }
+  if (value.length > maxLength) {
+    throw new Error(`${label} is too long.`);
+  }
+  if (value.includes("\0") || /[\u0000-\u001f\u007f]/.test(value)) {
+    throw new Error(`${label} contains invalid characters.`);
+  }
+  return value;
+}
+
+function requireId(value, label = "ID") {
+  const text = requireText(value, label, { maxLength: 250 });
+  if (text.includes("/") || text.includes("\\") || text.includes("..")) {
+    throw new Error(`${label} is not a valid record identifier.`);
+  }
+  return text;
+}
+
+function requireOptionalPath(value, label = "path") {
+  if (value == null || value === "") {
+    return value;
+  }
+  return requireText(value, label, { maxLength: 2000 });
+}
+
+function requireOptionalFilePathArray(value, label = "file paths") {
+  if (value == null) {
+    return value;
+  }
+  if (!Array.isArray(value)) {
+    throw new Error(`${label} must be a list of file paths.`);
+  }
+  if (value.length > 100) {
+    throw new Error(`${label} contains too many files.`);
+  }
+  for (const [index, filePath] of value.entries()) {
+    requireOptionalPath(filePath, `${label}[${index}]`);
+  }
+  return value;
+}
+
+function requireOptionalObject(value, label = "options", { maxBytes = 5 * 1024 * 1024 } = {}) {
+  if (value == null) {
+    return value;
+  }
+  if (!isPlainObject(value)) {
+    throw new Error(`${label} must be an object.`);
+  }
+  if (jsonSize(value) > maxBytes) {
+    throw new Error(`${label} is too large.`);
+  }
+  return value;
+}
+
+function requireRecord(value, label = "record") {
+  return requireOptionalObject(value, label);
+}
+
+function requireUrl(value, label = "URL") {
+  const text = requireText(value, label, { maxLength: 4000 });
+  let parsed;
+  try {
+    parsed = new URL(text);
+  } catch {
+    throw new Error(`${label} is not a valid URL.`);
+  }
+  if (!["http:", "https:"].includes(parsed.protocol)) {
+    throw new Error(`${label} must use http or https.`);
+  }
+  return text;
+}
+
+function requireNonNegativeInteger(value, label = "value") {
+  const number = Number(value);
+  if (!Number.isInteger(number) || number < 0) {
+    throw new Error(`${label} must be a non-negative integer.`);
+  }
+  return value;
+}
+
+const IPC_ARG_RULES = {
+  "save-preferences": [requireRecord],
+  "list-nonconformances": [requireOptionalObject],
+  "load-nonconformance": [requireId, requireOptionalObject],
+  "save-nonconformance": [requireRecord],
+  "archive-nonconformance": [requireId],
+  "unarchive-nonconformance": [requireId],
+  "delete-nonconformance": [requireId],
+  "export-nonconformance-pdf": [requireId, requireOptionalPath],
+  "export-nonconformances-csv": [requireOptionalObject, requireOptionalPath],
+  "choose-nonconformance-attachments": [requireId],
+  "open-nonconformance-attachment": [requireId, requireId],
+  "open-nonconformance-attachment-revision": [requireId, requireId, requireNonNegativeInteger],
+  "archive-nonconformance-attachment": [requireId, requireId],
+  "unarchive-nonconformance-attachment": [requireId, requireId],
+  "revise-nonconformance-attachment": [requireId, requireId],
+  "delete-nonconformance-attachment": [requireId, requireId],
+  "load-kanban-card": [requireId, requireOptionalObject],
+  "save-kanban-card": [requireRecord],
+  "archive-kanban-card": [requireId],
+  "unarchive-kanban-card": [requireId],
+  "delete-kanban-card": [requireId],
+  "choose-kanban-photo": [(value) => (value == null || value === "" ? value : requireId(value, "card ID"))],
+  "import-kanban-from-url": [requireUrl],
+  "ai-fill-kanban-card": [requireRecord],
+  "generate-kanban-image": [requireRecord],
+  "export-kanban-pdf": [requireId, requireOptionalPath, (value) => (value == null || value === "" ? value : requireId(value, "size ID")), requireOptionalObject],
+  "export-material-pdf": [requireId, requireOptionalPath, (value) => (value == null || value === "" ? value : requireId(value, "size ID")), requireOptionalObject],
+  "save-customer": [requireRecord],
+  "load-job": [requireId, requireOptionalObject],
+  "save-job": [requireRecord],
+  "archive-job": [requireId],
+  "unarchive-job": [requireId],
+  "delete-job": [requireId],
+  "import-subtract-purchase-orders": [requireOptionalFilePathArray],
+  "import-xometry-purchase-orders": [requireOptionalFilePathArray],
+  "import-xometry-travelers": [requireId, requireOptionalFilePathArray],
+  "choose-job-documents": [requireId],
+  "choose-part-documents": [requireId, requireId],
+  "open-job-document": [requireId, requireId],
+  "open-part-document": [requireId, requireId, requireId],
+  "open-job-document-revision": [requireId, requireId, requireNonNegativeInteger],
+  "open-part-document-revision": [requireId, requireId, requireId, requireNonNegativeInteger],
+  "archive-job-document": [requireId, requireId],
+  "archive-part-document": [requireId, requireId, requireId],
+  "unarchive-job-document": [requireId, requireId],
+  "unarchive-part-document": [requireId, requireId, requireId],
+  "delete-job-document": [requireId, requireId],
+  "delete-part-document": [requireId, requireId, requireId],
+  "revise-job-document": [requireId, requireId],
+  "revise-part-document": [requireId, requireId, requireId],
+  "choose-operation-images": [requireId, requireId, requireId],
+  "export-job-pdf": [requireId, requireOptionalPath],
+  "save-part-inspection": [requireId, requireId, requireRecord],
+  "extract-part-inspection-from-drawing": [requireId, requireId, requireOptionalObject],
+  "generate-part-ballooned-drawing-pdf": [requireId, requireId, requireId],
+  "export-part-inspection-pdf": [requireId, requireId, requireOptionalPath, (value) => (value == null || value === "" ? value : requireId(value, "report ID")), requireOptionalObject],
+  "load-material": [requireId, requireOptionalObject],
+  "save-material": [requireRecord],
+  "archive-material": [requireId],
+  "choose-material-attachments": [requireId],
+  "open-material-attachment": [requireId, requireId],
+  "open-material-attachment-revision": [requireId, requireId, requireNonNegativeInteger],
+  "archive-material-attachment": [requireId, requireId],
+  "unarchive-material-attachment": [requireId, requireId],
+  "revise-material-attachment": [requireId, requireId],
+  "delete-material-attachment": [requireId, requireId],
+  "load-instrument": [requireId, requireOptionalObject],
+  "save-instrument": [requireRecord],
+  "archive-instrument": [requireId],
+  "save-standard": [requireRecord],
+  "save-library": [requireRecord],
+  "delete-library": [requireId],
+  "save-template": [requireRecord],
+  "delete-template": [requireId],
+  "acquire-lock": [requireId, requireId, requireOptionalPath],
+  "release-lock": [requireId, requireId],
+  "read-audit-log": [(value) => (value == null ? value : requireNonNegativeInteger(value, "audit log limit"))]
+};
+
+function validateIpcArgs(channel, args) {
+  const rules = IPC_ARG_RULES[channel] || [];
+  if (rules.length && args.length > rules.length) {
+    throw new Error(`${channel} received too many arguments.`);
+  }
+  for (let index = 0; index < rules.length; index += 1) {
+    if (rules[index]) {
+      rules[index](args[index], `${channel} argument ${index + 1}`);
+    }
+  }
+  for (const [index, arg] of args.entries()) {
+    if (typeof arg === "string") {
+      requireText(arg, `${channel} argument ${index + 1}`, { maxLength: 10000, allowEmpty: true });
+    } else if (arg && typeof arg === "object" && jsonSize(arg) > 5 * 1024 * 1024) {
+      throw new Error(`${channel} argument ${index + 1} is too large.`);
+    }
+  }
+}
+
+function registerIpc(channel, handler) {
+  ipcMain.handle(channel, async (event, ...args) => {
+    validateIpcArgs(channel, args);
+    return handler(event, ...args);
+  });
 }
 
 function createWindow(windowTitle = "AMERP", iconPath = "") {
@@ -116,7 +329,7 @@ function createWindow(windowTitle = "AMERP", iconPath = "") {
       preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false
+      sandbox: true
     }
   });
 
@@ -156,11 +369,11 @@ app.whenReady().then(async () => {
     return net.fetch(pathToFileURL(targetPath).toString());
   });
 
-  ipcMain.handle("select-data-folder", () => backend.selectDataFolder(mainWindow));
-  ipcMain.handle("get-data-folder", () => backend.getDataFolder());
-  ipcMain.handle("load-workspace", () => backend.loadWorkspace());
-  ipcMain.handle("choose-brand-icon", () => backend.chooseBrandIcon(mainWindow));
-  ipcMain.handle("save-preferences", async (_event, preferences) => {
+  registerIpc("select-data-folder", () => backend.selectDataFolder(mainWindow));
+  registerIpc("get-data-folder", () => backend.getDataFolder());
+  registerIpc("load-workspace", () => backend.loadWorkspace());
+  registerIpc("choose-brand-icon", () => backend.chooseBrandIcon(mainWindow));
+  registerIpc("save-preferences", async (_event, preferences) => {
     const saved = await backend.savePreferences(preferences);
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.setTitle(String(saved.windowTitle || saved.appTitle || "AMERP"));
@@ -176,106 +389,106 @@ app.whenReady().then(async () => {
     return saved;
   });
 
-  ipcMain.handle("list-jobs", () => backend.listJobSummaries());
-  ipcMain.handle("list-nonconformances", (_event, filters) => backend.listNonconformances(filters || {}));
-  ipcMain.handle("load-nonconformance", (_event, id, options) => backend.loadNonconformance(id, options || {}));
-  ipcMain.handle("save-nonconformance", (_event, record) => backend.saveNonconformance(record));
-  ipcMain.handle("archive-nonconformance", (_event, id) => backend.archiveNonconformance(id));
-  ipcMain.handle("unarchive-nonconformance", (_event, id) => backend.unarchiveNonconformance(id));
-  ipcMain.handle("delete-nonconformance", (_event, id) => backend.deleteNonconformance(id));
-  ipcMain.handle("export-nonconformance-pdf", (_event, id, destinationPath) => backend.exportNonconformancePdf(id, destinationPath));
-  ipcMain.handle("export-nonconformances-csv", (_event, filters, destinationPath) => backend.exportNonconformancesCsv(filters || {}, destinationPath));
-  ipcMain.handle("choose-nonconformance-attachments", (_event, id) => backend.chooseNonconformanceAttachments(id, mainWindow));
-  ipcMain.handle("open-nonconformance-attachment", (_event, id, attachmentId) => backend.openNonconformanceAttachment(id, attachmentId));
-  ipcMain.handle("open-nonconformance-attachment-revision", (_event, id, attachmentId, revisionIndex) => backend.openNonconformanceAttachmentRevision(id, attachmentId, revisionIndex));
-  ipcMain.handle("archive-nonconformance-attachment", (_event, id, attachmentId) => backend.archiveNonconformanceAttachment(id, attachmentId));
-  ipcMain.handle("unarchive-nonconformance-attachment", (_event, id, attachmentId) => backend.unarchiveNonconformanceAttachment(id, attachmentId));
-  ipcMain.handle("revise-nonconformance-attachment", (_event, id, attachmentId) => backend.reviseNonconformanceAttachment(id, attachmentId, mainWindow));
-  ipcMain.handle("delete-nonconformance-attachment", (_event, id, attachmentId) => backend.deleteNonconformanceAttachment(id, attachmentId));
-  ipcMain.handle("generate-next-nonconformance-number", () => backend.generateNextNonconformanceNumber());
-  ipcMain.handle("list-kanban-cards", () => backend.listKanbanCards());
-  ipcMain.handle("load-kanban-card", (_event, id, options) => backend.loadKanbanCard(id, options || {}));
-  ipcMain.handle("save-kanban-card", (_event, card) => backend.saveKanbanCard(card));
-  ipcMain.handle("archive-kanban-card", (_event, id) => backend.archiveKanbanCard(id));
-  ipcMain.handle("unarchive-kanban-card", (_event, id) => backend.unarchiveKanbanCard(id));
-  ipcMain.handle("delete-kanban-card", (_event, id) => backend.deleteKanbanCard(id));
-  ipcMain.handle("choose-kanban-photo", (_event, cardId) => backend.chooseKanbanPhoto(cardId, mainWindow));
-  ipcMain.handle("import-kanban-from-url", (_event, url) => backend.importKanbanFromUrl(url));
-ipcMain.handle("ai-fill-kanban-card", (_event, card) => backend.aiFillKanbanCard(card));
-ipcMain.handle("generate-kanban-image", (_event, card) => backend.generateKanbanImage(card));
-ipcMain.handle("export-kanban-pdf", (_event, cardId, destinationPath, sizeId, options) => backend.exportKanbanPdf(cardId, destinationPath, sizeId, options));
-  ipcMain.handle("export-material-pdf", (_event, materialId, destinationPath, sizeId, options) => backend.exportMaterialPdf(materialId, destinationPath, sizeId, options));
-  ipcMain.handle("generate-next-job-number", () => backend.generateNextJobNumber());
-  ipcMain.handle("generate-next-kanban-inventory-number", () => backend.generateNextKanbanInventoryNumber());
-  ipcMain.handle("list-customers", () => backend.listCustomers());
-  ipcMain.handle("save-customer", (_event, customer) => backend.saveCustomer(customer));
-  ipcMain.handle("load-job", (_event, id, options) => backend.loadJob(id, options || {}));
-  ipcMain.handle("save-job", (_event, job) => backend.saveJob(job));
-  ipcMain.handle("archive-job", (_event, id) => backend.archiveJob(id));
-  ipcMain.handle("unarchive-job", (_event, id) => backend.unarchiveJob(id));
-  ipcMain.handle("delete-job", (_event, id) => backend.deleteJob(id));
-  ipcMain.handle("create-job-from-fusion", () => backend.createJobFromFusionImport(mainWindow));
-  ipcMain.handle("import-subtract-purchase-orders", (_event, filePaths) => backend.importSubtractPurchaseOrders(filePaths || null, mainWindow));
-  ipcMain.handle("import-xometry-purchase-orders", (_event, filePaths) => backend.importXometryPurchaseOrders(filePaths || null, mainWindow));
-  ipcMain.handle("import-xometry-travelers", (_event, jobId, filePaths) => backend.importXometryTravelers(jobId, filePaths || null, mainWindow));
-ipcMain.handle("choose-job-documents", (_event, jobId) => backend.chooseJobDocuments(jobId, mainWindow));
-ipcMain.handle("choose-part-documents", (_event, jobId, partId) => backend.choosePartDocuments(jobId, partId, mainWindow));
-ipcMain.handle("open-job-document", (_event, jobId, documentId) => backend.openJobDocument(jobId, documentId));
-ipcMain.handle("open-part-document", (_event, jobId, partId, documentId) => backend.openPartDocument(jobId, partId, documentId));
-ipcMain.handle("open-job-document-revision", (_event, jobId, documentId, revisionIndex) => backend.openJobDocumentRevision(jobId, documentId, revisionIndex));
-ipcMain.handle("open-part-document-revision", (_event, jobId, partId, documentId, revisionIndex) => backend.openPartDocumentRevision(jobId, partId, documentId, revisionIndex));
-ipcMain.handle("archive-job-document", (_event, jobId, documentId) => backend.archiveJobDocument(jobId, documentId));
-ipcMain.handle("archive-part-document", (_event, jobId, partId, documentId) => backend.archivePartDocument(jobId, partId, documentId));
-ipcMain.handle("unarchive-job-document", (_event, jobId, documentId) => backend.unarchiveJobDocument(jobId, documentId));
-ipcMain.handle("unarchive-part-document", (_event, jobId, partId, documentId) => backend.unarchivePartDocument(jobId, partId, documentId));
-ipcMain.handle("delete-job-document", (_event, jobId, documentId) => backend.deleteJobDocument(jobId, documentId));
-ipcMain.handle("delete-part-document", (_event, jobId, partId, documentId) => backend.deletePartDocument(jobId, partId, documentId));
-ipcMain.handle("revise-job-document", (_event, jobId, documentId) => backend.reviseJobDocument(jobId, documentId, mainWindow));
-ipcMain.handle("revise-part-document", (_event, jobId, partId, documentId) => backend.revisePartDocument(jobId, partId, documentId, mainWindow));
-  ipcMain.handle("choose-operation-images", (_event, jobId, partId, operationId) => backend.chooseOperationImages(jobId, partId, operationId, mainWindow));
-  ipcMain.handle("export-job-pdf", (_event, jobId, destinationPath) => backend.exportJobPdf(jobId, destinationPath));
-  ipcMain.handle("generate-next-inspection-report-number", () => backend.generateNextInspectionReportNumber());
-  ipcMain.handle("save-part-inspection", (_event, jobId, partId, inspection) => backend.savePartInspection(jobId, partId, inspection));
-  ipcMain.handle("extract-part-inspection-from-drawing", (_event, jobId, partId, source) => backend.extractPartInspectionFromDrawing(jobId, partId, source || {}, mainWindow));
-  ipcMain.handle("generate-part-ballooned-drawing-pdf", (_event, jobId, partId, drawingDocumentId) => backend.generatePartBalloonedDrawingPdf(jobId, partId, drawingDocumentId));
-  ipcMain.handle("export-part-inspection-pdf", (_event, jobId, partId, destinationPath, reportId, options) => backend.exportPartInspectionPdf(jobId, partId, destinationPath, reportId, options || {}));
+  registerIpc("list-jobs", () => backend.listJobSummaries());
+  registerIpc("list-nonconformances", (_event, filters) => backend.listNonconformances(filters || {}));
+  registerIpc("load-nonconformance", (_event, id, options) => backend.loadNonconformance(id, options || {}));
+  registerIpc("save-nonconformance", (_event, record) => backend.saveNonconformance(record));
+  registerIpc("archive-nonconformance", (_event, id) => backend.archiveNonconformance(id));
+  registerIpc("unarchive-nonconformance", (_event, id) => backend.unarchiveNonconformance(id));
+  registerIpc("delete-nonconformance", (_event, id) => backend.deleteNonconformance(id));
+  registerIpc("export-nonconformance-pdf", (_event, id, destinationPath) => backend.exportNonconformancePdf(id, destinationPath));
+  registerIpc("export-nonconformances-csv", (_event, filters, destinationPath) => backend.exportNonconformancesCsv(filters || {}, destinationPath));
+  registerIpc("choose-nonconformance-attachments", (_event, id) => backend.chooseNonconformanceAttachments(id, mainWindow));
+  registerIpc("open-nonconformance-attachment", (_event, id, attachmentId) => backend.openNonconformanceAttachment(id, attachmentId));
+  registerIpc("open-nonconformance-attachment-revision", (_event, id, attachmentId, revisionIndex) => backend.openNonconformanceAttachmentRevision(id, attachmentId, revisionIndex));
+  registerIpc("archive-nonconformance-attachment", (_event, id, attachmentId) => backend.archiveNonconformanceAttachment(id, attachmentId));
+  registerIpc("unarchive-nonconformance-attachment", (_event, id, attachmentId) => backend.unarchiveNonconformanceAttachment(id, attachmentId));
+  registerIpc("revise-nonconformance-attachment", (_event, id, attachmentId) => backend.reviseNonconformanceAttachment(id, attachmentId, mainWindow));
+  registerIpc("delete-nonconformance-attachment", (_event, id, attachmentId) => backend.deleteNonconformanceAttachment(id, attachmentId));
+  registerIpc("generate-next-nonconformance-number", () => backend.generateNextNonconformanceNumber());
+  registerIpc("list-kanban-cards", () => backend.listKanbanCards());
+  registerIpc("load-kanban-card", (_event, id, options) => backend.loadKanbanCard(id, options || {}));
+  registerIpc("save-kanban-card", (_event, card) => backend.saveKanbanCard(card));
+  registerIpc("archive-kanban-card", (_event, id) => backend.archiveKanbanCard(id));
+  registerIpc("unarchive-kanban-card", (_event, id) => backend.unarchiveKanbanCard(id));
+  registerIpc("delete-kanban-card", (_event, id) => backend.deleteKanbanCard(id));
+  registerIpc("choose-kanban-photo", (_event, cardId) => backend.chooseKanbanPhoto(cardId, mainWindow));
+  registerIpc("import-kanban-from-url", (_event, url) => backend.importKanbanFromUrl(url));
+registerIpc("ai-fill-kanban-card", (_event, card) => backend.aiFillKanbanCard(card));
+registerIpc("generate-kanban-image", (_event, card) => backend.generateKanbanImage(card));
+registerIpc("export-kanban-pdf", (_event, cardId, destinationPath, sizeId, options) => backend.exportKanbanPdf(cardId, destinationPath, sizeId, options));
+  registerIpc("export-material-pdf", (_event, materialId, destinationPath, sizeId, options) => backend.exportMaterialPdf(materialId, destinationPath, sizeId, options));
+  registerIpc("generate-next-job-number", () => backend.generateNextJobNumber());
+  registerIpc("generate-next-kanban-inventory-number", () => backend.generateNextKanbanInventoryNumber());
+  registerIpc("list-customers", () => backend.listCustomers());
+  registerIpc("save-customer", (_event, customer) => backend.saveCustomer(customer));
+  registerIpc("load-job", (_event, id, options) => backend.loadJob(id, options || {}));
+  registerIpc("save-job", (_event, job) => backend.saveJob(job));
+  registerIpc("archive-job", (_event, id) => backend.archiveJob(id));
+  registerIpc("unarchive-job", (_event, id) => backend.unarchiveJob(id));
+  registerIpc("delete-job", (_event, id) => backend.deleteJob(id));
+  registerIpc("create-job-from-fusion", () => backend.createJobFromFusionImport(mainWindow));
+  registerIpc("import-subtract-purchase-orders", (_event, filePaths) => backend.importSubtractPurchaseOrders(filePaths || null, mainWindow));
+  registerIpc("import-xometry-purchase-orders", (_event, filePaths) => backend.importXometryPurchaseOrders(filePaths || null, mainWindow));
+  registerIpc("import-xometry-travelers", (_event, jobId, filePaths) => backend.importXometryTravelers(jobId, filePaths || null, mainWindow));
+registerIpc("choose-job-documents", (_event, jobId) => backend.chooseJobDocuments(jobId, mainWindow));
+registerIpc("choose-part-documents", (_event, jobId, partId) => backend.choosePartDocuments(jobId, partId, mainWindow));
+registerIpc("open-job-document", (_event, jobId, documentId) => backend.openJobDocument(jobId, documentId));
+registerIpc("open-part-document", (_event, jobId, partId, documentId) => backend.openPartDocument(jobId, partId, documentId));
+registerIpc("open-job-document-revision", (_event, jobId, documentId, revisionIndex) => backend.openJobDocumentRevision(jobId, documentId, revisionIndex));
+registerIpc("open-part-document-revision", (_event, jobId, partId, documentId, revisionIndex) => backend.openPartDocumentRevision(jobId, partId, documentId, revisionIndex));
+registerIpc("archive-job-document", (_event, jobId, documentId) => backend.archiveJobDocument(jobId, documentId));
+registerIpc("archive-part-document", (_event, jobId, partId, documentId) => backend.archivePartDocument(jobId, partId, documentId));
+registerIpc("unarchive-job-document", (_event, jobId, documentId) => backend.unarchiveJobDocument(jobId, documentId));
+registerIpc("unarchive-part-document", (_event, jobId, partId, documentId) => backend.unarchivePartDocument(jobId, partId, documentId));
+registerIpc("delete-job-document", (_event, jobId, documentId) => backend.deleteJobDocument(jobId, documentId));
+registerIpc("delete-part-document", (_event, jobId, partId, documentId) => backend.deletePartDocument(jobId, partId, documentId));
+registerIpc("revise-job-document", (_event, jobId, documentId) => backend.reviseJobDocument(jobId, documentId, mainWindow));
+registerIpc("revise-part-document", (_event, jobId, partId, documentId) => backend.revisePartDocument(jobId, partId, documentId, mainWindow));
+  registerIpc("choose-operation-images", (_event, jobId, partId, operationId) => backend.chooseOperationImages(jobId, partId, operationId, mainWindow));
+  registerIpc("export-job-pdf", (_event, jobId, destinationPath) => backend.exportJobPdf(jobId, destinationPath));
+  registerIpc("generate-next-inspection-report-number", () => backend.generateNextInspectionReportNumber());
+  registerIpc("save-part-inspection", (_event, jobId, partId, inspection) => backend.savePartInspection(jobId, partId, inspection));
+  registerIpc("extract-part-inspection-from-drawing", (_event, jobId, partId, source) => backend.extractPartInspectionFromDrawing(jobId, partId, source || {}, mainWindow));
+  registerIpc("generate-part-ballooned-drawing-pdf", (_event, jobId, partId, drawingDocumentId) => backend.generatePartBalloonedDrawingPdf(jobId, partId, drawingDocumentId));
+  registerIpc("export-part-inspection-pdf", (_event, jobId, partId, destinationPath, reportId, options) => backend.exportPartInspectionPdf(jobId, partId, destinationPath, reportId, options || {}));
 
-  ipcMain.handle("list-materials", () => backend.listMaterials());
-  ipcMain.handle("load-material", (_event, id, options) => backend.loadMaterial(id, options || {}));
-  ipcMain.handle("save-material", (_event, material) => backend.saveMaterial(material));
-  ipcMain.handle("archive-material", (_event, id) => backend.archiveMaterial(id));
-  ipcMain.handle("generate-material-serial", () => backend.generateMaterialSerial());
-  ipcMain.handle("choose-material-attachments", (_event, materialId) => backend.chooseMaterialAttachments(materialId, mainWindow));
-  ipcMain.handle("open-material-attachment", (_event, materialId, attachmentId) => backend.openMaterialAttachment(materialId, attachmentId));
-  ipcMain.handle("open-material-attachment-revision", (_event, materialId, attachmentId, revisionIndex) => backend.openMaterialAttachmentRevision(materialId, attachmentId, revisionIndex));
-  ipcMain.handle("archive-material-attachment", (_event, materialId, attachmentId) => backend.archiveMaterialAttachment(materialId, attachmentId));
-  ipcMain.handle("unarchive-material-attachment", (_event, materialId, attachmentId) => backend.unarchiveMaterialAttachment(materialId, attachmentId));
-  ipcMain.handle("revise-material-attachment", (_event, materialId, attachmentId) => backend.reviseMaterialAttachment(materialId, attachmentId, mainWindow));
-  ipcMain.handle("delete-material-attachment", (_event, materialId, attachmentId) => backend.deleteMaterialAttachment(materialId, attachmentId));
+  registerIpc("list-materials", () => backend.listMaterials());
+  registerIpc("load-material", (_event, id, options) => backend.loadMaterial(id, options || {}));
+  registerIpc("save-material", (_event, material) => backend.saveMaterial(material));
+  registerIpc("archive-material", (_event, id) => backend.archiveMaterial(id));
+  registerIpc("generate-material-serial", () => backend.generateMaterialSerial());
+  registerIpc("choose-material-attachments", (_event, materialId) => backend.chooseMaterialAttachments(materialId, mainWindow));
+  registerIpc("open-material-attachment", (_event, materialId, attachmentId) => backend.openMaterialAttachment(materialId, attachmentId));
+  registerIpc("open-material-attachment-revision", (_event, materialId, attachmentId, revisionIndex) => backend.openMaterialAttachmentRevision(materialId, attachmentId, revisionIndex));
+  registerIpc("archive-material-attachment", (_event, materialId, attachmentId) => backend.archiveMaterialAttachment(materialId, attachmentId));
+  registerIpc("unarchive-material-attachment", (_event, materialId, attachmentId) => backend.unarchiveMaterialAttachment(materialId, attachmentId));
+  registerIpc("revise-material-attachment", (_event, materialId, attachmentId) => backend.reviseMaterialAttachment(materialId, attachmentId, mainWindow));
+  registerIpc("delete-material-attachment", (_event, materialId, attachmentId) => backend.deleteMaterialAttachment(materialId, attachmentId));
 
-  ipcMain.handle("list-instruments", () => backend.listInstruments());
-  ipcMain.handle("load-instrument", (_event, id, options) => backend.loadInstrument(id, options || {}));
-  ipcMain.handle("save-instrument", (_event, payload) => backend.saveInstrument(payload));
-  ipcMain.handle("archive-instrument", (_event, id) => backend.archiveInstrument(id));
-  ipcMain.handle("list-standards", () => backend.listStandards());
-  ipcMain.handle("save-standard", (_event, standard) => backend.saveStandard(standard));
+  registerIpc("list-instruments", () => backend.listInstruments());
+  registerIpc("load-instrument", (_event, id, options) => backend.loadInstrument(id, options || {}));
+  registerIpc("save-instrument", (_event, payload) => backend.saveInstrument(payload));
+  registerIpc("archive-instrument", (_event, id) => backend.archiveInstrument(id));
+  registerIpc("list-standards", () => backend.listStandards());
+  registerIpc("save-standard", (_event, standard) => backend.saveStandard(standard));
 
-  ipcMain.handle("load-libraries", () => backend.loadLibraries());
-  ipcMain.handle("save-library", (_event, library) => backend.saveLibrary(library));
-  ipcMain.handle("delete-library", (_event, name) => backend.deleteLibrary(name));
-  ipcMain.handle("load-templates", () => backend.loadTemplates());
-  ipcMain.handle("save-template", (_event, template) => backend.saveTemplate(template));
-  ipcMain.handle("delete-template", (_event, id) => backend.deleteTemplate(id));
+  registerIpc("load-libraries", () => backend.loadLibraries());
+  registerIpc("save-library", (_event, library) => backend.saveLibrary(library));
+  registerIpc("delete-library", (_event, name) => backend.deleteLibrary(name));
+  registerIpc("load-templates", () => backend.loadTemplates());
+  registerIpc("save-template", (_event, template) => backend.saveTemplate(template));
+  registerIpc("delete-template", (_event, id) => backend.deleteTemplate(id));
 
-  ipcMain.handle("import-legacy-setup", () => backend.importLegacySetupSheetData(mainWindow));
-  ipcMain.handle("import-legacy-materials", () => backend.importLegacyMaterialsData(mainWindow));
-  ipcMain.handle("import-legacy-metrology", () => backend.importLegacyMetrologyData(mainWindow));
+  registerIpc("import-legacy-setup", () => backend.importLegacySetupSheetData(mainWindow));
+  registerIpc("import-legacy-materials", () => backend.importLegacyMaterialsData(mainWindow));
+  registerIpc("import-legacy-metrology", () => backend.importLegacyMetrologyData(mainWindow));
 
-  ipcMain.handle("acquire-lock", (_event, kind, id, recordPath) => backend.acquireLock(kind, id, recordPath));
-  ipcMain.handle("release-lock", (_event, kind, id) => backend.releaseLock(kind, id));
-  ipcMain.handle("release-all-locks", () => backend.releaseAllLocksForCurrentOwner());
-  ipcMain.handle("rebuild-index", () => backend.rebuildIndex());
-  ipcMain.handle("read-audit-log", (_event, limit) => backend.readAuditLog(limit || 200));
+  registerIpc("acquire-lock", (_event, kind, id, recordPath) => backend.acquireLock(kind, id, recordPath));
+  registerIpc("release-lock", (_event, kind, id) => backend.releaseLock(kind, id));
+  registerIpc("release-all-locks", () => backend.releaseAllLocksForCurrentOwner());
+  registerIpc("rebuild-index", () => backend.rebuildIndex());
+  registerIpc("read-audit-log", (_event, limit) => backend.readAuditLog(limit || 200));
 
   await backend.ensureDataFolderAtStartup(mainWindow);
   const preferences = await backend.loadPreferences();

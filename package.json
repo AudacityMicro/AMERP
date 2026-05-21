@@ -8,7 +8,13 @@
   "scripts": {
     "dev": "Start-Dev.cmd",
     "build": "Build-App.cmd",
-    "start": "Start-App.cmd"
+    "start": "Start-App.cmd",
+    "check:syntax": "node scripts/check-syntax.cjs",
+    "check:python": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-python.ps1",
+    "test": "node --test tests/*.test.cjs",
+    "audit:deps": "npx --yes pnpm@10.33.2 audit --prod",
+    "secret:scan": "node scripts/secret-scan.cjs",
+    "release:check": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/release-check.ps1"
   },
   "dependencies": {
     "@vitejs/plugin-react": "^5.0.0",

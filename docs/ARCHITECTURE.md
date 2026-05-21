@@ -98,7 +98,7 @@ The search index under `cache/` is rebuildable and disposable. Locks under `lock
 - metrology dropdown options
 - Kanban print sizes and department colors
 - operation templates and reusable libraries
-- branding, title, tagline, icon, and OpenAI API key
+- branding, title, tagline, icon, and OpenAI API key stored in the selected data folder
 
 ## Repository Boundaries
 

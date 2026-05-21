@@ -146,18 +146,29 @@ Do not introduce live dual-write between old apps and AMERP.
 Before closing work, prefer:
 
 ```powershell
-node --check electron/backend/erp.cjs
-node --check electron/main.cjs
-node --check electron/preload.cjs
-python -m py_compile scripts/import_materials_sqlite.py
-node node_modules/vite/bin/vite.js build
+npm.cmd run check:syntax
+npm.cmd run check:python
+npm.cmd test
+npm.cmd run audit:deps
+npm.cmd run secret:scan
+npm.cmd run build
 ```
 
 If Electron runtime launch cannot be verified locally, state that clearly instead of claiming runtime validation.
 
+## Release Rules
+
+- Public beta readiness is gated by `npm.cmd run release:check`.
+- `release:check` must run Node syntax checks, Python compile checks, unit tests, dependency audit, secret scan, production build, and Trivy.
+- Do not create a tag, GitHub release, PR, or push release branches unless the user explicitly approves publishing.
+- Keep `Install-AMERP.cmd` / `Install-AMERP.ps1` as the official repo-ZIP beta install path unless the user approves a packaged/signed installer project.
+- Keep Electron security posture tight: `contextIsolation: true`, `nodeIntegration: false`, renderer sandbox enabled when compatible, CSP present, and risky IPC arguments validated before backend dispatch.
+- Use `AMERP_USER_DATA_FOLDER` only for isolated runtime smoke tests; normal users should not need it.
+- Do not commit `node_modules/`, `dist/`, `.smoke-data*`, `.tools/`, local ERP data folders, logs, generated customer PDFs, or generated release artifacts unless explicitly requested.
+
 ## Git And Data Hygiene
 
-- Do not commit `node_modules/`, `dist/`, `.smoke-data*`, local data folders, logs, or generated customer PDFs unless explicitly requested.
+- Do not commit `node_modules/`, `dist/`, `.smoke-data*`, `.tools/`, local data folders, logs, generated customer PDFs, or generated release artifacts unless explicitly requested.
 - Do not revert user changes unless explicitly instructed.
 - Do not run destructive git commands such as `git reset --hard` or `git checkout --` without explicit user approval.
 - When modifying mixed files, preserve unrelated user edits and stage only the intended paths.
