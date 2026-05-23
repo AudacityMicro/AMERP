@@ -25,18 +25,14 @@ This repository is a local-first `Electron + React` ERP for jobshops. Preserve t
   - Shared file and path helpers.
 - `electron/backend/defaults.cjs`
   - Seed templates, libraries, material constants, and default settings values.
+- `electron/backend/pdf-parsers.cjs`
+  - JavaScript Xometry/Subtract PDF parser helpers used by packaged imports.
 - `src/main.jsx`
   - Unified ERP UI, route state, print routes, inspection/NCR/Kanban screens, and report renderers.
 - `src/styles.css`
   - Main UI styling plus route-specific print styling.
 - `scripts/dev.mjs`
   - Vite + Electron development launcher.
-- `scripts/parse_xometry_travelers.py`
-  - Xometry traveler parser for in-job part-shell import.
-- `scripts/parse_xometry_purchase_orders.py`
-  - Xometry PO parser for new-job import.
-- `scripts/parse_subtract_purchase_orders.py`
-  - Subtract Manufacturing PO parser for new-job import.
 - `scripts/import_materials_sqlite.py`
   - SQLite reader used for legacy materials database import.
 
@@ -49,7 +45,7 @@ This repository is a local-first `Electron + React` ERP for jobshops. Preserve t
 - `Start-Dev.cmd` starts Vite and Electron for development.
 - `Build-App.cmd` rebuilds the renderer bundle.
 
-The scripts prefer the Codex bundled Node runtime when present, then fall back to installed Node.js on `PATH`. The installer does not require Git; it downloads the GitHub ZIP directly. Python plus `pypdf` are required for PDF import parsers.
+The scripts prefer the Codex bundled Node runtime when present, then fall back to installed Node.js on `PATH`. The installer does not require Git; it downloads the GitHub ZIP directly. Xometry/Subtract PDF imports are JavaScript-backed. Python remains installed for the legacy Materials-Database SQLite import helper.
 
 ## Domain Model
 
@@ -161,14 +157,19 @@ If Electron runtime launch cannot be verified locally, state that clearly instea
 - Public beta readiness is gated by `npm.cmd run release:check`.
 - `release:check` must run Node syntax checks, Python compile checks, unit tests, dependency audit, secret scan, production build, and Trivy.
 - Do not create a tag, GitHub release, PR, or push release branches unless the user explicitly approves publishing.
-- Keep `Install-AMERP.cmd` / `Install-AMERP.ps1` as the official repo-ZIP beta install path unless the user approves a packaged/signed installer project.
+- Keep `Install-AMERP.cmd` / `Install-AMERP.ps1` working as the source/repo-ZIP install path.
+- Packaged beta installers are built with `electron-builder` and GitHub Actions. Release workflow outputs must stay draft-only until the user explicitly approves publishing.
+- Packaged app updates must be voluntary only through `Help -> Check for Updates...`; do not add startup/background update checks or automatic downloads.
+- Packaged app updates must not run `git pull`, dependency installs, or local rebuilds on user machines.
+- ERP data must remain outside the app install folder so app upgrades never overwrite business records.
+- Unsigned beta macOS releases should prefer a release-page/manual-download fallback until Apple signing/notarization is added.
 - Keep Electron security posture tight: `contextIsolation: true`, `nodeIntegration: false`, renderer sandbox enabled when compatible, CSP present, and risky IPC arguments validated before backend dispatch.
 - Use `AMERP_USER_DATA_FOLDER` only for isolated runtime smoke tests; normal users should not need it.
-- Do not commit `node_modules/`, `dist/`, `.smoke-data*`, `.tools/`, local ERP data folders, logs, generated customer PDFs, or generated release artifacts unless explicitly requested.
+- Do not commit `node_modules/`, `dist/`, `release/`, `.smoke-data*`, `.tools/`, local ERP data folders, logs, generated customer PDFs, or generated release artifacts unless explicitly requested.
 
 ## Git And Data Hygiene
 
-- Do not commit `node_modules/`, `dist/`, `.smoke-data*`, `.tools/`, local data folders, logs, generated customer PDFs, or generated release artifacts unless explicitly requested.
+- Do not commit `node_modules/`, `dist/`, `release/`, `.smoke-data*`, `.tools/`, local data folders, logs, generated customer PDFs, or generated release artifacts unless explicitly requested.
 - Do not revert user changes unless explicitly instructed.
 - Do not run destructive git commands such as `git reset --hard` or `git checkout --` without explicit user approval.
 - When modifying mixed files, preserve unrelated user edits and stage only the intended paths.

@@ -6,6 +6,15 @@ The selected AMERP data folder is the source of truth. Business records are stor
 
 ## Handoff Quick Start
 
+Recommended public-beta path:
+
+1. Open the latest published GitHub Release.
+2. Download the Windows `AMERP-...-Setup.exe` or macOS `AMERP-...dmg` / `.zip`.
+3. Run the installer or open the DMG.
+4. Launch `AMERP` and choose an AMERP data folder on first use.
+
+The packaged app keeps ERP records outside the install folder, so updating AMERP does not overwrite business data.
+
 For a new Windows computer:
 
 1. Download AMERP from GitHub with `Code -> Download ZIP`.
@@ -13,9 +22,23 @@ For a new Windows computer:
 3. Double-click `Install-AMERP.cmd`.
 4. Use the new `AMERP` desktop shortcut.
 
-The installer downloads the latest AMERP from GitHub, installs Node.js LTS and Python through `winget` when they are missing, installs JavaScript and Python dependencies, builds the app, creates a desktop shortcut, and launches AMERP.
+The installer downloads the latest AMERP from GitHub, installs Node.js LTS and Python through `winget` when they are missing, installs JavaScript and legacy Python dependencies, builds the app, creates a desktop shortcut, and launches AMERP.
 
 The installer is safe to rerun. It refreshes the application folder and leaves the separate AMERP data folder alone.
+
+Packaged beta builds parse Xometry/Subtract PDF imports in JavaScript. The source installer still installs Python because the legacy Materials-Database SQLite import helper uses a Python script.
+
+## Packaged Beta Releases
+
+Packaged installers are produced by GitHub Actions from `.github/workflows/release.yml`.
+
+- Windows builds an unsigned NSIS one-click installer.
+- macOS builds unsigned DMG and ZIP artifacts.
+- Release jobs attach artifacts and update metadata to a draft GitHub Release.
+- Draft releases must be reviewed and manually published.
+- No app update check runs automatically on startup.
+
+In an installed packaged build, use `Help -> Check for Updates...` to voluntarily check GitHub Releases. The app shows release details before any download. macOS unsigned beta builds open the GitHub release page instead of pretending automatic installation is reliable. Source/developer runs report that packaged updates are only available in installed release builds.
 
 ## Public Beta Checklist
 
@@ -53,6 +76,10 @@ Package scripts are also available:
 - `npm start`
 - `npm run dev`
 - `npm run build`
+- `npm run pack`
+- `npm run dist:win`
+- `npm run dist:mac`
+- `npm run release:artifacts`
 
 The command files prefer a known Codex Node runtime when present, then fall back to installed Node.js on `PATH`. Git is not required for the installer because it downloads the GitHub ZIP directly.
 
@@ -147,6 +174,8 @@ Before sharing a build, run:
 npm.cmd run release:check
 ```
 
+Before publishing a packaged beta, also confirm the GitHub Actions draft release completes on Windows and macOS, then manually inspect the draft release assets before publishing.
+
 For faster local iteration, the release check is split into:
 
 ```powershell
@@ -163,7 +192,7 @@ npm.cmd run build
 ## Troubleshooting
 
 - If Electron is missing, run `Install-AMERP.cmd` or `Setup-AMERP.cmd`.
-- If Node.js or Python is missing and `winget` cannot install it automatically, install Node.js LTS from https://nodejs.org and Python from https://www.python.org/downloads/, then run `Install-AMERP.cmd` again.
+- If Node.js or Python is missing and `winget` cannot install it automatically, install Node.js LTS from https://nodejs.org and Python from https://www.python.org/downloads/, then run `Install-AMERP.cmd` again. Python is only needed for the legacy material database importer.
 - If built files are missing, run `Build-App.cmd`.
 - If the app reports a stale record lock, confirm no other AMERP instance is open, then reopen the app. Lock files live under the selected data folder in `locks/`.
 - If a PDF export fails, rebuild with `Build-App.cmd` and retry.

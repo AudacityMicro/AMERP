@@ -1,0 +1,65 @@
+appId: com.audacitymicro.amerp
+productName: AMERP
+copyright: Copyright (c) 2026 Audacity Micro
+
+directories:
+  output: release
+
+files:
+  - package.json
+  - dist/**
+  - electron/**
+  - scripts/*.py
+  - "!electron/**/*.map"
+  - "!**/*.log"
+  - "!**/.smoke-data*"
+  - "!**/node_modules/.cache/**"
+
+extraMetadata:
+  main: electron/main.cjs
+
+asar: true
+asarUnpack:
+  - scripts/*.py
+
+publish:
+  provider: github
+  owner: AudacityMicro
+  repo: AMERP
+  releaseType: prerelease
+
+win:
+  signAndEditExecutable: false
+  target:
+    - target: nsis
+      arch:
+        - x64
+  artifactName: AMERP-${version}-${os}-${arch}-Setup.${ext}
+  requestedExecutionLevel: asInvoker
+
+nsis:
+  oneClick: true
+  perMachine: false
+  allowElevation: false
+  allowToChangeInstallationDirectory: false
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: AMERP
+  deleteAppDataOnUninstall: false
+
+mac:
+  target:
+    - target: dmg
+      arch:
+        - universal
+    - target: zip
+      arch:
+        - universal
+  artifactName: AMERP-${version}-${os}-${arch}.${ext}
+  category: public.app-category.business
+  hardenedRuntime: false
+  gatekeeperAssess: false
+  identity: null
+
+dmg:
+  sign: false

@@ -1,145 +1,165 @@
 # Release Audit: AMERP 0.0.1-beta
 
-Generated: 2026-05-11T20:20:49-04:00
+Generated: 2026-05-23T17:25:00-04:00
 Branch: `main`
-HEAD: `280b931 Add ISO compliance feature toggle`
-Publishing status: no tag, release, push, PR, or GitHub publication was performed.
+Pre-audit HEAD: `6a67186 Improve AI drawing extraction workflow`
+Publishing status: no tag, release, PR, or GitHub publication was performed.
 
 ## Pass / Fail Summary
 
-Result: **Fail - not ready to publish yet**
+Result: **Pass for approval-gated beta source readiness**
 
-The branch is close, but it is not release-ready in its current state because the documented release gate, `npm.cmd run release:check`, failed in the default shell due to `trivy` not being visible on `PATH`. The same gate passed after manually adding the WinGet Trivy install directory to `PATH`, so this is an environment/script robustness issue rather than an application vulnerability finding.
+The current branch is ready to commit and push as the source for an unsigned `0.0.1-beta` beta release. Local release checks, dependency audit, secret scan, Trivy, production build, sample PDF parser smoke tests, and Windows NSIS packaging pass.
 
-Confidence level: **Medium**
+This audit does **not** publish the release. Before public publication, run the GitHub Actions release workflow, inspect the Windows and macOS artifacts attached to the draft release, and manually approve publishing.
 
-Confidence is supported by successful syntax checks, Python compile checks, unit tests, dependency audit, secret scan, production build, Trivy scan, and sandboxed Electron launch smoke. Confidence is limited because the release gate does not pass without a PATH workaround, the clean-machine installer smoke test was not run, and the current working tree contains uncommitted release-readiness changes.
+Confidence level: **Medium-High**
+
+Confidence is high for Windows/source readiness because the local gate and Windows package build pass. Confidence remains lower for macOS until the `macos-latest` GitHub Actions job produces and validates DMG/ZIP artifacts.
 
 ## Blocking Issues
 
-1. **Documented release gate fails in the default shell.** `npm.cmd run release:check` fails at the Trivy step because `trivy` is installed by WinGet but not visible on `PATH` to this shell. With `C:\Users\AJ\AppData\Local\Microsoft\WinGet\Packages\AquaSecurity.Trivy_Microsoft.Winget.Source_8wekyb3d8bbwe` added to `PATH`, the same command passes. Fix `scripts/release-check.ps1` to locate WinGet-installed Trivy or require/verify a refreshed shell before considering this release-ready.
-2. **Current branch has uncommitted/untracked release-readiness changes.** `main` matches `origin/main`, but the working tree contains modified and untracked files. Do not publish until these changes are intentionally committed and pushed.
-3. **Clean-machine installer smoke test has not been run.** Public beta distribution depends on `Install-AMERP.cmd`, so a fresh GitHub ZIP install on another Windows machine remains required before publishing.
+No local source or Windows packaging blockers remain.
+
+Approval-gated release tasks still required:
+
+1. Run the GitHub Actions release workflow for `v0.0.1-beta` or manually dispatch it for version `0.0.1-beta`.
+2. Inspect the draft GitHub Release artifacts before publishing.
+3. Validate macOS DMG/ZIP artifacts on a macOS machine.
+4. Decide whether the unsigned beta warnings and default Electron icon are acceptable for this beta.
+
+## Fixes Applied During Release Readiness
+
+- Aligned `package.json` to `0.0.1-beta`.
+- Added one-click packaging with `electron-builder` for Windows and macOS.
+- Added a GitHub Actions release workflow that creates/updates draft releases without automatically publishing.
+- Added voluntary packaged-app update checks under `Help -> Check for Updates...`; no background update checks run on startup.
+- Kept source installer scripts for ZIP/source installs.
+- Migrated Xometry traveler, Xometry PO, and Subtract PO PDF import parsing to JavaScript for packaged builds.
+- Kept Python only for the legacy Materials-Database SQLite importer.
+- Updated README and AGENTS release/deployment documentation.
+- Hardened release checks so Trivy is required and stale build outputs are ignored.
 
 ## Checks Run
 
 | Check | Result | Notes |
 |---|---:|---|
-| CI config discovery | Pass | No project `.github`, GitLab, Azure Pipelines, or Jenkins config found outside dependencies. Package scripts are the check source of truth. |
-| `npm.cmd run release:check` | Fail | Failed only because `trivy` was not visible on `PATH` in the default shell. Earlier steps passed. |
-| `npm.cmd run release:check` with WinGet Trivy path added | Pass | Full release gate passed. |
-| `npm.cmd run check:syntax` | Pass | Checked 11 Node `.cjs/.mjs` files. |
-| `npm.cmd run check:python` | Pass | Compiled 4 Python helper/parser files. |
-| `npm.cmd test` | Pass | 4 Node tests passed. |
+| CI config discovery | Pass | Found `.github/workflows/release.yml`. |
+| `npm.cmd run release:check` | Pass | Runs syntax, Python compile, unit tests, dependency audit, secret scan, production build, and Trivy. |
+| `npm.cmd run check:syntax` | Pass | Release gate reported 13 Node files checked. |
+| `npm.cmd run check:python` | Pass | Release gate compiled 4 legacy Python helper files. |
+| `npm.cmd test` | Pass | Release gate ran 7 Node tests, all passed. |
 | `npm.cmd run audit:deps` | Pass | `pnpm audit --prod` found no known vulnerabilities. |
-| `npm.cmd run secret:scan` | Pass | No high-confidence secrets found. |
-| `npm.cmd run build` | Pass | Vite production build succeeded. |
-| `git diff --check` | Pass | No whitespace errors. Git reported line-ending warnings only. |
-| Sandboxed Electron launch smoke | Pass | Process stayed alive for 8 seconds with isolated `AMERP_USER_DATA_FOLDER` and temporary data folder. |
-| Clean-machine install smoke | Not run | Required before public beta publish. |
+| `npm.cmd run secret:scan` | Pass | No high-confidence secrets found in current tracked files. |
+| `npm.cmd run build` | Pass | Vite build succeeded; known large chunk warning remains. |
+| `npm.cmd run dist:win` | Pass | Built unsigned NSIS installer and update metadata under ignored `release/`. |
+| `npm.cmd run dist:mac` | Not run locally | Requires macOS; covered by GitHub Actions workflow. |
+| Parser smoke tests | Pass | JS parsers read sample Xometry travelers, Xometry POs, Subtract PO, and rejected the invalid traveler download file. |
+| Lint/typecheck | Not applicable | No lint or TypeScript typecheck scripts are configured. |
 
-Build notes:
+Generated local Windows artifacts:
 
-- Vite still reports a large chunk warning for the main renderer bundle. This is not a blocker for beta but should be addressed later with code splitting.
-- npm reports pnpm-specific `.npmrc` config warnings when npm invokes scripts. This is non-blocking.
-- No packaged/signed Electron artifact process was detected. The intended beta path remains GitHub ZIP plus installer script.
+- `release/AMERP-0.0.1-beta-win-x64-Setup.exe` - 215,617,048 bytes
+- `release/AMERP-0.0.1-beta-win-x64-Setup.exe.blockmap`
+- `release/latest.yml`
 
-## Security / Secrets
+These artifacts are ignored by git and were not published.
 
-Secret scan result: **Pass**
+## Security And Secrets
 
-Scans performed:
+### Secret Scans
 
-- `scripts/secret-scan.cjs` against tracked files.
-- Manual filename scan for `.env`, private keys, certificates, and credential-like tracked files.
-- Manual working-tree regex scan excluding dependencies and build output.
-- Git history scan for high-confidence private-key/API-token patterns.
-- Trivy filesystem scan with vulnerability and secret scanning enabled.
+- Current tracked-file secret scan: **Pass**
+- Sensitive filename scan on tracked files: **Pass**
+- Sensitive filename scan in git history: **Pass**
+- Git history content scan for high-confidence token/key patterns: **Pass**
+- Trivy filesystem scan: **Pass**
 
-Findings:
+Trivy severity summary:
 
-- No tracked `.env`, key, certificate, or private-key files were found.
-- No high-confidence committed secrets were found.
-- The only broad regex false positive was `scripts/parse_subtract_purchase_orders.py`, where `token` is a local parsing variable.
-- Git history scan returned no high-confidence private key, OpenAI key, GitHub token, AWS key, or Slack token matches.
+| Severity | Count |
+|---|---:|
+| Critical | 0 |
+| High | 0 |
+| Medium | 0 |
+| Low | 0 |
+| Unknown | 0 |
 
-Trivy summary:
+### Electron Security Review
 
-- Version: `0.70.0`
-- Critical: 0
-- High: 0
-- Medium: 0
-- Low: 0
-- Unknown: 0
-- Target scanned: `pnpm-lock.yaml`
+- Main window uses `contextIsolation: true`, `nodeIntegration: false`, and `sandbox: true`.
+- Preload exposes a fixed `window.amerp` API and does not expose raw `ipcRenderer`.
+- Main-process IPC uses `registerIpc()` plus argument validation for IDs, paths, URLs, option objects, delete/archive/export calls, and object sizes before backend dispatch.
+- Custom `amerp://local/...` protocol resolves through `resolveInside(dataRoot, relativePath)`, constraining asset reads to the selected AMERP data root.
+- CSP is present in `index.html`; it blocks objects and forms. It intentionally allows local/dev connections, `amerp:`, file/blob/data assets, and `https:` image/connect paths needed for OpenAI/vendor workflows.
+- Updater behavior is voluntary only through `Help -> Check for Updates...`; no startup checks were found. `autoDownload` and `autoInstallOnAppQuit` are disabled.
+- macOS unsigned beta update flow opens the GitHub release page instead of pretending automatic installation is reliable.
 
-## Electron Security Review
+Security risks to track:
 
-Positive findings:
-
-- Main renderer has `contextIsolation: true`.
-- Main renderer has `nodeIntegration: false`.
-- Main renderer has `sandbox: true`.
-- `index.html` now has a CSP and the source title is `AMERP`.
-- IPC is registered through a validation wrapper in `electron/main.cjs`.
-- Production loads local `dist/index.html`.
-- Dev loading is local to `127.0.0.1`.
-- `amerp://local/...` asset serving uses `resolveInside` to constrain paths to the selected data root.
-- No auto-updater was detected.
-
-Risks / recommended hardening:
-
-- Hidden print/export windows in `electron/backend/erp.cjs` still use `sandbox: false`, although they keep `contextIsolation: true` and `nodeIntegration: false`. Prefer sandboxing these print windows too if compatible with PDF generation.
-- The preload API remains broad because the app exposes many local-first ERP operations. The IPC validation layer reduces risk, but a future capability-based split would be stronger.
-- CSP still allows `style-src 'unsafe-inline'` for current styling compatibility.
-- Kanban URL import and OpenAI features intentionally fetch remote content. Continue treating fetched content as untrusted and keep these actions user-controlled.
-- Export/open operations use `shell.openPath`; backend path checks and managed-copy behavior remain important for safety.
+- Hidden vendor URL rendering loads arbitrary product pages in a BrowserWindow with JavaScript enabled and `sandbox: false`, though `nodeIntegration` remains default-off and there is no preload. This is manual/user-initiated and used for scraping page HTML, but sandboxing or a stricter isolated session should be considered before a wider public release.
+- Print/export BrowserWindows use local app routes with `contextIsolation: true`, `nodeIntegration: false`, and `sandbox: false`. This is lower risk because they load local routes, but sandbox compatibility should be revisited.
+- The beta is unsigned. Users will see OS trust warnings, and update integrity depends on electron-builder metadata plus GitHub release integrity rather than code signing.
+- `gh` is installed but not authenticated in this environment, so a local draft release could not be created with the GitHub CLI.
 
 ## Product Readiness
 
-Scans performed:
+Product scan results:
 
-- `TODO|FIXME|HACK|debugger` scan excluding dependencies/build output.
-- Search for obvious unfinished strings, mock data markers, debug console calls, prompt/alert usage, and local dev URLs.
+- No `TODO`, `FIXME`, `HACK`, `debugger`, `not implemented`, `coming soon`, dummy data, or mock-data markers were found outside ignored/generated folders.
+- Placeholder matches were normal UI input placeholders and QR fallback classes.
+- Console logging matches were normal CLI script success output; no user-facing debug console dependency was found.
 
-Findings:
+Remaining beta risks:
 
-- No `TODO`, `FIXME`, `HACK`, or `debugger` markers were found.
-- No obvious `Not implemented`, `coming soon`, mock data, or dummy data markers were found.
-- `window.prompt` / `window.alert` remain in some NCR/report/error flows. This is not a release blocker but is less polished than custom dialogs.
-- `127.0.0.1` appears in dev-server tooling and CSP for Vite dev mode; this is expected.
-- Release notes are present at `docs/release-notes-0.0.1-beta.md`.
-
-Risky for end users:
-
-- The app should not be published until the installer has been tested from a fresh GitHub ZIP on a clean Windows machine.
-- OpenAI API key storage is local data-folder JSON by design; this should remain documented for beta users.
-- The current branch state is not committed, so a GitHub release from `origin/main` would not include the release-readiness changes.
+- Windows builder reports the default Electron icon is used. This is not a functional blocker but should be fixed before a polished public beta.
+- App and installer are unsigned. This is acceptable only if explicitly presented as an unsigned beta.
+- The legacy material SQLite importer still uses Python; core packaged app launch and Xometry/Subtract PDF imports no longer require Python.
+- Clean-machine smoke testing was not performed in this local audit run.
 
 ## Release Prep
 
-GitHub CLI is installed:
+No previous `v*` tag exists, so release notes should be generated from all commits on the branch. Current commit list:
 
-- `gh version 2.92.0`
+- Initial process documentation app (`58e8d65`)
+- Fix desktop launch and PDF pagination (`dcb5115`)
+- Build AMERP phase 1 baseline (`75c856a`)
+- Fix local run scripts (`0bb5303`)
+- Refine materials workflow and add autosave (`c227fb8`)
+- Disable alloy filter until a material family is selected (`d12be2a`)
+- Move operation templates into settings (`480b478`)
+- Tighten importer coverage and field mapping (`b75abfe`)
+- Refine operation layout and tooling visibility (`75cfa4d`)
+- Redesign Kanban print layouts and filters (`feeec25`)
+- Fix AMERP startup after traveler print refactor (`e5e386f`)
+- Align traveler operations with part-based print layout (`3d68ec8`)
+- Add settings-controlled module visibility (`a30e59e`)
+- Preserve local-only ERP architecture (`c273e33`)
+- Split inspection setup and results workflows (`7261cd5`)
+- Split inspection setup and results pages (`5beff55`)
+- Refine importer field mapping and coverage (`acba6c1`)
+- Refactor NCR report layout to match inspection format (`6cd8aa5`)
+- Prepare AMERP handoff build (`990accd`)
+- Add Windows installer for AMERP handoff (`91f6a65`)
+- Add ISO compliance feature toggle (`280b931`)
+- Improve AI drawing extraction workflow (`6a67186`)
 
-No draft release was created because:
+Draft GitHub release status:
 
-- The user explicitly said not to publish without approval.
-- The documented release gate failed in the default shell.
-- The working tree has uncommitted release-readiness changes.
+- `gh version`: available.
+- `gh auth status`: not logged in.
+- Draft release was **not created** because remote release publication requires approval and authentication.
 
-No git tags were found. Release notes should be generated from all current branch commits once the release-readiness changes are committed. A local release-notes draft already exists at `docs/release-notes-0.0.1-beta.md`.
+## Recommended Next Steps
 
-## Recommended Fixes
+1. Commit and push these release-readiness changes.
+2. Run the GitHub Actions release workflow to produce Windows and macOS artifacts in a draft release.
+3. Inspect and smoke-test the draft release artifacts.
+4. Publish the GitHub Release only after explicit approval.
+5. Add app icons and code signing before a non-beta public distribution.
 
-1. Update `scripts/release-check.ps1` so it can locate WinGet-installed Trivy or clearly instruct the user to restart/refresh PATH before failing.
-2. Rerun `npm.cmd run release:check` in a default shell and confirm it passes without manual PATH edits.
-3. Run the clean-machine `Install-AMERP.cmd` smoke test from a fresh GitHub ZIP.
-4. Commit and push the release-readiness changes intentionally before preparing a GitHub draft release.
-5. Consider enabling sandbox on print/export windows.
-6. Replace remaining `window.prompt` / `window.alert` flows with app-native dialogs in a later polish pass.
-7. Split the large renderer bundle after beta.
+## Decision
 
-## Final Assessment
+The branch is **ready to commit and push as the 0.0.1-beta release candidate source**.
 
-This branch is **not ready to publish today**. The app code and security checks are close, and the full gate passes with a Trivy PATH workaround, but release readiness requires the documented gate to pass as written, the current changes to be committed, and a clean-machine installer smoke test to pass.
+Do not publish the release until the draft artifacts have been generated, inspected, and explicitly approved.

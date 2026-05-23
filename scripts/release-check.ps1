@@ -13,6 +13,39 @@ function Invoke-Step {
   }
 }
 
+function Find-Trivy {
+  $command = Get-Command trivy -ErrorAction SilentlyContinue
+  if ($command) {
+    return $command.Source
+  }
+
+  $candidateRoots = @(
+    (Join-Path $env:LOCALAPPDATA "Microsoft\WinGet\Links"),
+    (Join-Path $env:LOCALAPPDATA "Microsoft\WindowsApps")
+  )
+  foreach ($root in $candidateRoots) {
+    if (-not $root -or -not (Test-Path $root)) {
+      continue
+    }
+    $candidate = Join-Path $root "trivy.exe"
+    if (Test-Path $candidate) {
+      return $candidate
+    }
+  }
+
+  $wingetPackages = Join-Path $env:LOCALAPPDATA "Microsoft\WinGet\Packages"
+  if (Test-Path $wingetPackages) {
+    $candidate = Get-ChildItem -Path $wingetPackages -Recurse -Filter trivy.exe -ErrorAction SilentlyContinue |
+      Where-Object { $_.FullName -match "AquaSecurity\.Trivy" } |
+      Select-Object -First 1
+    if ($candidate) {
+      return $candidate.FullName
+    }
+  }
+
+  return $null
+}
+
 $root = Resolve-Path (Join-Path $PSScriptRoot "..")
 $npm = Get-Command npm.cmd -ErrorAction SilentlyContinue
 if (-not $npm) {
@@ -31,18 +64,19 @@ try {
   Invoke-Step "Secret scan" { & $npm.Source run secret:scan --silent }
   Invoke-Step "Production build" { & $npm.Source run build --silent }
 
-  $trivy = Get-Command trivy -ErrorAction SilentlyContinue
+  $trivy = Find-Trivy
   if (-not $trivy) {
     throw "Trivy is required for public beta release checks. Install Trivy and rerun npm run release:check."
   }
 
   Invoke-Step "Trivy filesystem scan" {
-    & $trivy.Source fs `
+    & $trivy fs `
       --exit-code 1 `
       --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL `
       --ignore-unfixed `
       --skip-dirs node_modules `
       --skip-dirs dist `
+      --skip-dirs release `
       --skip-dirs .git `
       --skip-dirs .tools `
       --skip-dirs .smoke-data-release `

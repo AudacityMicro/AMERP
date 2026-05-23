@@ -44,6 +44,11 @@ const {
 const {
   extractInspectionFromDrawing
 } = require("./inspection-ai.cjs");
+const {
+  parseSubtractPurchaseOrders,
+  parseXometryPurchaseOrders,
+  parseXometryTravelers
+} = require("./pdf-parsers.cjs");
 
 const CONFIG_FILE = "amerp-config.json";
 const AI_SETTINGS_FILE = "ai-settings.json";
@@ -210,6 +215,14 @@ class ERPBackend {
     this.pythonPath = pythonPath || "python";
     this.configPath = path.join(app.getPath("userData"), CONFIG_FILE);
     this.wordlistDir = path.join(__dirname, "..", "assets", "wordlists");
+  }
+
+  appResourcePath(...segments) {
+    const targetPath = path.join(this.app.getAppPath(), ...segments);
+    if (this.app.isPackaged) {
+      return targetPath.replace(/app\.asar([\\/])/, "app.asar.unpacked$1");
+    }
+    return targetPath;
   }
 
   async readConfig() {
@@ -5099,8 +5112,7 @@ class ERPBackend {
       return { parts: [], warnings: [], errors: [] };
     }
 
-    const parserScript = path.join(this.app.getAppPath(), "scripts", "parse_xometry_travelers.py");
-    const payload = await this.runPythonJson(parserScript, uniqueFilePaths);
+    const payload = await parseXometryTravelers(uniqueFilePaths);
     const parts = [];
     const warnings = [];
     const errors = [];
@@ -5193,8 +5205,7 @@ class ERPBackend {
       return { jobs: [], warnings: [], errors: [] };
     }
 
-    const parserScript = path.join(this.app.getAppPath(), "scripts", "parse_subtract_purchase_orders.py");
-    const payload = await this.runPythonJson(parserScript, uniqueFilePaths);
+    const payload = await parseSubtractPurchaseOrders(uniqueFilePaths);
     const existingJobs = await this.listJobSummaries();
     const usedJobNumbers = new Set(existingJobs.map((job) => normalizeText(job.jobNumber)));
     const warnings = [];
@@ -5310,8 +5321,7 @@ class ERPBackend {
       return { jobs: [], warnings: [], errors: [] };
     }
 
-    const parserScript = path.join(this.app.getAppPath(), "scripts", "parse_xometry_purchase_orders.py");
-    const payload = await this.runPythonJson(parserScript, uniqueFilePaths);
+    const payload = await parseXometryPurchaseOrders(uniqueFilePaths);
     const existingJobs = await this.listJobSummaries();
     const usedJobNumbers = new Set(existingJobs.map((job) => normalizeText(job.jobNumber)));
     const warnings = [];
@@ -5636,7 +5646,9 @@ class ERPBackend {
       child.stderr.on("data", (chunk) => {
         stderr += chunk.toString("utf8");
       });
-      child.on("error", reject);
+      child.on("error", (error) => {
+        reject(new Error(`Python is required for this import. Install Python 3 and pypdf, then retry. (${error.message})`));
+      });
       child.on("close", (code) => {
         if (code !== 0) {
           reject(new Error(stderr.trim() || stdout.trim() || `Python exited with status ${code}`));
@@ -5688,7 +5700,7 @@ class ERPBackend {
     if (!(await pathExists(dbPath))) {
       throw new Error("The selected folder does not contain database/materials.db.");
     }
-    const exportScript = path.join(this.app.getAppPath(), "scripts", "import_materials_sqlite.py");
+    const exportScript = this.appResourcePath("scripts", "import_materials_sqlite.py");
     const payload = await this.runPythonJson(exportScript, [dbPath]);
     let importedMaterials = 0;
     for (const row of payload.materials || []) {

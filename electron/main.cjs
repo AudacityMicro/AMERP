@@ -1,7 +1,8 @@
-const { app, BrowserWindow, ipcMain, net, protocol } = require("electron");
+const { app, BrowserWindow, Menu, dialog, ipcMain, net, protocol, shell } = require("electron");
 const fs = require("node:fs");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
+const { autoUpdater } = require("electron-updater");
 
 const { ERPBackend } = require("./backend/erp.cjs");
 const { resolveInside } = require("./backend/utils.cjs");
@@ -21,6 +22,13 @@ protocol.registerSchemesAsPrivileged([
 let mainWindow = null;
 let backend = null;
 let pendingDeepLink = null;
+let updateOperation = null;
+
+const GITHUB_RELEASES_URL = "https://github.com/AudacityMicro/AMERP/releases";
+
+if (process.platform === "win32") {
+  app.setAppUserModelId("com.audacitymicro.amerp");
+}
 
 function parseDeepLink(value) {
   if (!value || typeof value !== "string" || !value.toLowerCase().startsWith("amerp://")) {
@@ -317,6 +325,283 @@ function registerIpc(channel, handler) {
   });
 }
 
+function showNativeMessage(options) {
+  const owner = mainWindow && !mainWindow.isDestroyed() ? mainWindow : undefined;
+  return dialog.showMessageBox(owner, options);
+}
+
+function truncateText(value, maxLength = 1800) {
+  const text = Array.isArray(value)
+    ? value.map((entry) => (typeof entry === "string" ? entry : entry?.note || entry?.version || "")).filter(Boolean).join("\n")
+    : String(value || "");
+  if (text.length <= maxLength) {
+    return text;
+  }
+  return `${text.slice(0, maxLength - 3)}...`;
+}
+
+function updateSummary(updateInfo) {
+  const releaseNotes = truncateText(updateInfo?.releaseNotes || updateInfo?.releaseName || "No release notes were provided.");
+  return [
+    `Current version: ${app.getVersion()}`,
+    `Available version: ${updateInfo?.version || "Unknown"}`,
+    "",
+    releaseNotes
+  ].join("\n");
+}
+
+function configureAutoUpdater() {
+  autoUpdater.autoDownload = false;
+  autoUpdater.autoInstallOnAppQuit = false;
+  autoUpdater.allowPrerelease = true;
+}
+
+async function openReleaseDownloadPage() {
+  await shell.openExternal(GITHUB_RELEASES_URL);
+}
+
+async function downloadAndInstallUpdate(updateInfo) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.setProgressBar(2);
+  }
+  const progressHandler = (progress) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.setProgressBar(Math.max(0, Math.min(1, Number(progress.percent || 0) / 100)));
+    }
+  };
+  autoUpdater.on("download-progress", progressHandler);
+  try {
+    await autoUpdater.downloadUpdate();
+  } finally {
+    autoUpdater.off("download-progress", progressHandler);
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.setProgressBar(-1);
+    }
+  }
+
+  const result = await showNativeMessage({
+    type: "info",
+    buttons: ["Install and Restart", "Later"],
+    defaultId: 0,
+    cancelId: 1,
+    title: "AMERP Update Downloaded",
+    message: `AMERP ${updateInfo?.version || ""} is ready to install.`,
+    detail: "Installation only starts if you choose Install and Restart."
+  });
+  if (result.response === 0) {
+    autoUpdater.quitAndInstall(false, true);
+  }
+}
+
+async function runUpdateCheck() {
+  if (!app.isPackaged) {
+    await showNativeMessage({
+      type: "info",
+      buttons: ["OK"],
+      title: "AMERP Updates",
+      message: "Packaged updates are only available in installed release builds.",
+      detail: "Developer/source installs should update by pulling the repository and rebuilding with the existing install scripts."
+    });
+    return;
+  }
+
+  configureAutoUpdater();
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.setProgressBar(2);
+  }
+
+  let checkResult;
+  try {
+    checkResult = await autoUpdater.checkForUpdates();
+  } finally {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.setProgressBar(-1);
+    }
+  }
+
+  const updateInfo = checkResult?.updateInfo || {};
+  if (!updateInfo.version || updateInfo.version === app.getVersion()) {
+    await showNativeMessage({
+      type: "info",
+      buttons: ["OK"],
+      title: "AMERP Updates",
+      message: "AMERP is up to date.",
+      detail: `Installed version: ${app.getVersion()}`
+    });
+    return;
+  }
+
+  if (process.platform === "darwin") {
+    const result = await showNativeMessage({
+      type: "info",
+      buttons: ["Open Release Page", "Cancel"],
+      defaultId: 0,
+      cancelId: 1,
+      title: "AMERP Update Available",
+      message: `AMERP ${updateInfo.version} is available.`,
+      detail: [
+        "This macOS beta is unsigned, so automatic installation is disabled.",
+        "Open the GitHub release page to download the latest DMG/ZIP manually.",
+        "",
+        updateSummary(updateInfo)
+      ].join("\n")
+    });
+    if (result.response === 0) {
+      await openReleaseDownloadPage();
+    }
+    return;
+  }
+
+  const result = await showNativeMessage({
+    type: "info",
+    buttons: ["Download and Install", "Open Release Page", "Cancel"],
+    defaultId: 0,
+    cancelId: 2,
+    title: "AMERP Update Available",
+    message: `AMERP ${updateInfo.version} is available.`,
+    detail: updateSummary(updateInfo)
+  });
+
+  if (result.response === 1) {
+    await openReleaseDownloadPage();
+    return;
+  }
+  if (result.response !== 0) {
+    return;
+  }
+
+  try {
+    await downloadAndInstallUpdate(updateInfo);
+  } catch (error) {
+    const fallback = await showNativeMessage({
+      type: "error",
+      buttons: ["Open Release Page", "OK"],
+      defaultId: 0,
+      cancelId: 1,
+      title: "AMERP Update Failed",
+      message: "The update could not be downloaded or installed automatically.",
+      detail: `${error?.message || error}\n\nYou can still download the installer manually from GitHub.`
+    });
+    if (fallback.response === 0) {
+      await openReleaseDownloadPage();
+    }
+  }
+}
+
+function checkForUpdatesFromMenu() {
+  if (updateOperation) {
+    showNativeMessage({
+      type: "info",
+      buttons: ["OK"],
+      title: "AMERP Updates",
+      message: "An update check is already running."
+    }).catch(() => {});
+    return;
+  }
+  updateOperation = runUpdateCheck()
+    .catch((error) => showNativeMessage({
+      type: "error",
+      buttons: ["Open Release Page", "OK"],
+      defaultId: 0,
+      cancelId: 1,
+      title: "AMERP Update Check Failed",
+      message: "AMERP could not check for updates.",
+      detail: `${error?.message || error}\n\nIf needed, open the GitHub release page and download the installer manually.`
+    }).then((result) => {
+      if (result.response === 0) {
+        return openReleaseDownloadPage();
+      }
+      return null;
+    }))
+    .finally(() => {
+      updateOperation = null;
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.setProgressBar(-1);
+      }
+    });
+}
+
+function createApplicationMenu() {
+  const isMac = process.platform === "darwin";
+  const template = [
+    ...(isMac ? [{
+      label: app.name,
+      submenu: [
+        { role: "about" },
+        { type: "separator" },
+        { role: "services" },
+        { type: "separator" },
+        { role: "hide" },
+        { role: "hideOthers" },
+        { role: "unhide" },
+        { type: "separator" },
+        { role: "quit" }
+      ]
+    }] : []),
+    {
+      label: "File",
+      submenu: [
+        isMac ? { role: "close" } : { role: "quit" }
+      ]
+    },
+    {
+      label: "Edit",
+      submenu: [
+        { role: "undo" },
+        { role: "redo" },
+        { type: "separator" },
+        { role: "cut" },
+        { role: "copy" },
+        { role: "paste" },
+        { role: "selectAll" }
+      ]
+    },
+    {
+      label: "View",
+      submenu: [
+        { role: "reload" },
+        { role: "forceReload" },
+        { role: "toggleDevTools" },
+        { type: "separator" },
+        { role: "resetZoom" },
+        { role: "zoomIn" },
+        { role: "zoomOut" },
+        { type: "separator" },
+        { role: "togglefullscreen" }
+      ]
+    },
+    {
+      label: "Window",
+      submenu: [
+        { role: "minimize" },
+        { role: "zoom" },
+        ...(isMac ? [
+          { type: "separator" },
+          { role: "front" }
+        ] : [
+          { role: "close" }
+        ])
+      ]
+    },
+    {
+      label: "Help",
+      submenu: [
+        {
+          label: "Check for Updates...",
+          click: checkForUpdatesFromMenu
+        },
+        {
+          label: "Open AMERP Releases",
+          click: () => {
+            openReleaseDownloadPage().catch(() => {});
+          }
+        }
+      ]
+    }
+  ];
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+}
+
 function createWindow(windowTitle = "AMERP", iconPath = "") {
   mainWindow = new BrowserWindow({
     width: 1480,
@@ -496,6 +781,7 @@ registerIpc("revise-part-document", (_event, jobId, partId, documentId) => backe
     String(preferences.windowTitle || preferences.appTitle || "AMERP"),
     String(preferences.appIconPath || "")
   );
+  createApplicationMenu();
   pendingDeepLink = extractDeepLink(process.argv);
   if (pendingDeepLink) {
     deliverDeepLink(pendingDeepLink);
