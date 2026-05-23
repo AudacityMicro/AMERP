@@ -1,8 +1,9 @@
 # Release Audit: AMERP 0.0.1-beta
 
-Generated: 2026-05-23T17:25:00-04:00
+Generated: 2026-05-23T17:29:00-04:00
 Branch: `main`
 Pre-audit HEAD: `6a67186 Improve AI drawing extraction workflow`
+Release-readiness commit: `d3e9bd7 Prepare AMERP beta release packaging`
 Publishing status: no tag, release, PR, or GitHub publication was performed.
 
 ## Pass / Fail Summary
@@ -152,7 +153,7 @@ Draft GitHub release status:
 
 ## Recommended Next Steps
 
-1. Commit and push these release-readiness changes.
+1. Push the release-readiness commit to GitHub.
 2. Run the GitHub Actions release workflow to produce Windows and macOS artifacts in a draft release.
 3. Inspect and smoke-test the draft release artifacts.
 4. Publish the GitHub Release only after explicit approval.
