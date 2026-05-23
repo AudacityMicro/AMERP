@@ -3426,6 +3426,41 @@ useEffect(() => api.onDeepLink?.((payload) => {
     }
   };
 
+  const importKanbanUrlList = async (urls) => {
+    const uniqueUrls = [...new Set((Array.isArray(urls) ? urls : []).map((item) => String(item || "").trim()).filter(Boolean))];
+    if (!uniqueUrls.length) {
+      showStatus("Paste at least one product URL to import.");
+      return;
+    }
+    if (uniqueUrls.length === 1) {
+      await importKanbanFromUrl(uniqueUrls[0]);
+      return;
+    }
+    setKanbanAiState("filling");
+    setBusy(true);
+    showStatus(`Importing ${uniqueUrls.length} product URLs. This can take a few minutes when AI enrichment is enabled.`);
+    try {
+      const imported = await api.importKanbanFromUrls(uniqueUrls);
+      await refreshWorkspace();
+      if (imported.cards?.[0]?.id) {
+        await openKanbanCard(imported.cards[0].id);
+      }
+      const warningCount = imported.warnings?.length || 0;
+      const errorCount = imported.errors?.length || 0;
+      const details = [
+        `Imported ${imported.cards?.length || 0} Kanban card${(imported.cards?.length || 0) === 1 ? "" : "s"}.`,
+        warningCount ? `${warningCount} warning${warningCount === 1 ? "" : "s"}.` : "",
+        errorCount ? `${errorCount} error${errorCount === 1 ? "" : "s"}:\n- ${imported.errors.map((item) => `${item.url}: ${item.message}`).join("\n- ")}` : ""
+      ].filter(Boolean).join("\n");
+      showStatus(details);
+    } catch (error) {
+      showStatus(error.message || String(error));
+    } finally {
+      setKanbanAiState("idle");
+      setBusy(false);
+    }
+  };
+
   const refreshCurrentKanbanFromUrl = async () => {
     if (!kanbanCard?.purchaseUrl) {
       showStatus("Enter a purchase URL before refreshing from URL.");
@@ -4057,6 +4092,7 @@ useEffect(() => api.onDeepLink?.((payload) => {
             onShowList={showKanbanList}
             onCreateNew={() => createNewKanbanCard()}
             onImportFromUrl={importKanbanFromUrl}
+            onImportUrls={importKanbanUrlList}
             onRefreshFromUrl={refreshCurrentKanbanFromUrl}
             onChoosePhoto={chooseKanbanPhoto}
             onAssignInventoryNumber={assignNextKanbanInventoryNumber}
@@ -8819,6 +8855,7 @@ function KanbanView({
   onShowList,
   onCreateNew,
   onImportFromUrl,
+  onImportUrls,
   onRefreshFromUrl,
   onChoosePhoto,
   onAssignInventoryNumber,
@@ -9000,8 +9037,8 @@ function KanbanView({
       <KanbanImportDialog
         open={importDialogOpen}
         onClose={() => setImportDialogOpen(false)}
-        onImport={async (url) => {
-          await onImportFromUrl(url);
+        onImport={async (urls) => {
+          await (onImportUrls ? onImportUrls(urls) : onImportFromUrl(urls[0]));
           setImportDialogOpen(false);
         }}
       />
@@ -9131,12 +9168,13 @@ function KanbanDetailScreen({
 }
 
 function KanbanImportDialog({ open, onClose, onImport }) {
-  const [url, setUrl] = useState("");
+  const [rawUrls, setRawUrls] = useState("");
   const [busy, setBusy] = useState(false);
+  const urls = [...new Set(rawUrls.split(/[\s,]+/).map((item) => item.trim()).filter(Boolean))];
 
   useEffect(() => {
     if (!open) {
-      setUrl("");
+      setRawUrls("");
       setBusy(false);
     }
   }, [open]);
@@ -9149,27 +9187,34 @@ function KanbanImportDialog({ open, onClose, onImport }) {
     <div className="dialog-backdrop">
       <div className="dialog-panel narrow">
         <div className="panel-heading">
-          <h3>Import Product URL</h3>
+          <h3>Import Product URLs</h3>
         </div>
-        <p>Paste any product URL to prefill a new Kanban card with AI-assisted page parsing.</p>
-        <TextField label="Product URL" value={url} onChange={setUrl} placeholder="https://..." />
+        <p>Paste one product URL, or paste a list with one URL per line. AMERP will create one Kanban card per URL.</p>
+        <TextArea
+          label="Product URLs"
+          value={rawUrls}
+          onChange={setRawUrls}
+          rows={8}
+          placeholder={"https://example.com/product-1\nhttps://example.com/product-2"}
+        />
+        <p className="muted small">{urls.length ? `${urls.length} URL${urls.length === 1 ? "" : "s"} ready to import.` : "No URLs detected yet."}</p>
         <div className="dialog-actions">
           <button onClick={onClose} disabled={busy}>Cancel</button>
           <button
             onClick={async () => {
-              if (!url.trim()) {
+              if (!urls.length) {
                 return;
               }
               setBusy(true);
               try {
-                await onImport(url.trim());
+                await onImport(urls);
               } finally {
                 setBusy(false);
               }
             }}
-            disabled={busy || !url.trim()}
+            disabled={busy || !urls.length}
           >
-            <Import size={14} /> Import
+            <Import size={14} /> {busy ? "Importing..." : `Import ${urls.length || ""}`.trim()}
           </button>
         </div>
       </div>

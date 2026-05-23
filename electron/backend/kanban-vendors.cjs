@@ -19,6 +19,18 @@ function decodeHtmlEntities(value) {
     .replace(/&#(\d+);/g, (_match, code) => String.fromCharCode(Number(code) || 0));
 }
 
+function decodeJsonText(value) {
+  const raw = String(value || "");
+  try {
+    return normalizeWhitespace(JSON.parse(`"${raw.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`));
+  } catch {
+    return normalizeWhitespace(raw
+      .replace(/\\u([0-9a-f]{4})/gi, (_match, hex) => String.fromCharCode(parseInt(hex, 16)))
+      .replace(/\\"/g, '"')
+      .replace(/\\\//g, "/"));
+  }
+}
+
 function stripTags(value) {
   return normalizeWhitespace(decodeHtmlEntities(String(value || "").replace(/<[^>]+>/g, " ")));
 }
@@ -29,6 +41,19 @@ function firstMatch(text, pattern, group = 1) {
     return "";
   }
   return normalizeWhitespace(decodeHtmlEntities(match[group] || ""));
+}
+
+function firstJsonStringMatch(text, keys) {
+  const source = String(text || "");
+  for (const key of keys) {
+    const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const pattern = new RegExp(`["']${escaped}["']\\s*:\\s*["']([^"']{2,800})["']`, "i");
+    const match = source.match(pattern);
+    if (match?.[1]) {
+      return decodeJsonText(match[1]);
+    }
+  }
+  return "";
 }
 
 function extractMetaContent(html, predicate) {
@@ -65,6 +90,58 @@ function extractJsonLdObjects(html) {
     }
   }
   return objects.filter(Boolean);
+}
+
+function findProductLikeObject(value, depth = 0) {
+  if (!value || depth > 8) {
+    return null;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = findProductLikeObject(item, depth + 1);
+      if (found) {
+        return found;
+      }
+    }
+    return null;
+  }
+  if (typeof value !== "object") {
+    return null;
+  }
+  const type = String(value["@type"] || value.type || value.__typename || "").toLowerCase();
+  const hasProductShape = type.includes("product")
+    || (value.name && (value.sku || value.mpn || value.image || value.description))
+    || (value.title && (value.image || value.description || value.brand));
+  if (hasProductShape) {
+    return value;
+  }
+  for (const item of Object.values(value)) {
+    const found = findProductLikeObject(item, depth + 1);
+    if (found) {
+      return found;
+    }
+  }
+  return null;
+}
+
+function extractEmbeddedJsonProduct(html) {
+  const scripts = String(html || "").match(/<script\b[^>]*>([\s\S]*?)<\/script>/gi) || [];
+  for (const script of scripts) {
+    const raw = script.replace(/^<script\b[^>]*>/i, "").replace(/<\/script>$/i, "").trim();
+    if (!raw || raw.length > 2_000_000 || !/[{[]/.test(raw)) {
+      continue;
+    }
+    try {
+      const parsed = JSON.parse(raw);
+      const product = findProductLikeObject(parsed);
+      if (product) {
+        return product;
+      }
+    } catch {
+      // Most storefront scripts are JS, not JSON. Regex fallbacks handle common keys.
+    }
+  }
+  return {};
 }
 
 function asAbsoluteUrl(url, candidate) {
@@ -116,47 +193,104 @@ function normalizeTitle(title, vendor) {
     .trim();
 }
 
-function extractVendorPartNumber(html, jsonLdProduct) {
-  return normalizeWhitespace(jsonLdProduct?.sku || jsonLdProduct?.mpn || "")
-    || firstMatch(html, /(?:sku|mpn|part(?:\s+number)?|item(?:\s+number)?)[^A-Z0-9]{0,20}([A-Z0-9-]{4,})/i)
+function imageFromProduct(product) {
+  const image = product?.image || product?.images || product?.imageUrl || product?.thumbnail || product?.thumbnailUrl || product?.primaryImage;
+  if (Array.isArray(image)) {
+    const first = image[0];
+    return typeof first === "string" ? first : first?.url || first?.src || "";
+  }
+  if (typeof image === "string") {
+    return image;
+  }
+  return image?.url || image?.src || "";
+}
+
+function extractVendorPartNumber(html, product) {
+  const text = stripTags(html);
+  return normalizeWhitespace(product?.sku || product?.mpn || product?.partNumber || product?.itemNumber || product?.productNumber || "")
+    || firstJsonStringMatch(html, ["sku", "mpn", "partNumber", "itemNumber", "productNumber", "catalogNumber", "model"])
+    || firstMatch(text, /(?:sku|mpn|part(?:\s+number)?|item(?:\s+number)?|model(?:\s+#| number)?|catalog(?:\s+#| number)?)[^A-Z0-9]{0,25}([A-Z0-9][A-Z0-9_.-]{2,})/i)
     || firstMatch(html, /"(?:(?:sku)|(?:mpn)|(?:partNumber))"\s*:\s*"([^"]+)"/i);
 }
 
-function extractPackSize(html, jsonLdProduct) {
-  return normalizeWhitespace(jsonLdProduct?.size || jsonLdProduct?.unitText || "")
-    || firstMatch(html, /(?:Pack\s*Size|Package\s*Quantity|Qty\/Pack|Sold\s*In|Unit\s*Size)\s*[:#]?\s*<\/?[^>]*>\s*([^<]+)/i)
-    || firstMatch(html, /(?:Pack\s*of|Qty\s*:\s*)([0-9][^<]+)/i);
+function extractPackSize(html, product) {
+  const text = stripTags(html);
+  return normalizeWhitespace(product?.size || product?.unitText || product?.unit || product?.packageQuantity || "")
+    || firstJsonStringMatch(html, ["packSize", "packageQuantity", "unitSize", "unitText", "quantity"])
+    || firstMatch(text, /(?:Pack\s*Size|Package\s*Quantity|Qty\/Pack|Sold\s*In|Unit\s*Size|Pkg\.?\s*Qty\.?)\s*[:#]?\s*([0-9][A-Za-z0-9 ./-]{0,40})/i)
+    || firstMatch(text, /(?:Pack\s*of|Pkg\.?\s*of|Qty\s*:)\s*([0-9][A-Za-z0-9 ./-]{0,40})/i);
+}
+
+function extractUrlFacts(url) {
+  try {
+    const parsed = new URL(url);
+    const tokens = decodeURIComponent(parsed.pathname)
+      .split(/[/?#&=+_\-.%]+/)
+      .map((part) => normalizeWhitespace(part))
+      .filter((part) => part && !/^(dp|gp|product|products|p|itm|shop|catalog|detail|www)$/i.test(part))
+      .slice(0, 12);
+    return {
+      hostname: parsed.hostname.replace(/^www\./, ""),
+      pathTokens: tokens
+    };
+  } catch {
+    return {
+      hostname: "",
+      pathTokens: []
+    };
+  }
+}
+
+function buildPageContext(url, html) {
+  const text = stripTags(html);
+  const facts = extractUrlFacts(url);
+  const h1 = stripTags(firstMatch(html, /<h1\b[^>]*>([\s\S]*?)<\/h1>/i));
+  const title = normalizeWhitespace(
+    extractMetaContent(html, (name) => name === "og:title" || name === "twitter:title")
+      || h1
+      || stripTags(firstMatch(html, /<title[^>]*>([\s\S]*?)<\/title>/i))
+  );
+  return {
+    ...facts,
+    title,
+    h1,
+    textSnippet: text.slice(0, 12000)
+  };
 }
 
 function extractProductData(url, html) {
   const vendor = inferVendorName(url);
   const jsonLdObjects = extractJsonLdObjects(html);
-  const jsonLdProduct = jsonLdObjects.find((entry) => {
+  const product = jsonLdObjects.find((entry) => {
     const type = entry?.["@type"];
     if (Array.isArray(type)) {
       return type.some((item) => String(item).toLowerCase() === "product");
     }
     return String(type || "").toLowerCase() === "product";
-  }) || {};
+  }) || extractEmbeddedJsonProduct(html) || {};
+  const pageContext = buildPageContext(url, html);
 
-  const title = normalizeWhitespace(jsonLdProduct?.name || "")
-    || extractMetaContent(html, (name) => name === "og:title" || name === "twitter:title")
-    || stripTags(firstMatch(html, /<title[^>]*>([\s\S]*?)<\/title>/i));
+  const title = normalizeWhitespace(product?.name || product?.title || product?.productName || "")
+    || firstJsonStringMatch(html, ["productName", "productTitle", "name", "title"])
+    || pageContext.title;
 
-  const description = normalizeWhitespace(jsonLdProduct?.description || "")
+  const description = normalizeWhitespace(product?.description || product?.shortDescription || "")
+    || firstJsonStringMatch(html, ["description", "shortDescription", "productDescription"])
     || extractMetaContent(html, (name) => name === "description" || name === "og:description" || name === "twitter:description")
+    || stripTags(firstMatch(html, /<div\b[^>]*(?:id|class)=["'][^"']*(?:description|product-detail|product-info)[^"']*["'][^>]*>([\s\S]{20,2500}?)<\/div>/i))
     || firstMatch(html, /"description"\s*:\s*"([^"]{10,})"/i);
 
   const imageUrl = asAbsoluteUrl(
     url,
-    jsonLdProduct?.image?.url
-      || (Array.isArray(jsonLdProduct?.image) ? jsonLdProduct.image[0] : jsonLdProduct?.image)
+    imageFromProduct(product)
+      || firstJsonStringMatch(html, ["imageUrl", "thumbnailUrl", "thumbnail", "primaryImage"])
+      || firstMatch(html, /<link\b[^>]*rel=["']image_src["'][^>]*href=["']([^"']+)["']/i)
       || extractMetaContent(html, (name) => name === "og:image" || name === "twitter:image")
   );
 
   const itemName = normalizeTitle(title, vendor);
-  const vendorPartNumber = extractVendorPartNumber(html, jsonLdProduct);
-  const packSize = extractPackSize(html, jsonLdProduct);
+  const vendorPartNumber = extractVendorPartNumber(html, product);
+  const packSize = extractPackSize(html, product);
   const warnings = [];
   if (!itemName) {
     warnings.push("Could not extract product title automatically.");
@@ -172,11 +306,13 @@ function extractProductData(url, html) {
     purchaseUrl: url,
     imageUrl,
     packSize,
+    pageContext,
     warnings
   };
 }
 
 module.exports = {
+  buildPageContext,
   extractProductData,
   inferVendorName
 };

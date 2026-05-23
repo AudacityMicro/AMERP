@@ -34,6 +34,7 @@ const {
   writeText
 } = require("./utils.cjs");
 const {
+  buildPageContext,
   extractProductData,
   inferVendorName
 } = require("./kanban-vendors.cjs");
@@ -631,6 +632,31 @@ class ERPBackend {
       || normalized.includes("pardon our interruption");
   }
 
+  fallbackKanbanItemName(url, imported) {
+    const candidates = [
+      imported?.pageContext?.h1,
+      imported?.pageContext?.title
+    ].map((value) => normalizeText(value)).filter(Boolean);
+    for (const candidate of candidates) {
+      if (!this.isGenericKanbanItemName(url, candidate)) {
+        return candidate;
+      }
+    }
+    const tokens = Array.isArray(imported?.pageContext?.pathTokens) ? imported.pageContext.pathTokens : [];
+    const usefulTokens = tokens
+      .filter((token) => !/^[a-z]?\d{8,}$/i.test(token))
+      .filter((token) => !/^[a-z0-9]{10,}$/i.test(token))
+      .slice(0, 6);
+    if (usefulTokens.length) {
+      return usefulTokens
+        .join(" ")
+        .replace(/[_-]+/g, " ")
+        .replace(/\b\w/g, (letter) => letter.toUpperCase())
+        .trim();
+    }
+    return "";
+  }
+
   isBotChallengeHtml(html) {
     const normalized = String(html || "").toLowerCase();
     return normalized.includes("pardon our interruption")
@@ -683,23 +709,31 @@ class ERPBackend {
       purchaseUrl: firstUseful(fallback?.purchaseUrl, primary?.purchaseUrl),
       imageUrl: firstUseful(preferredImage, fallback?.imageUrl, primary?.imageUrl),
       packSize: firstUseful(fallback?.packSize, primary?.packSize),
+      pageContext: fallback?.pageContext || primary?.pageContext || buildPageContext(url, ""),
       warnings: [...new Set([...(primary?.warnings || []), ...(fallback?.warnings || [])])]
     };
   }
 
   async fetchHtml(url) {
-    const response = await fetch(url, {
-      headers: {
-        "user-agent": BROWSER_USER_AGENT,
-        accept: "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "accept-language": "en-US,en;q=0.9"
-      },
-      redirect: "follow"
-    });
-    if (!response.ok) {
-      throw new Error(`Vendor page returned ${response.status} ${response.statusText}`.trim());
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 20000);
+    try {
+      const response = await fetch(url, {
+        headers: {
+          "user-agent": BROWSER_USER_AGENT,
+          accept: "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+          "accept-language": "en-US,en;q=0.9"
+        },
+        redirect: "follow",
+        signal: controller.signal
+      });
+      if (!response.ok) {
+        throw new Error(`Vendor page returned ${response.status} ${response.statusText}`.trim());
+      }
+      return response.text();
+    } finally {
+      clearTimeout(timer);
     }
-    return response.text();
   }
 
   async fetchRenderedHtml(url, waitMs = 2500) {
@@ -737,18 +771,57 @@ class ERPBackend {
       });
       await window.loadURL(url, { userAgent: BROWSER_USER_AGENT });
       await loadPromise;
-      return await window.webContents.executeJavaScript("document.documentElement.outerHTML", true);
+      const snapshot = await window.webContents.executeJavaScript(`(() => {
+        const absolute = (value) => {
+          try { return new URL(value, document.baseURI).toString(); } catch { return ""; }
+        };
+        const images = Array.from(document.images || [])
+          .map((image) => ({
+            src: absolute(image.currentSrc || image.src || ""),
+            alt: image.alt || "",
+            width: image.naturalWidth || image.width || 0,
+            height: image.naturalHeight || image.height || 0
+          }))
+          .filter((image) => image.src && image.width >= 80 && image.height >= 80)
+          .slice(0, 20);
+        return {
+          title: document.title || "",
+          h1: Array.from(document.querySelectorAll("h1")).map((node) => node.innerText || node.textContent || "").filter(Boolean).slice(0, 4),
+          text: (document.body?.innerText || "").slice(0, 20000),
+          images
+        };
+      })()`, true);
+      const html = await window.webContents.executeJavaScript("document.documentElement.outerHTML", true);
+      return [
+        html,
+        `<script type="application/json" id="amerp-rendered-product-snapshot">${JSON.stringify(snapshot || {})}</script>`,
+        `<meta property="og:title" content="${String(snapshot?.title || "").replace(/"/g, "&quot;")}">`,
+        snapshot?.images?.[0]?.src ? `<meta property="og:image" content="${String(snapshot.images[0].src).replace(/"/g, "&quot;")}">` : ""
+      ].join("\n");
     } finally {
       window.destroy();
     }
   }
 
   async loadKanbanProductContext(url) {
-    const html = await this.fetchHtml(url);
-    let imported = extractProductData(url, html);
-    let finalHtml = html;
+    let html = "";
+    let imported = null;
+    let finalHtml = "";
     let usedRenderedFallback = false;
-    if (this.shouldUseRenderedKanbanFallback(url, html, imported)) {
+    try {
+      html = await this.fetchHtml(url);
+      imported = extractProductData(url, html);
+      finalHtml = html;
+    } catch (error) {
+      html = "";
+      imported = {
+        vendor: inferVendorName(url),
+        purchaseUrl: url,
+        pageContext: buildPageContext(url, ""),
+        warnings: [`Direct page fetch failed: ${error.message}`]
+      };
+    }
+    if (!finalHtml || this.shouldUseRenderedKanbanFallback(url, finalHtml, imported)) {
       try {
         const renderedHtml = await this.fetchRenderedHtml(url);
         const renderedImported = extractProductData(url, renderedHtml);
@@ -762,6 +835,15 @@ class ERPBackend {
         };
       }
     }
+    if (!finalHtml) {
+      finalHtml = `<html><head><title>${url}</title></head><body>${url}</body></html>`;
+    }
+    imported = {
+      ...imported,
+      vendor: imported?.vendor || inferVendorName(url),
+      purchaseUrl: imported?.purchaseUrl || url,
+      pageContext: imported?.pageContext || buildPageContext(url, finalHtml)
+    };
     return { html: finalHtml, imported, usedRenderedFallback };
   }
 
@@ -1275,12 +1357,82 @@ class ERPBackend {
       } else if (aiResult.status === "rejected") {
         warnings.push(`Could not enrich the card with AI: ${aiResult.reason.message}`);
       }
+      if (!draft.itemName) {
+        draft.itemName = this.fallbackKanbanItemName(validatedUrl, imported);
+      }
     } catch (error) {
       warnings.push(`Could not import product details automatically: ${error.message}`);
     }
 
     await this.appendAudit("kanban_url_import_prepared", cardId, `Prepared kanban card draft from ${validatedUrl}.`);
     return { card: draft, warnings };
+  }
+
+  async importKanbanFromUrls(urls) {
+    if (!Array.isArray(urls)) {
+      throw new Error("Provide a list of product URLs to import.");
+    }
+    const normalizedUrls = [];
+    const seen = new Set();
+    for (const rawUrl of urls) {
+      const value = String(rawUrl || "").trim();
+      if (!value) {
+        continue;
+      }
+      let parsed;
+      try {
+        parsed = new URL(value);
+        if (!["http:", "https:"].includes(parsed.protocol)) {
+          throw new Error("Only http and https URLs are supported.");
+        }
+      } catch (error) {
+        normalizedUrls.push({ rawUrl: value, error: `Invalid product URL: ${error.message}` });
+        continue;
+      }
+      const normalized = parsed.toString();
+      const key = normalized.toLowerCase();
+      if (!seen.has(key)) {
+        seen.add(key);
+        normalizedUrls.push({ rawUrl: value, url: normalized });
+      }
+    }
+    const validUrls = normalizedUrls.filter((item) => item.url);
+    if (!validUrls.length) {
+      return {
+        cards: [],
+        warnings: [],
+        errors: normalizedUrls.filter((item) => item.error).map((item) => ({ url: item.rawUrl, message: item.error }))
+      };
+    }
+    if (validUrls.length > 50) {
+      throw new Error("Import at most 50 product URLs at a time.");
+    }
+
+    const warnings = [];
+    const errors = normalizedUrls
+      .filter((item) => item.error)
+      .map((item) => ({ url: item.rawUrl, message: item.error }));
+    const cards = [];
+    for (const item of validUrls) {
+      try {
+        const imported = await this.importKanbanFromUrl(item.url);
+        if (!imported?.card) {
+          errors.push({ url: item.url, message: "No card data was returned." });
+          continue;
+        }
+        const saved = await this.saveKanbanCard(imported.card);
+        cards.push(saved);
+        for (const warning of imported.warnings || []) {
+          warnings.push({ url: item.url, message: warning });
+        }
+      } catch (error) {
+        errors.push({ url: item.url, message: error.message || String(error) });
+      }
+    }
+    if (cards.length) {
+      await this.appendAudit("kanban_url_list_imported", cards[0].id, `Imported ${cards.length} Kanban card${cards.length === 1 ? "" : "s"} from URL list.`);
+    }
+    return { cards, warnings, errors };
   }
 
   async aiFillKanbanCard(card) {
@@ -1319,7 +1471,7 @@ class ERPBackend {
 
     const updatedCard = this.normalizeKanbanCard({
       ...baseCard,
-      itemName: enriched.itemName || baseCard.itemName,
+      itemName: enriched.itemName || baseCard.itemName || this.fallbackKanbanItemName(baseCard.purchaseUrl, vendorContext?.scraped),
       description: enriched.description || baseCard.description,
       orderingNotes: enriched.orderingNotes || baseCard.orderingNotes,
       category: enriched.category || baseCard.category,

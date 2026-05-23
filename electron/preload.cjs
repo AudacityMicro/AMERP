@@ -42,6 +42,7 @@ contextBridge.exposeInMainWorld("amerp", {
   deleteKanbanCard: (id) => invoke("delete-kanban-card", id),
   chooseKanbanPhoto: (cardId) => invoke("choose-kanban-photo", cardId),
   importKanbanFromUrl: (url) => invoke("import-kanban-from-url", url),
+  importKanbanFromUrls: (urls) => invoke("import-kanban-from-urls", urls),
   aiFillKanbanCard: (card) => invoke("ai-fill-kanban-card", card),
   generateKanbanImage: (card) => invoke("generate-kanban-image", card),
   exportKanbanPdf: (cardId, destinationPath, sizeId, options) => invoke("export-kanban-pdf", cardId, destinationPath, sizeId, options),

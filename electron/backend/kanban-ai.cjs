@@ -24,6 +24,14 @@ function stripHtml(html) {
     .trim();
 }
 
+function removeUrls(value) {
+  return String(value || "")
+    .replace(/\bhttps?:\/\/\S+/gi, "")
+    .replace(/\bwww\.\S+/gi, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function requireClient(apiKey) {
   const normalizedKey = String(apiKey || "").trim();
   if (!normalizedKey) {
@@ -51,7 +59,8 @@ function normalizeCategory(category, categories) {
 }
 
 function buildSeedPayload(card, vendorContext, categories) {
-  const pageText = stripHtml(vendorContext?.html || "").slice(0, 5000);
+  const pageText = stripHtml(vendorContext?.html || "").slice(0, 12000);
+  const scraped = vendorContext?.scraped || null;
   return {
     currentCard: {
       itemName: normalizeWhitespace(card?.itemName),
@@ -68,7 +77,8 @@ function buildSeedPayload(card, vendorContext, categories) {
       description: String(card?.description || "").trim()
     },
     allowedCategories: Array.isArray(categories) ? categories : [],
-    vendorImport: vendorContext?.scraped || null,
+    vendorImport: scraped,
+    pageContext: scraped?.pageContext || null,
     pageText
   };
 }
@@ -91,6 +101,8 @@ async function enrichKanbanCardDraft({ apiKey, card, categories, vendorContext }
               "Write a practical description that is short and to the point, usually one sentence and never more than two short sentences.",
               "Write concise ordering notes for a buyer.",
               "Do not include any URLs, web addresses, or link text in the description or ordering notes.",
+              "If the page text is sparse, blocked, or generic, use the URL path tokens, vendor import fields, and current card fields to make the best conservative draft instead of returning all blanks.",
+              "If a field cannot be inferred, leave that field blank rather than inventing exact specs.",
               "Suggest reasonable minimum level, order quantity, and pack size or purchase unit when they can be inferred from the product context.",
               "Do not invent pricing, stock, or ordering requirements.",
               buildCategoryInstruction(categories)
@@ -135,8 +147,8 @@ async function enrichKanbanCardDraft({ apiKey, card, categories, vendorContext }
   const parsed = JSON.parse(response.output_text || "{}");
   return {
     itemName: normalizeWhitespace(parsed?.itemName),
-    description: String(parsed?.description || "").trim(),
-    orderingNotes: String(parsed?.orderingNotes || "").trim(),
+    description: removeUrls(parsed?.description),
+    orderingNotes: removeUrls(parsed?.orderingNotes),
     category: normalizeCategory(parsed?.category, categories),
     vendor: normalizeWhitespace(parsed?.vendor),
     minimumLevel: normalizeWhitespace(parsed?.minimumLevel),

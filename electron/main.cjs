@@ -211,6 +211,16 @@ function requireUrl(value, label = "URL") {
   return text;
 }
 
+function requireUrlArray(value, label = "URLs") {
+  if (!Array.isArray(value)) {
+    throw new Error(`${label} must be a list of URLs.`);
+  }
+  if (value.length > 50) {
+    throw new Error(`${label} contains too many URLs.`);
+  }
+  return value.map((item, index) => requireUrl(item, `${label}[${index}]`));
+}
+
 function requireNonNegativeInteger(value, label = "value") {
   const number = Number(value);
   if (!Number.isInteger(number) || number < 0) {
@@ -243,6 +253,7 @@ const IPC_ARG_RULES = {
   "delete-kanban-card": [requireId],
   "choose-kanban-photo": [(value) => (value == null || value === "" ? value : requireId(value, "card ID"))],
   "import-kanban-from-url": [requireUrl],
+  "import-kanban-from-urls": [requireUrlArray],
   "ai-fill-kanban-card": [requireRecord],
   "generate-kanban-image": [requireRecord],
   "export-kanban-pdf": [requireId, requireOptionalPath, (value) => (value == null || value === "" ? value : requireId(value, "size ID")), requireOptionalObject],
@@ -699,9 +710,10 @@ app.whenReady().then(async () => {
   registerIpc("delete-kanban-card", (_event, id) => backend.deleteKanbanCard(id));
   registerIpc("choose-kanban-photo", (_event, cardId) => backend.chooseKanbanPhoto(cardId, mainWindow));
   registerIpc("import-kanban-from-url", (_event, url) => backend.importKanbanFromUrl(url));
-registerIpc("ai-fill-kanban-card", (_event, card) => backend.aiFillKanbanCard(card));
-registerIpc("generate-kanban-image", (_event, card) => backend.generateKanbanImage(card));
-registerIpc("export-kanban-pdf", (_event, cardId, destinationPath, sizeId, options) => backend.exportKanbanPdf(cardId, destinationPath, sizeId, options));
+  registerIpc("import-kanban-from-urls", (_event, urls) => backend.importKanbanFromUrls(urls));
+  registerIpc("ai-fill-kanban-card", (_event, card) => backend.aiFillKanbanCard(card));
+  registerIpc("generate-kanban-image", (_event, card) => backend.generateKanbanImage(card));
+  registerIpc("export-kanban-pdf", (_event, cardId, destinationPath, sizeId, options) => backend.exportKanbanPdf(cardId, destinationPath, sizeId, options));
   registerIpc("export-material-pdf", (_event, materialId, destinationPath, sizeId, options) => backend.exportMaterialPdf(materialId, destinationPath, sizeId, options));
   registerIpc("generate-next-job-number", () => backend.generateNextJobNumber());
   registerIpc("generate-next-kanban-inventory-number", () => backend.generateNextKanbanInventoryNumber());
