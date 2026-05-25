@@ -5,6 +5,7 @@ set "NODE=%USERPROFILE%\.cache\codex-runtimes\codex-primary-runtime\dependencies
 set "ELECTRON=%ROOT%node_modules\electron\dist\electron.exe"
 set "DIST=%ROOT%dist\index.html"
 set "DIST_ASSETS=%ROOT%dist\assets"
+set "SETUP=%ROOT%Setup-AMERP.cmd"
 
 if not exist "%NODE%" (
   if exist "C:\Program Files\nodejs\node.exe" (
@@ -22,19 +23,43 @@ if not exist "%NODE%" (
 )
 
 if not exist "%ELECTRON%" (
+  if exist "%SETUP%" (
+    echo Electron runtime was not found. Repairing this AMERP install...
+    call "%SETUP%" --no-pause
+    if errorlevel 1 (
+      echo.
+      echo Repair failed. AMERP was not started.
+      pause
+      exit /b 1
+    )
+  )
+)
+
+if not exist "%ELECTRON%" (
   echo Electron runtime was not found.
   echo Expected: %ELECTRON%
   echo.
-  echo Run this from the completed project folder after dependencies have been installed.
+  echo Run Install-AMERP.cmd to repair this installation.
   pause
   exit /b 1
+)
+
+if not exist "%DIST%" (
+  echo Built app files were not found. Repairing this AMERP install...
+  call "%SETUP%" --no-pause
+  if errorlevel 1 (
+    echo.
+    echo Repair failed. AMERP was not started.
+    pause
+    exit /b 1
+  )
 )
 
 if not exist "%DIST%" (
   echo Built app files were not found.
   echo Expected: %DIST%
   echo.
-  echo Run Build-App.cmd first, then run Start-App.cmd again.
+  echo Run Install-AMERP.cmd to repair this installation.
   pause
   exit /b 1
 )

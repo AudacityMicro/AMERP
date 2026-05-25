@@ -53,25 +53,54 @@ function Ensure-Node {
 }
 
 function Test-PythonReady {
-  if (-not (Test-Command "python")) {
-    return $false
+  foreach ($candidate in @(
+    @{ Command = "python"; Arguments = @("-c", "import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)") },
+    @{ Command = "py"; Arguments = @("-3", "-c", "import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)") }
+  )) {
+    if (-not (Test-Command $candidate.Command)) {
+      continue
+    }
+    try {
+      & $candidate.Command @($candidate.Arguments) *> $null
+      if ($LASTEXITCODE -eq 0) {
+        return $true
+      }
+    } catch {
+    }
   }
-  try {
-    & python -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)" *> $null
-    return $LASTEXITCODE -eq 0
-  } catch {
-    return $false
-  }
+  return $false
 }
 
-function Ensure-Python {
+function Resolve-PythonCommand {
+  foreach ($candidate in @(
+    @{ Command = "python"; PrefixArgs = @(); VersionArgs = @("--version") },
+    @{ Command = "py"; PrefixArgs = @("-3"); VersionArgs = @("-3", "--version") }
+  )) {
+    if (-not (Test-Command $candidate.Command)) {
+      continue
+    }
+    try {
+      & $candidate.Command @($candidate.VersionArgs) *> $null
+      if ($LASTEXITCODE -eq 0) {
+        return $candidate
+      }
+    } catch {
+    }
+  }
+  return $null
+}
+
+function Ensure-OptionalPython {
   if (Test-PythonReady) {
-    Write-Host "Python found: $(python --version)"
+    $pythonCommand = Resolve-PythonCommand
+    if ($pythonCommand) {
+      Write-Host "Optional Python found: $(& $pythonCommand.Command @($pythonCommand.VersionArgs))"
+    }
     return
   }
 
   if (Test-Command "winget") {
-    Write-Step "Python was not found. Trying to install Python 3 with winget"
+    Write-Step "Optional Python was not found. Trying to install Python 3 with winget for the legacy material database importer"
     $wingetArgs = @(
       "install",
       "--id", "Python.Python.3.12",
@@ -83,23 +112,39 @@ function Ensure-Python {
     $process = Start-Process -FilePath "winget" -ArgumentList $wingetArgs -Wait -PassThru
     Refresh-Path
     if ($process.ExitCode -eq 0 -and (Test-PythonReady)) {
-      Write-Host "Python installed: $(python --version)"
+      $pythonCommand = Resolve-PythonCommand
+      if ($pythonCommand) {
+        Write-Host "Optional Python installed: $(& $pythonCommand.Command @($pythonCommand.VersionArgs))"
+      }
       return
     }
   }
 
-  throw "Python 3.9 or newer is required for PDF import parsers. Install Python from https://www.python.org/downloads/, check Add python.exe to PATH, then run Install-AMERP.cmd again."
+  Write-Host "Python 3.9+ is optional. The app will install and run without it, but the legacy Materials-Database SQLite importer will stay unavailable until Python is installed." -ForegroundColor Yellow
 }
 
-function Ensure-PythonDependencies {
-  Write-Step "Installing Python PDF parser dependency"
-  & python -m ensurepip --upgrade
-  if ($LASTEXITCODE -ne 0) {
-    throw "Python ensurepip failed."
+function Ensure-OptionalPythonDependencies {
+  if (-not (Test-PythonReady)) {
+    return
   }
-  & python -m pip install --upgrade pip pypdf
-  if ($LASTEXITCODE -ne 0) {
-    throw "Unable to install Python dependency pypdf."
+
+  $pythonCommand = Resolve-PythonCommand
+  if (-not $pythonCommand) {
+    return
+  }
+
+  Write-Step "Installing optional Python dependency for the legacy material database importer"
+  try {
+    & $pythonCommand.Command @($pythonCommand.PrefixArgs + @("-m", "ensurepip", "--upgrade")) *> $null
+    if ($LASTEXITCODE -ne 0) {
+      throw "Python ensurepip failed."
+    }
+    & $pythonCommand.Command @($pythonCommand.PrefixArgs + @("-m", "pip", "install", "--upgrade", "pip", "pypdf")) *> $null
+    if ($LASTEXITCODE -ne 0) {
+      throw "Unable to install Python dependency pypdf."
+    }
+  } catch {
+    Write-Host "Skipping optional Python dependency installation: $($_.Exception.Message)" -ForegroundColor Yellow
   }
 }
 
@@ -123,12 +168,17 @@ function Create-DesktopShortcut {
 
   $desktop = [Environment]::GetFolderPath("Desktop")
   $shortcutPath = Join-Path $desktop "AMERP.lnk"
-  $targetPath = Join-Path $TargetRoot "Start-App.cmd"
+  $electronPath = Join-Path $TargetRoot "node_modules\electron\dist\electron.exe"
+  if (-not (Test-Path $electronPath)) {
+    throw "Electron runtime was not found after setup: $electronPath"
+  }
   $shell = New-Object -ComObject WScript.Shell
   $shortcut = $shell.CreateShortcut($shortcutPath)
-  $shortcut.TargetPath = $targetPath
+  $shortcut.TargetPath = $electronPath
+  $shortcut.Arguments = "."
   $shortcut.WorkingDirectory = $TargetRoot
   $shortcut.Description = "Start AMERP"
+  $shortcut.IconLocation = $electronPath
   $shortcut.Save()
   Write-Host "Desktop shortcut created: $shortcutPath"
 }
@@ -144,8 +194,9 @@ try {
   Write-Host "Repository: $RepoZipUrl"
   Write-Host "Install folder: $InstallDir"
   Write-Host "Suggested data folder: $DataDir"
-  Write-Host "This installer will verify or install Node.js LTS and Python, install AMERP dependencies, build the app, and create a desktop shortcut."
+  Write-Host "This installer will verify or install Node.js LTS, install AMERP dependencies, build the app, and create a desktop shortcut."
   Write-Host "It is safe to rerun this installer to refresh the application files; your ERP data folder is separate."
+  Write-Host "Python is optional and is only used by the legacy Materials-Database SQLite importer."
 
   if ($DryRun) {
     Write-Host ""
@@ -154,8 +205,8 @@ try {
   }
 
   Ensure-Node
-  Ensure-Python
-  Ensure-PythonDependencies
+  Ensure-OptionalPython
+  Ensure-OptionalPythonDependencies
 
   $tempRoot = Join-Path $env:TEMP ("amerp-install-" + [Guid]::NewGuid().ToString("N"))
   New-Item -ItemType Directory -Force -Path $tempRoot | Out-Null
@@ -188,6 +239,12 @@ try {
   $setup = Start-Process -FilePath $env:ComSpec -ArgumentList $setupArgs -WorkingDirectory $InstallDir -Wait -PassThru
   if ($setup.ExitCode -ne 0) {
     throw "Setup-AMERP.cmd failed with exit code $($setup.ExitCode)."
+  }
+  if (-not (Test-Path (Join-Path $InstallDir "node_modules\electron\dist\electron.exe"))) {
+    throw "Setup finished without installing the Electron runtime."
+  }
+  if (-not (Test-Path (Join-Path $InstallDir "dist\index.html"))) {
+    throw "Setup finished without creating the built app files."
   }
 
   Write-Step "Creating desktop shortcut"
