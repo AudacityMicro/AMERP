@@ -1,0 +1,4 @@
+itemName,internalInventoryNumber,status,minimumLevel,orderQuantity,storageLocation,department,category,vendor,purchaseUrl,packSize,description,orderingNotes
+1/4 in Carbide End Mill,TOOL-0001,Needs Review,2,4,Tool Crib A1,Machining,Cutting Tools,Harvey Tool,https://www.harveytool.com/products/tool-details-123456,1 tool,4 flute carbide end mill for aluminum,Vendor SKU / Part #: 123456; Keep two in drawer
+Nitrile Gloves,SHOP-0002,Active,1 box,3 boxes,Assembly Shelf,Assembly,PPE,McMaster-Carr,https://www.mcmaster.com/example,Box of 100,Disposable nitrile gloves,Size medium preferred
+Shop Towels,SHOP-0003,Unprinted,2 packs,4 packs,Stock Room,Shop Supplies,Shop Supplies,Uline,https://www.uline.com/example,Pack,General shop towels,Confirm exact product before printing

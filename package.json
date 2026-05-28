@@ -19,11 +19,16 @@
     "test": "node --test tests/*.test.cjs",
     "audit:deps": "npx --yes pnpm@10.33.2 audit --prod",
     "secret:scan": "node scripts/secret-scan.cjs",
+    "smoke:install:source:win": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/windows-install-smoke.ps1 -Mode Source",
+    "smoke:install:packaged:win": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/windows-install-smoke.ps1 -Mode Packaged",
+    "smoke:install:packaged:mac": "bash scripts/macos-install-smoke.sh",
+    "smoke:install:packaged:linux": "bash scripts/linux-install-smoke.sh",
     "release:check": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/release-check.ps1",
     "pack": "npm run build && node scripts/run-electron-builder.cjs --dir --publish never",
     "dist": "npm run build && node scripts/run-electron-builder.cjs --publish never",
     "dist:win": "npm run build && node scripts/run-electron-builder.cjs --win nsis --x64 --publish never",
     "dist:mac": "npm run build && node scripts/run-electron-builder.cjs --mac dmg zip --universal --publish never",
+    "dist:linux": "npm run build && node scripts/run-electron-builder.cjs --linux AppImage deb tar.gz --x64 --publish never",
     "release:artifacts": "npm run build && node scripts/run-electron-builder.cjs --publish never"
   },
   "dependencies": {

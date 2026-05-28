@@ -7,6 +7,7 @@ import {
   Archive,
   ArchiveRestore,
   ClipboardList,
+  Clock,
   Database,
   FileDown,
   FolderOpen,
@@ -30,6 +31,8 @@ GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
 const PRIMARY_MODULES = [
   { id: "jobs", label: "Jobs", icon: Package },
+  { id: "timeclock", label: "Time Clock", icon: Clock },
+  { id: "timeclockAdmin", label: "Time Admin", icon: ClipboardList },
   { id: "inspections", label: "Inspections", icon: SearchCheck },
   { id: "nonconformance", label: "Nonconformance", icon: ShieldAlert },
   { id: "kanban", label: "Kanban", icon: ClipboardList },
@@ -74,6 +77,29 @@ const defaultInspectionReportExportOptions = (value = {}) => Object.fromEntries(
 const nowIso = () => new Date().toISOString();
 const today = () => new Date().toISOString().slice(0, 10);
 const uid = (prefix) => `${prefix}-${crypto.randomUUID()}`;
+const WEEKDAY_OPTIONS = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
+const formatTimeClockDateTime = (value) => {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "-";
+  return date.toLocaleString(undefined, { dateStyle: "short", timeStyle: "short" });
+};
+const formatMinutes = (minutes) => {
+  const total = Math.max(0, Number(minutes || 0));
+  const hours = Math.floor(total / 60);
+  const remainder = total % 60;
+  if (hours && remainder) return `${hours}h ${remainder}m`;
+  if (hours) return `${hours}h`;
+  return `${remainder}m`;
+};
+const toDateTimeLocalValue = (value) => {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const offsetMs = date.getTimezoneOffset() * 60000;
+  return new Date(date.getTime() - offsetMs).toISOString().slice(0, 16);
+};
+const fromDateTimeLocalValue = (value) => value ? new Date(value).toISOString() : "";
 
 const blankJob = () => ({
   id: uid("job"),
@@ -352,6 +378,9 @@ const blankKanbanCard = (defaults = {}) => ({
   orderingNotes: "",
   packSize: "",
   description: "",
+  status: "Unprinted",
+  needsReview: false,
+  lastPrintedAt: "",
   active: true,
   archivedAt: "",
   createdAt: nowIso(),
@@ -759,6 +788,48 @@ function kanbanDepartmentColor(preferences, departmentName) {
 function kanbanLocationOptions(preferences, departmentName) {
   const department = kanbanDepartmentList(preferences).find((item) => String(item?.name || "") === String(departmentName || ""));
   return Array.from(new Set((department?.locations || []).map((item) => String(item || "").trim()).filter(Boolean)));
+}
+
+const KANBAN_STATUS_OPTIONS = ["Active", "Unprinted", "Needs Review", "Archived"];
+const KANBAN_STATUS_FILTER_OPTIONS = [...KANBAN_STATUS_OPTIONS, "All"];
+
+function kanbanCardStatus(card) {
+  if (card?.active === false) {
+    return "Archived";
+  }
+  if (KANBAN_STATUS_OPTIONS.includes(card?.status)) {
+    return card.status;
+  }
+  if (card?.needsReview === true) {
+    return "Needs Review";
+  }
+  if (!card?.lastPrintedAt) {
+    return "Unprinted";
+  }
+  return "Active";
+}
+
+function kanbanStatusClass(status) {
+  if (status === "Archived") {
+    return "archived";
+  }
+  if (status === "Needs Review") {
+    return "warning";
+  }
+  if (status === "Unprinted") {
+    return "unprinted";
+  }
+  return "active";
+}
+
+function kanbanStatusPatch(status) {
+  if (status === "Archived") {
+    return { status, active: false, needsReview: false, archivedAt: nowIso() };
+  }
+  if (status === "Needs Review") {
+    return { status, active: true, needsReview: true, archivedAt: "" };
+  }
+  return { status, active: true, needsReview: false, archivedAt: "" };
 }
 
 function kanbanPrintSizes(preferences) {
@@ -1396,6 +1467,60 @@ function isImageAttachment(attachment) {
   return [".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"].some((extension) => filename.endsWith(extension));
 }
 
+function travelerDrawingDocuments(part) {
+  return (part?.documents || []).filter((document) => {
+    const category = String(document?.category || "").trim().toLowerCase();
+    return document?.active !== false
+      && document?.storedPath
+      && category !== "traveler"
+      && (isPdfAttachment(document) || isImageAttachment(document));
+  });
+}
+
+async function buildTravelerDrawingPages(job) {
+  const drawingPages = [];
+  for (const part of job?.parts || []) {
+    for (const document of travelerDrawingDocuments(part)) {
+      const fileUrl = api.assetUrl(document.storedPath);
+      if (!fileUrl) {
+        continue;
+      }
+      const basePage = {
+        partId: part.id,
+        partNumber: part.partNumber || part.partName || part.id,
+        documentId: document.id,
+        filename: document.originalFilename || document.storedFilename || "Part drawing",
+        fileUrl
+      };
+      if (isPdfAttachment(document)) {
+        try {
+          const pdf = await getDocument(fileUrl).promise;
+          for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+            drawingPages.push({
+              ...basePage,
+              id: `${part.id}-${document.id}-${pageNumber}`,
+              renderType: "pdf",
+              pageNumber,
+              pageCount: pdf.numPages
+            });
+          }
+        } catch (_error) {
+          // Keep the traveler export moving; unsupported PDFs remain normal part attachments.
+        }
+      } else if (isImageAttachment(document)) {
+        drawingPages.push({
+          ...basePage,
+          id: `${part.id}-${document.id}-image`,
+          renderType: "image",
+          pageNumber: 1,
+          pageCount: 1
+        });
+      }
+    }
+  }
+  return drawingPages;
+}
+
 function chunkList(items = [], size = 10) {
   const chunks = [];
   for (let index = 0; index < items.length; index += size) {
@@ -1610,10 +1735,16 @@ function useAutoSave({
       if (generation !== generationRef.current) {
         return;
       }
-      const savedHash = serialize(savedValue ?? currentValue);
+      const savedPayload = savedValue ?? currentValue;
+      const savedHash = serialize(savedPayload);
       lastSavedRef.current = savedHash;
-      latestValueRef.current = savedValue ?? currentValue;
-      await onSavedRef.current?.(savedValue ?? currentValue);
+      // Do not let an older save response clobber newer local edits made while it was in flight.
+      if (serialize(latestValueRef.current) !== currentHash) {
+        onStateChangeRef.current?.("saving");
+        return;
+      }
+      latestValueRef.current = savedPayload;
+      await onSavedRef.current?.(savedPayload);
       onStateChangeRef.current?.("saved");
     } catch (error) {
       if (generation === generationRef.current) {
@@ -1760,6 +1891,7 @@ function Workspace() {
   const fusionImportInFlight = useRef(false);
   const refreshWorkspaceRef = useRef(null);
   const openKanbanCardRef = useRef(null);
+  const kanbanCardIdRef = useRef(null);
   const openMaterialRef = useRef(null);
 
   const [selectedJobId, setSelectedJobId] = useState(null);
@@ -1779,6 +1911,7 @@ function Workspace() {
   const [kanbanPrintDialogOpen, setKanbanPrintDialogOpen] = useState(false);
   const [selectedKanbanPrintSizeId, setSelectedKanbanPrintSizeId] = useState("");
   const [selectedKanbanPrintMonochrome, setSelectedKanbanPrintMonochrome] = useState(false);
+  const [lastKanbanImportUndo, setLastKanbanImportUndo] = useState(null);
 
   const [selectedMaterialId, setSelectedMaterialId] = useState(null);
   const [material, setMaterial] = useState(null);
@@ -1796,6 +1929,10 @@ function Workspace() {
   const [selectedTemplateId, setSelectedTemplateId] = useState(null);
   const [lastIndexMaintenance, setLastIndexMaintenance] = useState(0);
   const complianceEnabled = iso9001ComplianceEnabled(workspace?.preferences);
+
+  useEffect(() => {
+    kanbanCardIdRef.current = kanbanCard?.id || null;
+  }, [kanbanCard?.id]);
   const enabledModules = effectiveEnabledModules(workspace?.preferences?.enabledModules, workspace?.preferences);
   const moduleIsEnabled = (moduleId) => moduleId === "settings" || enabledModules[moduleId] !== false;
   const firstAvailableView = firstEnabledModuleId(enabledModules);
@@ -1920,6 +2057,8 @@ useEffect(() => api.onDeepLink?.((payload) => {
       || (view === "kanban" && kanbanScreen === "list")
       || (view === "materials" && materialScreen === "list")
       || (view === "metrology" && metrologyScreen === "list")
+      || view === "timeclock"
+      || view === "timeclockAdmin"
       || view === "settings") {
       setSaveState("saved");
     }
@@ -2185,6 +2324,26 @@ useEffect(() => api.onDeepLink?.((payload) => {
       setNonconformanceRecord(null);
     }
     setView("inspections");
+    setSaveState("saved");
+  };
+
+  const showTimeClock = () => {
+    if (selectedNonconformanceId) {
+      api.releaseLock("nonconformance", selectedNonconformanceId).catch(() => {});
+      setSelectedNonconformanceId(null);
+      setNonconformanceRecord(null);
+    }
+    setView("timeclock");
+    setSaveState("saved");
+  };
+
+  const showTimeClockAdmin = () => {
+    if (selectedNonconformanceId) {
+      api.releaseLock("nonconformance", selectedNonconformanceId).catch(() => {});
+      setSelectedNonconformanceId(null);
+      setNonconformanceRecord(null);
+    }
+    setView("timeclockAdmin");
     setSaveState("saved");
   };
 
@@ -2974,13 +3133,20 @@ useEffect(() => api.onDeepLink?.((payload) => {
 
   const generateCurrentKanbanImage = async () => {
     if (!kanbanCard) return;
+    const targetCardId = kanbanCard.id;
     setKanbanAiState("imaging");
     setBusy(true);
     try {
       const updated = await api.generateKanbanImage(kanbanCard);
       if (updated) {
-        setKanbanCard(updated);
-        showStatus("AI product image generated.");
+        const appliedToCurrentCard = kanbanCardIdRef.current === targetCardId;
+        if (appliedToCurrentCard) {
+          setKanbanCard(updated);
+        }
+        await refreshWorkspace();
+        showStatus(appliedToCurrentCard
+          ? "AI product image generated."
+          : "AI product image generated for a Kanban card that is no longer open.");
       }
     } catch (error) {
       showStatus(error.message || String(error));
@@ -3017,6 +3183,10 @@ useEffect(() => api.onDeepLink?.((payload) => {
         selectedKanbanPrintSizeId || defaultKanbanPrintSizeId(workspace?.preferences),
         { monochrome: selectedKanbanPrintMonochrome }
       );
+      const refreshed = await api.loadKanbanCard(saved.id).catch(() => null);
+      if (refreshed) {
+        await applySavedKanbanCard(refreshed);
+      }
       showStatus("Kanban card PDF created.");
     } catch (error) {
       showStatus(error.message || String(error));
@@ -3112,6 +3282,9 @@ useEffect(() => api.onDeepLink?.((payload) => {
     if (!selectedKanbanId) return;
     setBusy(true);
     try {
+      if (kanbanCard?.id === selectedKanbanId && kanbanCard.active === false) {
+        await api.saveKanbanCard(kanbanCard);
+      }
       await api.deleteKanbanCard(selectedKanbanId);
       await api.releaseLock("kanban", selectedKanbanId).catch(() => {});
       setSelectedKanbanId(null);
@@ -3426,14 +3599,59 @@ useEffect(() => api.onDeepLink?.((payload) => {
     }
   };
 
+  const registerKanbanImportUndo = (imported, label) => {
+    const cards = (imported?.cards || []).filter((item) => item?.id);
+    if (!cards.length) {
+      return;
+    }
+    setLastKanbanImportUndo({
+      label,
+      cardIds: cards.map((item) => item.id),
+      createdAt: nowIso()
+    });
+  };
+
+  const undoLastKanbanImport = async () => {
+    const undoBatch = lastKanbanImportUndo;
+    const cardIds = [...new Set((undoBatch?.cardIds || []).filter(Boolean))];
+    if (!cardIds.length || busy) {
+      return;
+    }
+    const label = undoBatch.label || "last Kanban import";
+    if (!window.confirm(`Undo ${label}? This will permanently remove ${cardIds.length} Kanban card${cardIds.length === 1 ? "" : "s"} created by that import.`)) {
+      return;
+    }
+    setBusy(true);
+    try {
+      const result = await api.undoKanbanImport(cardIds);
+      if (selectedKanbanId && cardIds.includes(selectedKanbanId)) {
+        await api.releaseLock("kanban", selectedKanbanId).catch(() => {});
+        setSelectedKanbanId(null);
+        setKanbanCard(null);
+        setKanbanScreen("list");
+        setKanbanAiState("idle");
+      }
+      setLastKanbanImportUndo(null);
+      await refreshWorkspace();
+      const deletedCount = result.deleted?.length || 0;
+      const missingCount = result.missing?.length || 0;
+      const errorCount = result.errors?.length || 0;
+      showStatus([
+        `Undid ${deletedCount} imported Kanban card${deletedCount === 1 ? "" : "s"}.`,
+        missingCount ? `${missingCount} already missing.` : "",
+        errorCount ? `${errorCount} could not be removed.` : ""
+      ].filter(Boolean).join(" "));
+    } catch (error) {
+      showStatus(error.message || String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const importKanbanUrlList = async (urls) => {
     const uniqueUrls = [...new Set((Array.isArray(urls) ? urls : []).map((item) => String(item || "").trim()).filter(Boolean))];
     if (!uniqueUrls.length) {
       showStatus("Paste at least one product URL to import.");
-      return;
-    }
-    if (uniqueUrls.length === 1) {
-      await importKanbanFromUrl(uniqueUrls[0]);
       return;
     }
     setKanbanAiState("filling");
@@ -3445,12 +3663,97 @@ useEffect(() => api.onDeepLink?.((payload) => {
       if (imported.cards?.[0]?.id) {
         await openKanbanCard(imported.cards[0].id);
       }
+      registerKanbanImportUndo(imported, "URL list import");
       const warningCount = imported.warnings?.length || 0;
       const errorCount = imported.errors?.length || 0;
       const details = [
         `Imported ${imported.cards?.length || 0} Kanban card${(imported.cards?.length || 0) === 1 ? "" : "s"}.`,
+        imported.cards?.length ? "Use Undo Import to remove this batch if needed." : "",
         warningCount ? `${warningCount} warning${warningCount === 1 ? "" : "s"}.` : "",
         errorCount ? `${errorCount} error${errorCount === 1 ? "" : "s"}:\n- ${imported.errors.map((item) => `${item.url}: ${item.message}`).join("\n- ")}` : ""
+      ].filter(Boolean).join("\n");
+      showStatus(details);
+    } catch (error) {
+      showStatus(error.message || String(error));
+    } finally {
+      setKanbanAiState("idle");
+      setBusy(false);
+    }
+  };
+
+  const formatKanbanImportMessage = (actionLabel, imported) => {
+    const summaryMessages = (imported.summaries || []).map((item) => `${item.file || "CSV"}: ${item.message || item}`);
+    const warningMessages = (imported.warnings || []).map((item) => `${item.file || item.url || "CSV"}: ${item.message || item}`);
+    const errorMessages = (imported.errors || []).map((item) => `${item.file || item.url || "CSV"}: ${item.message || item}`);
+    return [
+      `${actionLabel} ${imported.cards?.length || 0} Kanban card${(imported.cards?.length || 0) === 1 ? "" : "s"}.`,
+      imported.cards?.length ? "Use Undo Import to remove this batch if needed." : "",
+      summaryMessages.length ? `Summary:\n- ${summaryMessages.join("\n- ")}` : "",
+      warningMessages.length ? `Warnings:\n- ${warningMessages.join("\n- ")}` : "",
+      errorMessages.length ? `Errors:\n- ${errorMessages.join("\n- ")}` : ""
+    ].filter(Boolean).join("\n");
+  };
+
+  const importKanbanUrlsFromCsv = async () => {
+    setKanbanAiState("filling");
+    setBusy(true);
+    showStatus("Importing product URLs from CSV. AMERP will create review-needed Kanban cards from each unique URL.");
+    try {
+      const imported = await api.importKanbanUrlsFromCsv();
+      await refreshWorkspace();
+      if (imported.cards?.[0]?.id) {
+        await openKanbanCard(imported.cards[0].id);
+      }
+      registerKanbanImportUndo(imported, "URL CSV import");
+      showStatus(formatKanbanImportMessage("Imported from CSV URLs:", imported));
+    } catch (error) {
+      showStatus(error.message || String(error));
+    } finally {
+      setKanbanAiState("idle");
+      setBusy(false);
+    }
+  };
+
+  const importKanbanCardsFromCsv = async () => {
+    setKanbanAiState("filling");
+    setBusy(true);
+    showStatus("Importing Kanban cards from CSV. New records will be marked as needing review.");
+    try {
+      const imported = await api.importKanbanCardsFromCsv();
+      await refreshWorkspace();
+      if (imported.cards?.[0]?.id) {
+        await openKanbanCard(imported.cards[0].id);
+      }
+      registerKanbanImportUndo(imported, "card CSV import");
+      showStatus(formatKanbanImportMessage("Imported from card CSV:", imported));
+    } catch (error) {
+      showStatus(error.message || String(error));
+    } finally {
+      setKanbanAiState("idle");
+      setBusy(false);
+    }
+  };
+
+  const importKanbanFusionToolLibrary = async () => {
+    setKanbanAiState("filling");
+    setBusy(true);
+    showStatus("Importing Fusion tool library. AMERP will create review-needed Kanban cards for unique tools.");
+    try {
+      const imported = await api.importKanbanFusionToolLibrary();
+      await refreshWorkspace();
+      if (imported.cards?.[0]?.id) {
+        await openKanbanCard(imported.cards[0].id);
+      }
+      registerKanbanImportUndo(imported, "Fusion tool library import");
+      const summaryMessages = (imported.summaries || []).map((item) => `${item.file || "Fusion CSV"}: ${item.message || item}`);
+      const warningMessages = (imported.warnings || []).map((item) => `${item.file || "Fusion CSV"}: ${item.message || item}`);
+      const errorMessages = (imported.errors || []).map((item) => `${item.file || "Fusion CSV"}: ${item.message || item}`);
+      const details = [
+        `Created ${imported.cards?.length || 0} Kanban card${(imported.cards?.length || 0) === 1 ? "" : "s"} from Fusion tool library.`,
+        imported.cards?.length ? "Use Undo Import to remove this batch if needed." : "",
+        summaryMessages.length ? `Summary:\n- ${summaryMessages.join("\n- ")}` : "",
+        warningMessages.length ? `Warnings:\n- ${warningMessages.join("\n- ")}` : "",
+        errorMessages.length ? `Errors:\n- ${errorMessages.join("\n- ")}` : ""
       ].filter(Boolean).join("\n");
       showStatus(details);
     } catch (error) {
@@ -3466,6 +3769,7 @@ useEffect(() => api.onDeepLink?.((payload) => {
       showStatus("Enter a purchase URL before refreshing from URL.");
       return;
     }
+    const targetCardId = kanbanCard.id;
     setKanbanAiState("filling");
     setBusy(true);
     try {
@@ -3473,12 +3777,10 @@ useEffect(() => api.onDeepLink?.((payload) => {
       if (!imported?.card) {
         return;
       }
-      setKanbanCard((current) => {
-        if (!current) {
-          return current;
-        }
+      const appliedToCurrentCard = kanbanCardIdRef.current === targetCardId;
+      if (appliedToCurrentCard) {
         const next = imported.card;
-        return {
+        setKanbanCard((current) => current ? ({
           ...current,
           itemName: next.itemName || current.itemName,
           minimumLevel: next.minimumLevel || current.minimumLevel,
@@ -3490,12 +3792,16 @@ useEffect(() => api.onDeepLink?.((payload) => {
           orderingNotes: next.orderingNotes || current.orderingNotes,
           packSize: next.packSize || current.packSize,
           description: next.description || current.description
-        };
-      });
+        }) : current);
+      }
       if (imported.warnings?.length) {
-        showStatus(`Refreshed product details with warnings:\n- ${[...new Set(imported.warnings)].join("\n- ")}`);
+        showStatus(appliedToCurrentCard
+          ? `Refreshed product details with warnings:\n- ${[...new Set(imported.warnings)].join("\n- ")}`
+          : "Refresh finished for a Kanban card that is no longer open.");
       } else {
-        showStatus("Refreshed product details from URL.");
+        showStatus(appliedToCurrentCard
+          ? "Refreshed product details from URL."
+          : "Refresh finished for a Kanban card that is no longer open.");
       }
     } catch (error) {
       showStatus(error.message || String(error));
@@ -3846,6 +4152,24 @@ useEffect(() => api.onDeepLink?.((payload) => {
         dangerActions: []
       };
     }
+    if (view === "timeclock") {
+      return {
+        breadcrumbs: [{ label: "Time Clock", onClick: showTimeClock, active: true }],
+        title: "Time Clock",
+        subtitle: "Employee clock-in and clock-out.",
+        primaryActions: [],
+        dangerActions: []
+      };
+    }
+    if (view === "timeclockAdmin") {
+      return {
+        breadcrumbs: [{ label: "Time Admin", onClick: showTimeClockAdmin, active: true }],
+        title: "Time Admin",
+        subtitle: "Session review, paid marking, corrections, and employee management.",
+        primaryActions: [],
+        dangerActions: []
+      };
+    }
     if (view === "kanban") {
       return {
         breadcrumbs: [
@@ -3854,7 +4178,7 @@ useEffect(() => api.onDeepLink?.((payload) => {
         ],
         title: kanbanScreen === "detail" ? (kanbanCard?.itemName || kanbanCard?.internalInventoryNumber || "New Card") : "Kanban",
         subtitle: kanbanScreen === "detail"
-          ? [kanbanCard?.vendor, kanbanCard?.category, kanbanCard?.internalInventoryNumber].filter(Boolean).join(" / ")
+          ? [kanbanCardStatus(kanbanCard), kanbanCard?.vendor, kanbanCard?.category, kanbanCard?.internalInventoryNumber].filter(Boolean).join(" / ")
           : "Purchasing cards for replenishment and reorder points.",
         primaryActions: [
           kanbanScreen === "list" ? <button key="new-kanban" onClick={() => createNewKanbanCard()}><Plus size={15} /> New Card</button> : null,
@@ -3942,6 +4266,8 @@ useEffect(() => api.onDeepLink?.((payload) => {
           {PRIMARY_MODULES.filter((module) => moduleIsEnabled(module.id)).map((module) => {
             const handlers = {
               jobs: showJobList,
+              timeclock: showTimeClock,
+              timeclockAdmin: showTimeClockAdmin,
               inspections: showInspectionList,
               nonconformance: showNonconformanceList,
               kanban: showKanbanList,
@@ -4082,6 +4408,20 @@ useEffect(() => api.onDeepLink?.((payload) => {
             onOpenReport={openInspectionReportFromList}
           />
         )}
+        {view === "timeclock" && moduleIsEnabled("timeclock") && (
+          <TimeClockView
+            workspace={workspace}
+            onRefresh={refreshWorkspace}
+            onStatus={showStatus}
+          />
+        )}
+        {view === "timeclockAdmin" && moduleIsEnabled("timeclockAdmin") && (
+          <TimeClockAdminView
+            workspace={workspace}
+            onRefresh={refreshWorkspace}
+            onStatus={showStatus}
+          />
+        )}
         {view === "kanban" && moduleIsEnabled("kanban") && (
           <KanbanView
             workspace={workspace}
@@ -4093,6 +4433,11 @@ useEffect(() => api.onDeepLink?.((payload) => {
             onCreateNew={() => createNewKanbanCard()}
             onImportFromUrl={importKanbanFromUrl}
             onImportUrls={importKanbanUrlList}
+            onImportUrlsFromCsv={importKanbanUrlsFromCsv}
+            onImportCardsFromCsv={importKanbanCardsFromCsv}
+            onImportFusionLibrary={importKanbanFusionToolLibrary}
+            importUndo={lastKanbanImportUndo}
+            onUndoImport={undoLastKanbanImport}
             onRefreshFromUrl={refreshCurrentKanbanFromUrl}
             onChoosePhoto={chooseKanbanPhoto}
             onAssignInventoryNumber={assignNextKanbanInventoryNumber}
@@ -4237,9 +4582,481 @@ function DashboardView({ workspace }) {
   return (
     <div className="dashboard-grid">
       <StatCard label="Open Jobs" value={counts.openJobs || 0} />
+      <StatCard label="Clocked In" value={counts.openTimeClockSessions || 0} />
       <StatCard label="Active Materials" value={counts.materials || 0} />
       <StatCard label="Active Gages" value={counts.instruments || 0} />
       <StatCard label="Gages Due" value={counts.overdueInstruments || 0} accent />
+    </div>
+  );
+}
+
+function TimeClockView({ workspace, onRefresh, onStatus }) {
+  const [dashboard, setDashboard] = useState(workspace.timeClockDashboard || null);
+  const [clockEmployeeId, setClockEmployeeId] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const loadDashboard = async () => {
+    setLoading(true);
+    try {
+      const next = await api.getTimeClockDashboard();
+      setDashboard(next);
+      return next;
+    } catch (error) {
+      onStatus(error.message || String(error));
+      return null;
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    setDashboard(workspace.timeClockDashboard || null);
+  }, [workspace.dataFolder]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const run = async () => {
+      setLoading(true);
+      try {
+        const next = await api.getTimeClockDashboard();
+        if (!cancelled) {
+          setDashboard(next);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          onStatus(error.message || String(error));
+        }
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      }
+    };
+    run();
+    return () => {
+      cancelled = true;
+    };
+  }, [workspace.dataFolder]);
+
+  const runMutation = async (action, successMessage) => {
+    setLoading(true);
+    try {
+      await action();
+      await loadDashboard();
+      await onRefresh();
+      onStatus(successMessage);
+    } catch (error) {
+      onStatus(error.message || String(error));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const employees = dashboard?.employees || workspace.employees || [];
+  const activeEmployees = dashboard?.activeEmployees || employees.filter((employee) => employee.active !== false);
+  const openSessions = dashboard?.openSessions || [];
+  const selectedEmployee = activeEmployees.find((employee) => employee.id === clockEmployeeId) || activeEmployees[0] || null;
+  const selectedOpenSession = selectedEmployee ? openSessions.find((session) => session.employeeId === selectedEmployee.id) : null;
+
+  const clockIn = async () => {
+    if (!selectedEmployee) {
+      onStatus("Ask an admin to add an employee before clocking in.");
+      return;
+    }
+    await runMutation(() => api.clockInEmployee(selectedEmployee.id), `${selectedEmployee.name} clocked in.`);
+  };
+
+  const clockOut = async () => {
+    if (!selectedEmployee) {
+      onStatus("Choose an employee before clocking out.");
+      return;
+    }
+    await runMutation(() => api.clockOutEmployee(selectedEmployee.id), `${selectedEmployee.name} clocked out.`);
+  };
+
+  return (
+    <div className="workflow-stack timeclock-stack employee-timeclock-stack">
+      <section className="panel employee-clock-panel">
+        <div className="panel-heading inline">
+          <div>
+            <h3>Employee Time Clock</h3>
+            <span>Choose your name, then clock in or clock out.</span>
+          </div>
+          {loading ? <span className="status-pill warning">Updating</span> : null}
+        </div>
+        <div className="employee-clock-card">
+          <label className="field">
+            <span>Employee</span>
+            <select value={selectedEmployee?.id || ""} onChange={(event) => setClockEmployeeId(event.target.value)} disabled={!activeEmployees.length || loading}>
+              {activeEmployees.map((employee) => (
+                <option key={employee.id} value={employee.id}>{employee.name}</option>
+              ))}
+              {!activeEmployees.length ? <option value="">No active employees</option> : null}
+            </select>
+          </label>
+          <div className="employee-clock-status">
+            <span>Status</span>
+            <strong>{selectedOpenSession ? "Clocked In" : "Clocked Out"}</strong>
+            {selectedOpenSession ? <small>Since {formatTimeClockDateTime(selectedOpenSession.clockInAt)}</small> : <small>Ready to clock in.</small>}
+          </div>
+          <div className="employee-clock-buttons">
+            <button className="employee-clock-button" onClick={clockIn} disabled={!selectedEmployee || Boolean(selectedOpenSession) || loading}>
+              <Clock size={18} /> Clock In
+            </button>
+            <button className="employee-clock-button" onClick={clockOut} disabled={!selectedEmployee || !selectedOpenSession || loading}>
+              <Clock size={18} /> Clock Out
+            </button>
+          </div>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function TimeClockAdminView({ workspace, onRefresh, onStatus }) {
+  const [dashboard, setDashboard] = useState(workspace.timeClockDashboard || null);
+  const [periodStartDate, setPeriodStartDate] = useState(workspace.timeClockDashboard?.payPeriod?.startDate || "");
+  const [employeeFilter, setEmployeeFilter] = useState("");
+  const [newEmployeeName, setNewEmployeeName] = useState("");
+  const [includeArchived, setIncludeArchived] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [correction, setCorrection] = useState(null);
+  const [bulkConfirm, setBulkConfirm] = useState(null);
+
+  const loadDashboard = async (nextPeriodStartDate = periodStartDate, nextEmployeeFilter = employeeFilter) => {
+    setLoading(true);
+    try {
+      const next = await api.getTimeClockDashboard({
+        ...(nextPeriodStartDate ? { periodStartDate: nextPeriodStartDate } : {}),
+        ...(nextEmployeeFilter ? { employeeId: nextEmployeeFilter } : {})
+      });
+      setDashboard(next);
+      if (!nextPeriodStartDate && next.payPeriod?.startDate) {
+        setPeriodStartDate(next.payPeriod.startDate);
+      }
+      return next;
+    } catch (error) {
+      onStatus(error.message || String(error));
+      return null;
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    setDashboard(workspace.timeClockDashboard || null);
+    setPeriodStartDate(workspace.timeClockDashboard?.payPeriod?.startDate || "");
+  }, [workspace.dataFolder]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const run = async () => {
+      setLoading(true);
+      try {
+        const next = await api.getTimeClockDashboard({
+          ...(periodStartDate ? { periodStartDate } : {}),
+          ...(employeeFilter ? { employeeId: employeeFilter } : {})
+        });
+        if (!cancelled) {
+          setDashboard(next);
+          if (!periodStartDate && next.payPeriod?.startDate) {
+            setPeriodStartDate(next.payPeriod.startDate);
+          }
+        }
+      } catch (error) {
+        if (!cancelled) {
+          onStatus(error.message || String(error));
+        }
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      }
+    };
+    run();
+    return () => {
+      cancelled = true;
+    };
+  }, [workspace.dataFolder, periodStartDate, employeeFilter]);
+
+  const runMutation = async (action, successMessage) => {
+    setLoading(true);
+    try {
+      await action();
+      await loadDashboard();
+      await onRefresh();
+      onStatus(successMessage);
+    } catch (error) {
+      onStatus(error.message || String(error));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const employees = dashboard?.employees || workspace.employees || [];
+  const visibleEmployees = includeArchived ? employees : employees.filter((employee) => employee.active !== false);
+  const groups = dashboard?.groups || [];
+  const visibleClosedSessions = (dashboard?.sessions || []).filter((session) => session.status === "Closed");
+  const totals = dashboard?.totals || {};
+
+  const createEmployee = async () => {
+    const name = newEmployeeName.trim();
+    if (!name) {
+      onStatus("Employee name is required.");
+      return;
+    }
+    await runMutation(async () => {
+      await api.saveEmployee({ name });
+      setNewEmployeeName("");
+    }, `Created employee ${name}.`);
+  };
+
+  const markSessionsPaid = async (sessionIds, paid) => {
+    if (!sessionIds.length) {
+      onStatus("No closed sessions are visible for this action.");
+      return;
+    }
+    await runMutation(() => api.markTimeClockSessionsPaid(sessionIds, paid), `${paid ? "Marked" : "Unmarked"} ${sessionIds.length} session${sessionIds.length === 1 ? "" : "s"} as paid.`);
+  };
+
+  const openCorrection = (session) => {
+    setCorrection({
+      session,
+      clockInAt: toDateTimeLocalValue(session.clockInAt),
+      clockOutAt: toDateTimeLocalValue(session.clockOutAt),
+      reason: ""
+    });
+  };
+
+  const saveCorrection = async () => {
+    if (!correction?.session?.id) {
+      return;
+    }
+    const reason = String(correction.reason || "").trim();
+    if (!reason) {
+      onStatus("A correction reason is required.");
+      return;
+    }
+    const sessionLabel = correction.session.employeeName || "session";
+    await runMutation(async () => {
+      await api.correctTimeClockSession(correction.session.id, {
+        clockInAt: fromDateTimeLocalValue(correction.clockInAt),
+        clockOutAt: fromDateTimeLocalValue(correction.clockOutAt)
+      }, reason);
+      setCorrection(null);
+    }, `Corrected ${sessionLabel} time clock session.`);
+  };
+
+  return (
+    <div className="workflow-stack timeclock-stack">
+      <div className="dashboard-grid">
+        <StatCard label="Pay Period" value={dashboard?.payPeriod?.label || "-"} />
+        <StatCard label="Worked" value={formatMinutes(totals.totalMinutes)} />
+        <StatCard label="Unpaid" value={formatMinutes(totals.unpaidMinutes)} accent />
+        <StatCard label="Clocked In" value={totals.openSessionCount || 0} />
+      </div>
+
+      <section className="panel">
+        <div className="panel-heading inline">
+          <div>
+            <h3>Pay Period Dashboard</h3>
+            <span>{dashboard?.payPeriod?.label || "Current pay period"}</span>
+          </div>
+          <div className="toolbar">
+            <button onClick={() => setPeriodStartDate(dashboard?.payPeriod?.previousStartDate || "")} disabled={!dashboard?.payPeriod?.previousStartDate || loading}>Previous</button>
+            <button onClick={() => setPeriodStartDate("")} disabled={loading}>Current</button>
+            <button onClick={() => setPeriodStartDate(dashboard?.payPeriod?.nextStartDate || "")} disabled={!dashboard?.payPeriod?.nextStartDate || loading}>Next</button>
+          </div>
+        </div>
+        <div className="timeclock-filter-row">
+          <TextField label="Period Start" type="date" value={dashboard?.payPeriod?.startDate || periodStartDate} onChange={setPeriodStartDate} disabled={loading} />
+          <label className="field">
+            <span>Employee Filter</span>
+            <select value={employeeFilter} onChange={(event) => setEmployeeFilter(event.target.value)} disabled={loading}>
+              <option value="">All employees</option>
+              {employees.map((employee) => (
+                <option key={employee.id} value={employee.id}>{employee.name}{employee.active === false ? " (archived)" : ""}</option>
+              ))}
+            </select>
+          </label>
+          <div className="toolbar timeclock-bulk-actions">
+            <button onClick={() => setBulkConfirm({ paid: true, sessionIds: visibleClosedSessions.map((session) => session.id) })} disabled={!visibleClosedSessions.length || loading}>Mark Visible Paid</button>
+            <button onClick={() => setBulkConfirm({ paid: false, sessionIds: visibleClosedSessions.map((session) => session.id) })} disabled={!visibleClosedSessions.length || loading}>Unmark Visible Paid</button>
+          </div>
+        </div>
+
+        <div className="stack-list">
+          {groups.map((group) => (
+            <div className="subpanel timeclock-group" key={group.employeeId}>
+              <div className="subpanel-header">
+                <div>
+                  <h4>{group.employeeName}</h4>
+                  <span>{formatMinutes(group.totalMinutes)} total / {formatMinutes(group.unpaidMinutes)} unpaid</span>
+                </div>
+                {group.employeeActive ? <span className="status-pill">Active</span> : <span className="status-pill archived">Archived</span>}
+              </div>
+              <div className="table-wrap">
+                <table className="materials-table timeclock-table">
+                  <thead>
+                    <tr>
+                      <th>Clock In</th>
+                      <th>Clock Out</th>
+                      <th>Duration</th>
+                      <th>Status</th>
+                      <th>Paid</th>
+                      <th>Corrections</th>
+                      <th>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {group.sessions.map((session) => (
+                      <tr key={session.id}>
+                        <td>{formatTimeClockDateTime(session.clockInAt)}</td>
+                        <td>{formatTimeClockDateTime(session.clockOutAt)}</td>
+                        <td>{session.status === "Closed" ? formatMinutes(session.durationMinutes) : "-"}</td>
+                        <td><span className={`status-pill ${session.status === "Open" ? "warning" : ""}`}>{session.status}</span></td>
+                        <td><span className={`status-pill ${session.paid ? "" : "unprinted"}`}>{session.paid ? "Paid" : "Unpaid"}</span></td>
+                        <td>{session.corrected || session.corrections?.length ? <span className="status-pill warning">Corrected</span> : "-"}</td>
+                        <td>
+                          <div className="toolbar compact-toolbar">
+                            <button onClick={() => openCorrection(session)} disabled={loading}>Correct</button>
+                            {session.status === "Closed" ? (
+                              <button onClick={() => markSessionsPaid([session.id], !session.paid)} disabled={loading}>
+                                {session.paid ? "Unmark Paid" : "Mark Paid"}
+                              </button>
+                            ) : (
+                              <span className="status-pill warning">Open Session</span>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          ))}
+          {!groups.length && <div className="empty-inline">No sessions in this pay period.</div>}
+        </div>
+      </section>
+
+      <section className="panel">
+        <div className="panel-heading inline">
+          <div>
+            <h3>Employees</h3>
+            <span>Name-only operational records. Archived employees remain available in historical sessions.</span>
+          </div>
+          <label className="inline-checkbox">
+            <input type="checkbox" checked={includeArchived} onChange={(event) => setIncludeArchived(event.target.checked)} />
+            Show archived
+          </label>
+        </div>
+        <div className="timeclock-actions-row">
+          <TextField label="New Employee Name" value={newEmployeeName} onChange={setNewEmployeeName} placeholder="Employee name" disabled={loading} />
+          <button onClick={createEmployee} disabled={!newEmployeeName.trim() || loading}><Plus size={15} /> Add Employee</button>
+        </div>
+        <div className="stack-list">
+          {visibleEmployees.map((employee) => (
+            <EmployeeNameEditor
+              key={employee.id}
+              employee={employee}
+              disabled={loading}
+              onSave={(name) => runMutation(() => api.saveEmployee({ ...employee, name }), `Saved ${name}.`)}
+              onArchive={() => runMutation(() => api.archiveEmployee(employee.id), `Archived ${employee.name}.`)}
+              onUnarchive={() => runMutation(() => api.unarchiveEmployee(employee.id), `Unarchived ${employee.name}.`)}
+            />
+          ))}
+          {!visibleEmployees.length && <div className="empty-inline">No employees saved yet.</div>}
+        </div>
+      </section>
+
+      <SessionCorrectionDialog
+        correction={correction}
+        onChange={setCorrection}
+        onCancel={() => setCorrection(null)}
+        onConfirm={saveCorrection}
+        disabled={loading}
+      />
+      <ConfirmDialog
+        open={Boolean(bulkConfirm)}
+        title={bulkConfirm?.paid ? "Mark Visible Sessions Paid" : "Unmark Visible Sessions Paid"}
+        message={`${bulkConfirm?.paid ? "Mark" : "Unmark"} ${bulkConfirm?.sessionIds?.length || 0} visible closed session${bulkConfirm?.sessionIds?.length === 1 ? "" : "s"} as paid?`}
+        confirmLabel={bulkConfirm?.paid ? "Mark Paid" : "Unmark Paid"}
+        onCancel={() => setBulkConfirm(null)}
+        onConfirm={async () => {
+          const next = bulkConfirm;
+          setBulkConfirm(null);
+          await markSessionsPaid(next?.sessionIds || [], Boolean(next?.paid));
+        }}
+      />
+    </div>
+  );
+}
+
+function EmployeeNameEditor({ employee, disabled, onSave, onArchive, onUnarchive }) {
+  const [name, setName] = useState(employee.name || "");
+  useEffect(() => {
+    setName(employee.name || "");
+  }, [employee.id, employee.name]);
+  const dirty = name.trim() && name.trim() !== employee.name;
+  return (
+    <div className="inline-card timeclock-employee-row">
+      <div>
+        <strong>{employee.name}</strong>
+        <span>{employee.id}</span>
+      </div>
+      <input value={name} onChange={(event) => setName(event.target.value)} disabled={disabled} />
+      <span className={`status-pill ${employee.active === false ? "archived" : ""}`}>{employee.active === false ? "Archived" : "Active"}</span>
+      <div className="toolbar">
+        <button onClick={() => onSave(name.trim())} disabled={disabled || !dirty}>Save Name</button>
+        {employee.active === false ? (
+          <button onClick={onUnarchive} disabled={disabled}><ArchiveRestore size={14} /> Unarchive</button>
+        ) : (
+          <button className="danger subtle" onClick={onArchive} disabled={disabled}><Archive size={14} /> Archive</button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function SessionCorrectionDialog({ correction, onChange, onCancel, onConfirm, disabled }) {
+  if (!correction) {
+    return null;
+  }
+  return (
+    <div className="dialog-backdrop">
+      <div className="dialog-panel narrow timeclock-correction-dialog">
+        <h3>Correct Time Clock Session</h3>
+        <p>
+          {correction.session?.employeeName || "Employee"} / {formatTimeClockDateTime(correction.session?.clockInAt)}
+        </p>
+        <div className="form-grid compact-2">
+          <TextField
+            label="Clock In"
+            type="datetime-local"
+            value={correction.clockInAt}
+            onChange={(value) => onChange((current) => ({ ...current, clockInAt: value }))}
+            disabled={disabled}
+          />
+          <TextField
+            label="Clock Out"
+            type="datetime-local"
+            value={correction.clockOutAt}
+            onChange={(value) => onChange((current) => ({ ...current, clockOutAt: value }))}
+            disabled={disabled}
+          />
+        </div>
+        <TextArea
+          label="Correction Reason"
+          value={correction.reason}
+          onChange={(value) => onChange((current) => ({ ...current, reason: value }))}
+          rows={3}
+        />
+        <div className="dialog-actions">
+          <button className="subtle" onClick={onCancel} disabled={disabled}>Cancel</button>
+          <button onClick={onConfirm} disabled={disabled || !correction.reason.trim()}>Save Correction</button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -4998,11 +5815,16 @@ function JobsView({
 function JobListScreen({ jobs, onOpenJob, onCreateJob, onImportSubtractPurchaseOrders, onImportXometryPurchaseOrders }) {
   const [query, setQuery] = useState("");
   const [showArchived, setShowArchived] = useState(false);
+  const [showCompleted, setShowCompleted] = useState(false);
   const filteredJobs = jobs.filter((item) => {
     if (!showArchived && item.active === false) {
       return false;
     }
-    const haystack = [item.jobNumber, item.customer, item.routeSummary, item.id].join(" ").toLowerCase();
+    const jobStatus = String(item.status || "Open").trim().toLowerCase();
+    if (!showCompleted && (jobStatus === "complete" || jobStatus === "completed")) {
+      return false;
+    }
+    const haystack = [item.jobNumber, item.customer, item.status, item.routeSummary, item.id].join(" ").toLowerCase();
     return haystack.includes(query.trim().toLowerCase());
   });
 
@@ -5016,6 +5838,9 @@ function JobListScreen({ jobs, onOpenJob, onCreateJob, onImportSubtractPurchaseO
         <div className="toolbar">
           <button onClick={() => setShowArchived((current) => !current)}>
             {showArchived ? "Hide Archived" : "Show Archived"}
+          </button>
+          <button onClick={() => setShowCompleted((current) => !current)}>
+            {showCompleted ? "Hide Complete" : "Show Complete"}
           </button>
           <button onClick={onImportXometryPurchaseOrders}><Import size={15} /> Import Xometry PO</button>
           <button onClick={onImportSubtractPurchaseOrders}><Import size={15} /> Import Subtract PO</button>
@@ -7871,15 +8696,18 @@ function NonconformanceView({
 function PrintPdfPage({ fileUrl, pageNumber = 1, bare = false }) {
   const canvasRef = useRef(null);
   const [error, setError] = useState("");
+  const [rendered, setRendered] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
     const render = async () => {
       if (!fileUrl || !canvasRef.current) {
+        setRendered(true);
         return;
       }
       try {
         setError("");
+        setRendered(false);
         const loadingTask = getDocument(fileUrl);
         const pdf = await loadingTask.promise;
         const safePageNumber = Math.max(1, Math.min(pdf.numPages, pageNumber || 1));
@@ -7897,9 +8725,13 @@ function PrintPdfPage({ fileUrl, pageNumber = 1, bare = false }) {
         canvas.style.width = "100%";
         canvas.style.height = "auto";
         await page.render({ canvasContext: context, viewport }).promise;
+        if (!cancelled) {
+          setRendered(true);
+        }
       } catch (nextError) {
         if (!cancelled) {
           setError(nextError.message || String(nextError));
+          setRendered(true);
         }
       }
     };
@@ -7916,19 +8748,23 @@ function PrintPdfPage({ fileUrl, pageNumber = 1, bare = false }) {
     return <div className="traveler-empty-state">{error}</div>;
   }
   return (
-    <div className={bare ? "inspection-print-drawing-frame inspection-print-drawing-frame-bare" : "inspection-print-drawing-frame"}>
+    <div className={`${bare ? "inspection-print-drawing-frame inspection-print-drawing-frame-bare" : "inspection-print-drawing-frame"} ${rendered ? "print-render-ready" : "print-render-pending"}`}>
       <canvas ref={canvasRef} className="inspection-print-drawing-canvas" />
     </div>
   );
 }
 
 function PrintImagePage({ fileUrl, alt = "", bare = false }) {
+  const [loaded, setLoaded] = useState(false);
+  useEffect(() => {
+    setLoaded(false);
+  }, [fileUrl]);
   if (!fileUrl) {
     return <div className="traveler-empty-state">No attachment image available.</div>;
   }
   return (
-    <div className={bare ? "inspection-print-attachment-frame inspection-print-attachment-frame-bare" : "inspection-print-attachment-frame"}>
-      <img src={fileUrl} alt={alt || "Material attachment"} />
+    <div className={`${bare ? "inspection-print-attachment-frame inspection-print-attachment-frame-bare" : "inspection-print-attachment-frame"} ${loaded ? "print-render-ready" : "print-render-pending"}`}>
+      <img src={fileUrl} alt={alt || "Material attachment"} onLoad={() => setLoaded(true)} onError={() => setLoaded(true)} />
     </div>
   );
 }
@@ -8856,6 +9692,11 @@ function KanbanView({
   onCreateNew,
   onImportFromUrl,
   onImportUrls,
+  onImportUrlsFromCsv,
+  onImportCardsFromCsv,
+  onImportFusionLibrary,
+  importUndo,
+  onUndoImport,
   onRefreshFromUrl,
   onChoosePhoto,
   onAssignInventoryNumber,
@@ -8873,7 +9714,6 @@ function KanbanView({
     storageLocation: "All",
     status: "Active"
   });
-  const [showArchived, setShowArchived] = useState(false);
   const [importDialogOpen, setImportDialogOpen] = useState(false);
   const cards = workspace.kanbanCards || [];
   const vendorOptions = Array.from(new Set(cards.map((item) => item.vendor).filter(Boolean))).sort((a, b) => a.localeCompare(b));
@@ -8883,11 +9723,11 @@ function KanbanView({
     ? kanbanLocationOptions(workspace.preferences, filters.department)
     : Array.from(new Set(kanbanDepartmentList(workspace.preferences).flatMap((item) => item.locations || []).filter(Boolean))).sort((a, b) => a.localeCompare(b));
   const filteredCards = cards.filter((item) => {
-    const statusValue = item.active === false ? "Archived" : "Active";
-    if (!showArchived && item.active === false) {
+    const statusValue = kanbanCardStatus(item);
+    if (filters.status === "Active" && statusValue === "Archived") {
       return false;
     }
-    if (filters.status !== "All" && statusValue !== filters.status) {
+    if (filters.status !== "All" && filters.status !== "Active" && statusValue !== filters.status) {
       return false;
     }
     if (filters.vendor !== "All" && (item.vendor || "") !== filters.vendor) {
@@ -8909,6 +9749,7 @@ function KanbanView({
       item.category,
       item.department,
       item.storageLocation,
+      statusValue,
       item.id
     ].join(" ").toLowerCase();
     return haystack.includes(filters.query.trim().toLowerCase());
@@ -8938,6 +9779,8 @@ function KanbanView({
           onAddDepartment={onAddDepartment}
           onAddLocation={onAddLocation}
           onAddCategory={onAddCategory}
+          importUndo={importUndo}
+          onUndoImport={onUndoImport}
           aiState={aiState}
         />
       ) : (
@@ -8956,10 +9799,14 @@ function KanbanView({
                 storageLocation: "All",
                 status: "Active"
               })}>Clear Filters</button>
-              <button onClick={() => setShowArchived((current) => !current)}>
-                {showArchived ? "Hide Archived" : "Show Archived"}
-              </button>
               <button onClick={() => setImportDialogOpen(true)}><Import size={15} /> Import From URL</button>
+              <button onClick={onImportCardsFromCsv}><Import size={15} /> Import Cards CSV</button>
+              <button onClick={onImportFusionLibrary}><Import size={15} /> Import Fusion Tools</button>
+              {importUndo?.cardIds?.length ? (
+                <button className="subtle" onClick={onUndoImport}>
+                  <RotateCcw size={15} /> Undo Import ({importUndo.cardIds.length})
+                </button>
+              ) : null}
               <button onClick={onCreateNew}><Plus size={15} /> New Card</button>
             </div>
           </div>
@@ -8997,7 +9844,7 @@ function KanbanView({
             <SelectField
               label="Status"
               value={filters.status}
-              options={["Active", "Archived", "All"]}
+              options={KANBAN_STATUS_FILTER_OPTIONS}
               onChange={(value) => setFilters((current) => ({ ...current, status: value }))}
             />
           </div>
@@ -9007,9 +9854,12 @@ function KanbanView({
             </div>
           ) : null}
           <div className="record-list top-gap">
-            {filteredCards.map((item) => (
-              <button key={item.id} className="record-list-item record-list-row" onClick={() => onOpenCard(item.id)}>
-                <div className="record-row-primary">
+            {filteredCards.map((item) => {
+              const status = kanbanCardStatus(item);
+              const statusClass = kanbanStatusClass(status);
+              return (
+                <button key={item.id} className={`record-list-item record-list-row kanban-list-row kanban-row-${statusClass}`} onClick={() => onOpenCard(item.id)}>
+                  <div className="record-row-primary">
                     <strong>{item.itemName || item.internalInventoryNumber || item.id}</strong>
                     <span>{item.internalInventoryNumber || "No inventory number"}</span>
                   </div>
@@ -9018,10 +9868,12 @@ function KanbanView({
                     <small>{item.category || "No category"}</small>
                     <small>{item.department || "No department"}</small>
                     <small>{item.storageLocation || "No location"}</small>
-                    <small>{item.active === false ? "Archived" : "Active"}</small>
+                    {item.lastPrintedAt ? <small>Last printed {formatDateTime(item.lastPrintedAt)}</small> : null}
+                    <small className={`status-pill ${statusClass}`}>{status}</small>
                   </div>
                 </button>
-            ))}
+              );
+            })}
             {!filteredCards.length && (
               <EmptyState
                 icon={ClipboardList}
@@ -9041,6 +9893,10 @@ function KanbanView({
           await (onImportUrls ? onImportUrls(urls) : onImportFromUrl(urls[0]));
           setImportDialogOpen(false);
         }}
+        onImportCsv={async () => {
+          await onImportUrlsFromCsv?.();
+          setImportDialogOpen(false);
+        }}
       />
     </>
   );
@@ -9057,6 +9913,8 @@ function KanbanDetailScreen({
   onAddDepartment,
   onAddLocation,
   onAddCategory,
+  importUndo,
+  onUndoImport,
   aiState = "idle"
 }) {
   const vendorOptions = Array.from(new Set(["", ...(workspace.preferences?.kanbanVendors || []), card.vendor || ""]));
@@ -9077,12 +9935,17 @@ function KanbanDetailScreen({
           <div className="panel-heading inline">
             <div>
               <h3>Card Details</h3>
-              <span>{aiMessage || (card.active === false ? "Archived" : "Active")}</span>
+              <span>{aiMessage || kanbanCardStatus(card)}</span>
             </div>
             <div className="toolbar">
               <button onClick={onImportFromUrl} disabled={!card.purchaseUrl || aiState === "filling"}>
                 <Import size={14} /> {aiState === "filling" ? "Refreshing URL..." : "Refresh From URL"}
               </button>
+              {importUndo?.cardIds?.length ? (
+                <button className="subtle" onClick={onUndoImport}>
+                  <RotateCcw size={14} /> Undo Import ({importUndo.cardIds.length})
+                </button>
+              ) : null}
             </div>
           </div>
           <div className="form-grid compact-3">
@@ -9103,6 +9966,16 @@ function KanbanDetailScreen({
               onChange={(value) => onChange({ vendor: value })}
               onAddOption={onAddVendor}
             />
+            <SelectField
+              label="Status"
+              value={kanbanCardStatus(card)}
+              options={KANBAN_STATUS_OPTIONS}
+              onChange={(value) => onChange(kanbanStatusPatch(value))}
+            />
+            <div className="field">
+              <span>Last Printed</span>
+              <div className="static-field">{formatDateTime(card.lastPrintedAt)}</div>
+            </div>
             <TextField label="Minimum Level" value={card.minimumLevel || ""} onChange={(value) => onChange({ minimumLevel: value })} />
             <TextField label="Order Quantity" value={card.orderQuantity || ""} onChange={(value) => onChange({ orderQuantity: value })} />
             <SelectWithInlineAdd
@@ -9167,7 +10040,7 @@ function KanbanDetailScreen({
   );
 }
 
-function KanbanImportDialog({ open, onClose, onImport }) {
+function KanbanImportDialog({ open, onClose, onImport, onImportCsv }) {
   const [rawUrls, setRawUrls] = useState("");
   const [busy, setBusy] = useState(false);
   const urls = [...new Set(rawUrls.split(/[\s,]+/).map((item) => item.trim()).filter(Boolean))];
@@ -9189,7 +10062,7 @@ function KanbanImportDialog({ open, onClose, onImport }) {
         <div className="panel-heading">
           <h3>Import Product URLs</h3>
         </div>
-        <p>Paste one product URL, or paste a list with one URL per line. AMERP will create one Kanban card per URL.</p>
+        <p>Paste one product URL, paste a list with one URL per line, or import URLs from a CSV file. AMERP will create one Kanban card per URL.</p>
         <TextArea
           label="Product URLs"
           value={rawUrls}
@@ -9200,6 +10073,22 @@ function KanbanImportDialog({ open, onClose, onImport }) {
         <p className="muted small">{urls.length ? `${urls.length} URL${urls.length === 1 ? "" : "s"} ready to import.` : "No URLs detected yet."}</p>
         <div className="dialog-actions">
           <button onClick={onClose} disabled={busy}>Cancel</button>
+          <button
+            onClick={async () => {
+              if (!onImportCsv) {
+                return;
+              }
+              setBusy(true);
+              try {
+                await onImportCsv();
+              } finally {
+                setBusy(false);
+              }
+            }}
+            disabled={busy || !onImportCsv}
+          >
+            <Import size={14} /> {busy ? "Importing..." : "Import URLs CSV"}
+          </button>
           <button
             onClick={async () => {
               if (!urls.length) {
@@ -9958,6 +10847,10 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
     kanbanInventoryPrefix: workspace.preferences?.kanbanInventoryPrefix || "J03C",
     kanbanStartingInventoryNumber: String(workspace.preferences?.kanbanStartingInventoryNumber ?? 600)
   });
+  const [timeClockSettings, setTimeClockSettings] = useState({
+    payPeriodStartDay: workspace.preferences?.payPeriodStartDay || "thursday",
+    payPeriodLengthDays: String(workspace.preferences?.payPeriodLengthDays ?? 7)
+  });
   const [metrologyOptions, setMetrologyOptions] = useState({
     metrologyToolTypes: workspace.preferences?.metrologyToolTypes || [],
     metrologyManufacturers: workspace.preferences?.metrologyManufacturers || [],
@@ -10017,6 +10910,10 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
     setKanbanNumberSettings({
       kanbanInventoryPrefix: workspace.preferences?.kanbanInventoryPrefix || "J03C",
       kanbanStartingInventoryNumber: String(workspace.preferences?.kanbanStartingInventoryNumber ?? 600)
+    });
+    setTimeClockSettings({
+      payPeriodStartDay: workspace.preferences?.payPeriodStartDay || "thursday",
+      payPeriodLengthDays: String(workspace.preferences?.payPeriodLengthDays ?? 7)
     });
     setMetrologyOptions({
       metrologyToolTypes: workspace.preferences?.metrologyToolTypes || [],
@@ -10305,6 +11202,20 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
   });
 
   useAutoSave({
+    value: timeClockSettings,
+    resetKey: `time-clock-settings:${workspace.dataFolder}:${workspace.preferences?.payPeriodStartDay || ""}:${workspace.preferences?.payPeriodLengthDays ?? ""}`,
+    enabled: true,
+    isReady: (current) => Boolean(current),
+    save: async (current) => {
+      await onSavePreferences({
+        payPeriodStartDay: WEEKDAY_OPTIONS.includes(current.payPeriodStartDay) ? current.payPeriodStartDay : "thursday",
+        payPeriodLengthDays: Number(current.payPeriodLengthDays || 0) || 7
+      }, { silent: true });
+      return current;
+    }
+  });
+
+  useAutoSave({
     value: metrologyOptions,
     resetKey: `metrology-settings:${workspace.dataFolder}:${JSON.stringify({
       metrologyToolTypes: workspace.preferences?.metrologyToolTypes || [],
@@ -10443,6 +11354,7 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
       ["nonconformance", "Nonconformance"]
     ] : []),
     ["kanban", "Kanban"],
+    ["timeclock", "Time Clock"],
     ["materials", "Materials"],
     ["gages", "Gages"],
     ["templates", "Templates"],
@@ -10464,10 +11376,10 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
         ))}
       </div>
 
-      <section className={`panel ${activeSettingsTab === "system" || activeSettingsTab === "jobs" || activeSettingsTab === "inspections" || activeSettingsTab === "nonconformance" || activeSettingsTab === "kanban" ? "" : "settings-section-hidden"}`}>
+      <section className={`panel ${activeSettingsTab === "system" || activeSettingsTab === "jobs" || activeSettingsTab === "inspections" || activeSettingsTab === "nonconformance" || activeSettingsTab === "kanban" || activeSettingsTab === "timeclock" ? "" : "settings-section-hidden"}`}>
         <div className="panel-heading inline">
           <div>
-            <h3>{activeSettingsTab === "system" ? "Data" : activeSettingsTab === "jobs" ? "Job Settings" : activeSettingsTab === "inspections" ? "Inspection Settings" : activeSettingsTab === "nonconformance" ? "Nonconformance Settings" : "Kanban Settings"}</h3>
+            <h3>{activeSettingsTab === "system" ? "Data" : activeSettingsTab === "jobs" ? "Job Settings" : activeSettingsTab === "inspections" ? "Inspection Settings" : activeSettingsTab === "nonconformance" ? "Nonconformance Settings" : activeSettingsTab === "timeclock" ? "Time Clock Settings" : "Kanban Settings"}</h3>
             <span>Workspace location and numbering defaults.</span>
           </div>
         </div>
@@ -10532,6 +11444,29 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
               <TextField label="Inventory Prefix" value={kanbanNumberSettings.kanbanInventoryPrefix} onChange={(value) => setKanbanNumberSettings((current) => ({ ...current, kanbanInventoryPrefix: value }))} />
               <TextField label="Starting Inventory Number" value={kanbanNumberSettings.kanbanStartingInventoryNumber} onChange={(value) => setKanbanNumberSettings((current) => ({ ...current, kanbanStartingInventoryNumber: value }))} />
             </div>
+          </div>
+          <div className={`subpanel ${activeSettingsTab === "timeclock" ? "" : "settings-section-hidden"}`}>
+            <div className="subpanel-header">
+              <div>
+                <h4>Pay Period</h4>
+                <span>Sessions are grouped by the period containing their clock-in time.</span>
+              </div>
+            </div>
+            <div className="form-grid compact-2">
+              <SelectField
+                label="Start Day"
+                value={timeClockSettings.payPeriodStartDay}
+                options={WEEKDAY_OPTIONS}
+                onChange={(value) => setTimeClockSettings((current) => ({ ...current, payPeriodStartDay: value }))}
+              />
+              <TextField
+                label="Length Days"
+                type="number"
+                value={timeClockSettings.payPeriodLengthDays}
+                onChange={(value) => setTimeClockSettings((current) => ({ ...current, payPeriodLengthDays: value }))}
+              />
+            </div>
+            <div className="empty-inline">Default weekly pay period is Thursday through Wednesday.</div>
           </div>
           <div className={`subpanel ${activeSettingsTab === "nonconformance" ? "" : "settings-section-hidden"}`}>
             <div className="subpanel-header">
@@ -11379,9 +12314,12 @@ function TravelerPrintPacket({ jobId }) {
   const [materials, setMaterials] = useState([]);
   const [instruments, setInstruments] = useState([]);
   const [libraries, setLibraries] = useState({});
+  const [drawingPages, setDrawingPages] = useState(null);
   const [error, setError] = useState("");
 
   useEffect(() => {
+    let cancelled = false;
+    setDrawingPages(null);
     const load = async () => {
       try {
         const [loadedJob, materialRows, instrumentRows, loadedLibraries] = await Promise.all([
@@ -11391,27 +12329,44 @@ function TravelerPrintPacket({ jobId }) {
           api.loadLibraries()
         ]);
         if (!loadedJob) throw new Error("Job not found.");
+        const loadedDrawingPages = await buildTravelerDrawingPages(loadedJob);
+        if (cancelled) {
+          return;
+        }
         setJob(loadedJob);
         setMaterials(materialRows);
         setInstruments(instrumentRows);
         setLibraries(loadedLibraries || {});
+        setDrawingPages(loadedDrawingPages);
       } catch (loadError) {
-        setError(loadError.message || String(loadError));
+        if (!cancelled) {
+          setError(loadError.message || String(loadError));
+        }
       }
     };
     load();
+    return () => {
+      cancelled = true;
+    };
   }, [jobId]);
 
   if (error) return <Fatal title="Print Error" message={error} />;
-  if (!job) return <LoadingScreen message="Loading traveler..." />;
+  if (!job || !drawingPages) return <LoadingScreen message="Loading traveler..." />;
 
   const materialMap = new Map(materials.map((item) => [item.id, item]));
   const instrumentMap = new Map(instruments.map((item) => [item.instrumentId, item]));
   const partCount = job.parts.length;
   const operationCount = job.parts.reduce((sum, part) => sum + (part.operations || []).length, 0);
+  const drawingPagesByPartId = drawingPages.reduce((map, page) => {
+    if (!map.has(page.partId)) {
+      map.set(page.partId, []);
+    }
+    map.get(page.partId).push(page);
+    return map;
+  }, new Map());
 
   return (
-    <div className="print-shell traveler-shell">
+    <div className="print-shell traveler-shell traveler-print-ready">
       <div className="print-actions screen-only">
         <button onClick={() => { window.location.hash = "/"; }}>Back</button>
         <button onClick={() => window.print()}>Print</button>
@@ -11496,6 +12451,16 @@ function TravelerPrintPacket({ jobId }) {
             </div>
             </div>
           </section>
+
+          {(drawingPagesByPartId.get(part.id) || []).map((drawingPage) => (
+            <section key={drawingPage.id} className="print-page traveler-page traveler-page-sheet traveler-drawing-page" aria-label={`${drawingPage.partNumber} ${drawingPage.filename}`}>
+              {drawingPage.renderType === "pdf" ? (
+                <PrintPdfPage fileUrl={drawingPage.fileUrl} pageNumber={drawingPage.pageNumber || 1} bare />
+              ) : (
+                <PrintImagePage fileUrl={drawingPage.fileUrl} alt={drawingPage.filename} bare />
+              )}
+            </section>
+          ))}
 
           <div className="traveler-operation-list">
               {part.operations.map((operation, operationIndex) => {

@@ -205,6 +205,92 @@ function imageFromProduct(product) {
   return image?.url || image?.src || "";
 }
 
+function htmlAttribute(tag, name) {
+  const escaped = String(name || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return firstMatch(tag, new RegExp(`\\b${escaped}\\s*=\\s*["']([^"']+)["']`, "i"));
+}
+
+function bestSrcsetCandidate(srcset) {
+  const candidates = String(srcset || "")
+    .split(",")
+    .map((entry) => {
+      const parts = normalizeWhitespace(entry).split(/\s+/);
+      const src = parts[0] || "";
+      const width = Number(String(parts[1] || "").replace(/[^\d.]/g, "")) || 0;
+      return { src, width };
+    })
+    .filter((item) => item.src);
+  candidates.sort((a, b) => b.width - a.width);
+  return candidates[0]?.src || "";
+}
+
+function isLikelyBadImageText(value) {
+  return /logo|sprite|icon|favicon|placeholder|avatar|banner|tracking|pixel|loader|spinner/i.test(String(value || ""));
+}
+
+function extractRenderedSnapshotImage(html) {
+  const raw = firstMatch(html, /<script\b[^>]*id=["']amerp-rendered-product-snapshot["'][^>]*>([\s\S]*?)<\/script>/i);
+  if (!raw) {
+    return "";
+  }
+  try {
+    const snapshot = JSON.parse(raw);
+    const images = Array.isArray(snapshot?.images) ? snapshot.images : [];
+    const match = images.find((image) => image?.src && !isLikelyBadImageText(`${image.src} ${image.alt || ""}`));
+    return match?.src || images[0]?.src || "";
+  } catch {
+    return "";
+  }
+}
+
+function extractImageFromImgTags(url, html) {
+  const tags = String(html || "").match(/<img\b[^>]*>/gi) || [];
+  const candidates = [];
+  for (const tag of tags) {
+    const descriptor = [
+      htmlAttribute(tag, "src"),
+      htmlAttribute(tag, "data-src"),
+      htmlAttribute(tag, "data-original"),
+      htmlAttribute(tag, "data-image"),
+      htmlAttribute(tag, "data-zoom-image"),
+      htmlAttribute(tag, "alt"),
+      htmlAttribute(tag, "class"),
+      htmlAttribute(tag, "id")
+    ].join(" ");
+    if (isLikelyBadImageText(descriptor)) {
+      continue;
+    }
+    const rawSrc = bestSrcsetCandidate(htmlAttribute(tag, "srcset") || htmlAttribute(tag, "data-srcset"))
+      || htmlAttribute(tag, "src")
+      || htmlAttribute(tag, "data-src")
+      || htmlAttribute(tag, "data-original")
+      || htmlAttribute(tag, "data-image")
+      || htmlAttribute(tag, "data-zoom-image");
+    const absolute = asAbsoluteUrl(url, rawSrc);
+    if (!absolute) {
+      continue;
+    }
+    const classText = `${htmlAttribute(tag, "class")} ${htmlAttribute(tag, "id")} ${htmlAttribute(tag, "alt")}`.toLowerCase();
+    const width = Number(htmlAttribute(tag, "width")) || 0;
+    const height = Number(htmlAttribute(tag, "height")) || 0;
+    let score = width * height;
+    if (/product|main|primary|hero|zoom|detail|gallery|media/.test(classText)) {
+      score += 1000000;
+    }
+    if (/thumb/.test(classText)) {
+      score -= 1000;
+    }
+    candidates.push({ absolute, score });
+  }
+  candidates.sort((a, b) => b.score - a.score);
+  return candidates[0]?.absolute || "";
+}
+
+function firstLikelyImageCandidate(candidates) {
+  const normalized = candidates.map((candidate) => normalizeWhitespace(candidate)).filter(Boolean);
+  return normalized.find((candidate) => !isLikelyBadImageText(candidate)) || normalized[0] || "";
+}
+
 function extractVendorPartNumber(html, product) {
   const text = stripTags(html);
   return normalizeWhitespace(product?.sku || product?.mpn || product?.partNumber || product?.itemNumber || product?.productNumber || "")
@@ -280,13 +366,14 @@ function extractProductData(url, html) {
     || stripTags(firstMatch(html, /<div\b[^>]*(?:id|class)=["'][^"']*(?:description|product-detail|product-info)[^"']*["'][^>]*>([\s\S]{20,2500}?)<\/div>/i))
     || firstMatch(html, /"description"\s*:\s*"([^"]{10,})"/i);
 
-  const imageUrl = asAbsoluteUrl(
-    url,
-    imageFromProduct(product)
-      || firstJsonStringMatch(html, ["imageUrl", "thumbnailUrl", "thumbnail", "primaryImage"])
-      || firstMatch(html, /<link\b[^>]*rel=["']image_src["'][^>]*href=["']([^"']+)["']/i)
-      || extractMetaContent(html, (name) => name === "og:image" || name === "twitter:image")
-  );
+  const imageUrl = asAbsoluteUrl(url, firstLikelyImageCandidate([
+    imageFromProduct(product),
+    firstJsonStringMatch(html, ["imageUrl", "thumbnailUrl", "thumbnail", "primaryImage"]),
+    extractRenderedSnapshotImage(html),
+    firstMatch(html, /<link\b[^>]*rel=["']image_src["'][^>]*href=["']([^"']+)["']/i),
+    extractMetaContent(html, (name) => name === "og:image" || name === "twitter:image"),
+    extractImageFromImgTags(url, html)
+  ]));
 
   const itemName = normalizeTitle(title, vendor);
   const vendorPartNumber = extractVendorPartNumber(html, product);

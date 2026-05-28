@@ -670,6 +670,75 @@ function parseSubtractPartRow(line) {
   };
 }
 
+function parseSubtractPartCoreRow(line) {
+  const normalized = normalizeText(line);
+  const tokens = normalized.split(" ");
+  if (tokens.length < 5) {
+    return null;
+  }
+  const printRequired = tokens[tokens.length - 1];
+  if (!["Yes", "No"].includes(printRequired)) {
+    return null;
+  }
+  const qtyIndex = tokens.findIndex((token, index) => index < tokens.length - 1 && /^\d+$/.test(token));
+  if (qtyIndex <= 0) {
+    return null;
+  }
+  const toleranceIndex = qtyIndex + 1;
+  const tolerance = tokens[toleranceIndex] || "";
+  if (!/\d/.test(tolerance) || (!tolerance.includes(".") && !/[^A-Za-z0-9]/.test(tolerance))) {
+    return null;
+  }
+  if (toleranceIndex >= tokens.length - 2) {
+    return null;
+  }
+  return {
+    part_name: normalizeText(tokens.slice(0, qtyIndex).join(" ")),
+    quantity: normalizeText(tokens[qtyIndex]),
+    material: "",
+    tolerance: normalizeText(tolerance),
+    finishing: normalizeText(tokens.slice(toleranceIndex + 1, -1).join(" ")),
+    print_required: normalizeText(printRequired)
+  };
+}
+
+function parseSubtractPartRows(rowLines) {
+  const rows = rowLines.map(normalizeText).filter(Boolean);
+  const coreIndexes = rows
+    .map((line, index) => (parseSubtractPartRow(line) || parseSubtractPartCoreRow(line) ? index : -1))
+    .filter((index) => index >= 0);
+  const parts = [];
+  const warnings = [];
+
+  if (!coreIndexes.length) {
+    return {
+      parts,
+      warnings: rows.map((line) => `Could not parse part row: ${line}`)
+    };
+  }
+
+  coreIndexes.forEach((coreIndex, index) => {
+    const segmentStart = index > 0 ? coreIndexes[index - 1] + 1 : 0;
+    const segmentEnd = index + 1 < coreIndexes.length ? coreIndexes[index + 1] : rows.length;
+    const segment = rows.slice(segmentStart, segmentEnd);
+    const coreOffset = coreIndex - segmentStart;
+    const parsed = parseSubtractPartRow(rows[coreIndex]) || parseSubtractPartCoreRow(rows[coreIndex]);
+    if (!parsed) {
+      warnings.push(`Could not parse part row: ${rows[coreIndex]}`);
+      return;
+    }
+    const wrappedMaterial = normalizeText(segment
+      .filter((_, offset) => offset !== coreOffset)
+      .join(" "));
+    parts.push({
+      ...parsed,
+      material: normalizeText([parsed.material, wrappedMaterial].filter(Boolean).join(" "))
+    });
+  });
+
+  return { parts, warnings };
+}
+
 async function parseSubtractPurchaseOrder(filePath) {
   const result = {
     source_path: String(filePath),
@@ -758,14 +827,9 @@ async function parseSubtractPurchaseOrder(filePath) {
     }
     rowLines.push(line);
   }
-  for (const line of rowLines) {
-    const parsed = parseSubtractPartRow(line);
-    if (parsed) {
-      result.parts.push(parsed);
-    } else {
-      result.warnings.push(`Could not parse part row: ${normalizeText(line)}`);
-    }
-  }
+  const parsedRows = parseSubtractPartRows(rowLines);
+  result.parts.push(...parsedRows.parts);
+  result.warnings.push(...parsedRows.warnings);
   if (!result.purchase_order) {
     result.error = "Missing PO NUMBER in the purchase order.";
   } else if (!result.parts.length) {
@@ -789,5 +853,6 @@ async function parseSubtractPurchaseOrders(filePaths) {
 module.exports = {
   parseXometryTravelers,
   parseXometryPurchaseOrders,
-  parseSubtractPurchaseOrders
+  parseSubtractPurchaseOrders,
+  parseSubtractPartRows
 };

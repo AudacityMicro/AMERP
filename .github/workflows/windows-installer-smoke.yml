@@ -1,0 +1,102 @@
+name: Windows Installer Smoke
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/windows-installer-smoke.yml"
+      - ".github/workflows/release.yml"
+      - "Install-AMERP.cmd"
+      - "Install-AMERP.ps1"
+      - "Setup-AMERP.cmd"
+      - "Start-App.cmd"
+      - "Build-App.cmd"
+      - "electron-builder.yml"
+      - "electron/**"
+      - "scripts/**"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - "src/**"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/windows-installer-smoke.yml"
+      - ".github/workflows/release.yml"
+      - "Install-AMERP.cmd"
+      - "Install-AMERP.ps1"
+      - "Setup-AMERP.cmd"
+      - "Start-App.cmd"
+      - "Build-App.cmd"
+      - "electron-builder.yml"
+      - "electron/**"
+      - "scripts/**"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - "src/**"
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: "22"
+  PNPM_VERSION: "10.33.2"
+
+jobs:
+  source-installer-smoke:
+    name: Source installer smoke
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Run source installer smoke test
+        shell: powershell
+        run: >
+          powershell -NoProfile -ExecutionPolicy Bypass -File scripts/windows-install-smoke.ps1
+          -Mode Source
+          -RepoZipUrl "https://github.com/${{ github.repository }}/archive/${{ github.sha }}.zip"
+
+  packaged-installer-smoke:
+    name: Packaged installer smoke
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Python dependency for legacy importer
+        run: python -m pip install --upgrade pip pypdf
+
+      - name: Build Windows installer
+        shell: powershell
+        run: npm run dist:win
+
+      - name: Run packaged installer smoke test
+        shell: powershell
+        run: |
+          $installer = Get-ChildItem -Path release -Filter *.exe | Select-Object -First 1
+          if (-not $installer) {
+            throw "No Windows installer was produced under release/."
+          }
+          powershell -NoProfile -ExecutionPolicy Bypass -File scripts/windows-install-smoke.ps1 -Mode Packaged -InstallerPath $installer.FullName

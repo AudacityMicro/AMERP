@@ -1,0 +1,88 @@
+name: Linux Installer Smoke
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/linux-installer-smoke.yml"
+      - ".github/workflows/release.yml"
+      - "electron-builder.yml"
+      - "electron/**"
+      - "scripts/**"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - "src/**"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/linux-installer-smoke.yml"
+      - ".github/workflows/release.yml"
+      - "electron-builder.yml"
+      - "electron/**"
+      - "scripts/**"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - "src/**"
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: "22"
+  PNPM_VERSION: "10.33.2"
+
+jobs:
+  packaged-installer-smoke:
+    name: Packaged app smoke
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Linux runtime dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb libgtk-3-0 libnss3 libxss1 libgbm1 libatk-bridge2.0-0
+          sudo apt-get install -y libasound2t64 || sudo apt-get install -y libasound2
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Python dependency for legacy importer
+        run: python -m pip install --upgrade pip pypdf
+
+      - name: Build Linux artifacts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npm run dist:linux
+
+      - name: Run Linux packaged app smoke test
+        run: |
+          artifact="$(find release -maxdepth 1 -name '*.tar.gz' -print -quit)"
+          if [ -z "$artifact" ]; then
+            artifact="$(find release -maxdepth 1 -name '*.AppImage' -print -quit)"
+          fi
+          if [ -z "$artifact" ]; then
+            echo "No Linux tar.gz or AppImage artifact was produced under release/." >&2
+            exit 1
+          fi
+          npm run smoke:install:packaged:linux -- --artifact "$artifact"

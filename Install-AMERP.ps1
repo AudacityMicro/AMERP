@@ -2,7 +2,9 @@ param(
   [string]$InstallDir = (Join-Path $env:USERPROFILE "AMERP"),
   [string]$DataDir = (Join-Path ([Environment]::GetFolderPath("MyDocuments")) "AMERP-Data"),
   [string]$RepoZipUrl = "https://github.com/AudacityMicro/AMERP/archive/refs/heads/main.zip",
+  [string]$RepoZipPath = "",
   [switch]$NoLaunch,
+  [switch]$NoShortcut,
   [switch]$DryRun
 )
 
@@ -191,7 +193,11 @@ try {
 
   Write-Host "AMERP installer"
   Write-Host "Public beta install path: GitHub ZIP -> local build -> desktop shortcut"
-  Write-Host "Repository: $RepoZipUrl"
+  if ($RepoZipPath) {
+    Write-Host "Source ZIP: $([IO.Path]::GetFullPath($RepoZipPath))"
+  } else {
+    Write-Host "Repository: $RepoZipUrl"
+  }
   Write-Host "Install folder: $InstallDir"
   Write-Host "Suggested data folder: $DataDir"
   Write-Host "This installer will verify or install Node.js LTS, install AMERP dependencies, build the app, and create a desktop shortcut."
@@ -213,14 +219,28 @@ try {
   $zipPath = Join-Path $tempRoot "amerp.zip"
   $extractRoot = Join-Path $tempRoot "extract"
 
-  Write-Step "Downloading AMERP from GitHub"
-  Invoke-WebRequest -Uri $RepoZipUrl -OutFile $zipPath
+  if ($RepoZipPath) {
+    $resolvedRepoZipPath = [IO.Path]::GetFullPath($RepoZipPath)
+    if (-not (Test-Path $resolvedRepoZipPath)) {
+      throw "The local source ZIP was not found: $resolvedRepoZipPath"
+    }
+    Write-Step "Copying AMERP source ZIP"
+    Copy-Item -LiteralPath $resolvedRepoZipPath -Destination $zipPath -Force
+  } else {
+    Write-Step "Downloading AMERP from GitHub"
+    Invoke-WebRequest -Uri $RepoZipUrl -OutFile $zipPath
+  }
 
   Write-Step "Extracting AMERP"
   Expand-Archive -LiteralPath $zipPath -DestinationPath $extractRoot -Force
-  $sourceRoot = Get-ChildItem -LiteralPath $extractRoot -Directory | Where-Object {
+  $sourceRoot = $null
+  if (Test-Path (Join-Path $extractRoot "package.json")) {
+    $sourceRoot = Get-Item -LiteralPath $extractRoot
+  } else {
+    $sourceRoot = Get-ChildItem -LiteralPath $extractRoot -Directory | Where-Object {
     Test-Path (Join-Path $_.FullName "package.json")
-  } | Select-Object -First 1
+    } | Select-Object -First 1
+  }
   if (-not $sourceRoot) {
     throw "The downloaded GitHub archive did not contain package.json."
   }
@@ -247,8 +267,12 @@ try {
     throw "Setup finished without creating the built app files."
   }
 
-  Write-Step "Creating desktop shortcut"
-  Create-DesktopShortcut -TargetRoot $InstallDir
+  if (-not $NoShortcut) {
+    Write-Step "Creating desktop shortcut"
+    Create-DesktopShortcut -TargetRoot $InstallDir
+  } else {
+    Write-Host "Desktop shortcut creation skipped."
+  }
 
   Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
 

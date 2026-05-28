@@ -832,6 +832,30 @@ button:disabled:hover {
   align-items: start;
 }
 
+.kanban-list-row {
+  border-left: 5px solid transparent;
+}
+
+.kanban-row-active {
+  border-left-color: var(--accent);
+  background: #fbfaf4;
+}
+
+.kanban-row-warning {
+  border-left-color: #d89a2f;
+  background: #fff8e8;
+}
+
+.kanban-row-unprinted {
+  border-left-color: #5275a6;
+  background: #f0f5fc;
+}
+
+.kanban-row-archived {
+  border-left-color: #9b7768;
+  background: #f1ece5;
+}
+
 .ncr-list-item {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -2642,6 +2666,137 @@ button:disabled:hover {
   color: #8a6422;
 }
 
+.status-pill.unprinted {
+  background: #e8eef8;
+  color: #294f7b;
+}
+
+.timeclock-actions-row,
+.timeclock-filter-row,
+.timeclock-employee-row {
+  display: grid;
+  gap: 0.75rem;
+  align-items: end;
+}
+
+.timeclock-actions-row {
+  grid-template-columns: minmax(240px, 380px) auto;
+  justify-content: start;
+}
+
+.timeclock-filter-row {
+  grid-template-columns: minmax(180px, 240px) minmax(220px, 320px) minmax(240px, 1fr);
+}
+
+.timeclock-open-grid {
+  display: grid;
+  gap: 0.65rem;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  margin-top: 0.8rem;
+}
+
+.timeclock-open-card,
+.timeclock-employee-row {
+  justify-content: space-between;
+  align-items: center;
+}
+
+.timeclock-open-card {
+  background: #f6efe1;
+  border-color: #dfc48e;
+}
+
+.timeclock-group {
+  background: var(--panel-2);
+}
+
+.timeclock-table tbody tr {
+  cursor: default;
+}
+
+.timeclock-table .toolbar {
+  gap: 0.35rem;
+}
+
+.timeclock-table .toolbar button {
+  min-height: 30px;
+  padding: 0.32rem 0.55rem;
+  font-size: 0.82rem;
+}
+
+.timeclock-employee-row {
+  grid-template-columns: minmax(180px, 1fr) minmax(220px, 320px) auto auto;
+}
+
+.timeclock-employee-row input {
+  min-height: 38px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 0.52rem 0.65rem;
+  background: #fffdf8;
+}
+
+.inline-checkbox {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  color: var(--muted);
+  font-size: 0.92rem;
+}
+
+.timeclock-correction-dialog {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.employee-timeclock-stack {
+  max-width: 760px;
+}
+
+.employee-clock-panel {
+  padding: 1.1rem;
+}
+
+.employee-clock-card {
+  display: grid;
+  gap: 1rem;
+  padding: 1rem;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: linear-gradient(135deg, #fffaf0, #edf5f1);
+}
+
+.employee-clock-status {
+  display: grid;
+  gap: 0.2rem;
+  padding: 0.85rem;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.62);
+}
+
+.employee-clock-status span,
+.employee-clock-status small {
+  color: var(--muted);
+}
+
+.employee-clock-status strong {
+  font-size: 1.35rem;
+}
+
+.employee-clock-buttons {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem;
+}
+
+.employee-clock-button {
+  justify-content: center;
+  min-height: 64px;
+  font-size: 1rem;
+  font-weight: 800;
+}
+
 .materials-detail-grid {
   display: grid;
   gap: 1rem;
@@ -3138,6 +3293,10 @@ button:disabled:hover {
   .materials-main-grid,
   .materials-detail-grid,
   .materials-search-grid,
+  .timeclock-actions-row,
+  .timeclock-filter-row,
+  .timeclock-employee-row,
+  .employee-clock-buttons,
   .metrology-search-grid,
   .settings-admin-grid,
   .settings-metrology-grid,

@@ -1,0 +1,82 @@
+name: macOS Installer Smoke
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/macos-installer-smoke.yml"
+      - ".github/workflows/release.yml"
+      - "electron-builder.yml"
+      - "electron/**"
+      - "scripts/**"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - "src/**"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/macos-installer-smoke.yml"
+      - ".github/workflows/release.yml"
+      - "electron-builder.yml"
+      - "electron/**"
+      - "scripts/**"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - "src/**"
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: "22"
+  PNPM_VERSION: "10.33.2"
+
+jobs:
+  packaged-installer-smoke:
+    name: Packaged app smoke
+    runs-on: macos-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Python dependency for legacy importer
+        run: python -m pip install --upgrade pip pypdf
+
+      - name: Build macOS artifacts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npm run dist:mac
+
+      - name: Run macOS packaged app smoke test
+        run: |
+          artifact="$(find release -maxdepth 1 -name '*.dmg' -print -quit)"
+          if [ -z "$artifact" ]; then
+            artifact="$(find release -maxdepth 1 -name '*.zip' -print -quit)"
+          fi
+          if [ -z "$artifact" ]; then
+            echo "No macOS DMG or ZIP artifact was produced under release/." >&2
+            exit 1
+          fi
+          npm run smoke:install:packaged:mac -- --artifact "$artifact"

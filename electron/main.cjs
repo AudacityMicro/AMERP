@@ -25,6 +25,9 @@ let pendingDeepLink = null;
 let updateOperation = null;
 
 const GITHUB_RELEASES_URL = "https://github.com/AudacityMicro/AMERP/releases";
+const SMOKE_TEST_AUTO_EXIT_MS = Number.isInteger(Number(process.env.AMERP_SMOKE_TEST_EXIT_AFTER_MS))
+  ? Math.max(0, Number(process.env.AMERP_SMOKE_TEST_EXIT_AFTER_MS))
+  : 0;
 
 if (process.platform === "win32") {
   app.setAppUserModelId("com.audacitymicro.amerp");
@@ -221,6 +224,16 @@ function requireUrlArray(value, label = "URLs") {
   return value.map((item, index) => requireUrl(item, `${label}[${index}]`));
 }
 
+function requireIdArray(value, label = "IDs") {
+  if (!Array.isArray(value)) {
+    throw new Error(`${label} must be a list of IDs.`);
+  }
+  if (value.length > 200) {
+    throw new Error(`${label} contains too many IDs.`);
+  }
+  return value.map((item, index) => requireId(item, `${label}[${index}]`));
+}
+
 function requireNonNegativeInteger(value, label = "value") {
   const number = Number(value);
   if (!Number.isInteger(number) || number < 0) {
@@ -229,8 +242,26 @@ function requireNonNegativeInteger(value, label = "value") {
   return value;
 }
 
+function requireBoolean(value, label = "value") {
+  if (typeof value !== "boolean") {
+    throw new Error(`${label} must be true or false.`);
+  }
+  return value;
+}
+
 const IPC_ARG_RULES = {
   "save-preferences": [requireRecord],
+  "list-employees": [requireOptionalObject],
+  "load-employee": [requireId],
+  "save-employee": [requireRecord],
+  "archive-employee": [requireId],
+  "unarchive-employee": [requireId],
+  "clock-in-employee": [requireId],
+  "clock-out-employee": [requireId],
+  "list-time-clock-sessions": [requireOptionalObject],
+  "correct-time-clock-session": [requireId, requireRecord, (value) => requireText(value, "correction reason", { maxLength: 1000 })],
+  "mark-time-clock-sessions-paid": [requireIdArray, requireBoolean],
+  "get-time-clock-dashboard": [requireOptionalObject],
   "list-nonconformances": [requireOptionalObject],
   "load-nonconformance": [requireId, requireOptionalObject],
   "save-nonconformance": [requireRecord],
@@ -251,9 +282,13 @@ const IPC_ARG_RULES = {
   "archive-kanban-card": [requireId],
   "unarchive-kanban-card": [requireId],
   "delete-kanban-card": [requireId],
+  "undo-kanban-import": [requireIdArray],
   "choose-kanban-photo": [(value) => (value == null || value === "" ? value : requireId(value, "card ID"))],
   "import-kanban-from-url": [requireUrl],
   "import-kanban-from-urls": [requireUrlArray],
+  "import-kanban-urls-from-csv": [requireOptionalFilePathArray],
+  "import-kanban-cards-from-csv": [requireOptionalFilePathArray],
+  "import-kanban-fusion-tool-library": [requireOptionalFilePathArray],
   "ai-fill-kanban-card": [requireRecord],
   "generate-kanban-image": [requireRecord],
   "export-kanban-pdf": [requireId, requireOptionalPath, (value) => (value == null || value === "" ? value : requireId(value, "size ID")), requireOptionalObject],
@@ -646,6 +681,13 @@ function createWindow(windowTitle = "AMERP", iconPath = "") {
     if (pendingDeepLink) {
       deliverDeepLink(pendingDeepLink);
     }
+    if (SMOKE_TEST_AUTO_EXIT_MS > 0) {
+      setTimeout(() => {
+        if (!app.isQuitting) {
+          app.quit();
+        }
+      }, SMOKE_TEST_AUTO_EXIT_MS).unref?.();
+    }
   });
 }
 
@@ -686,6 +728,17 @@ app.whenReady().then(async () => {
   });
 
   registerIpc("list-jobs", () => backend.listJobSummaries());
+  registerIpc("list-employees", (_event, options) => backend.listEmployees(options || {}));
+  registerIpc("load-employee", (_event, id) => backend.loadEmployee(id));
+  registerIpc("save-employee", (_event, employee) => backend.saveEmployee(employee));
+  registerIpc("archive-employee", (_event, id) => backend.archiveEmployee(id));
+  registerIpc("unarchive-employee", (_event, id) => backend.unarchiveEmployee(id));
+  registerIpc("clock-in-employee", (_event, id) => backend.clockInEmployee(id));
+  registerIpc("clock-out-employee", (_event, id) => backend.clockOutEmployee(id));
+  registerIpc("list-time-clock-sessions", (_event, filters) => backend.listTimeClockSessions(filters || {}));
+  registerIpc("correct-time-clock-session", (_event, sessionId, patch, reason) => backend.correctTimeClockSession(sessionId, patch || {}, reason));
+  registerIpc("mark-time-clock-sessions-paid", (_event, sessionIds, paid) => backend.markTimeClockSessionsPaid(sessionIds, paid));
+  registerIpc("get-time-clock-dashboard", (_event, filters) => backend.getTimeClockDashboard(filters || {}));
   registerIpc("list-nonconformances", (_event, filters) => backend.listNonconformances(filters || {}));
   registerIpc("load-nonconformance", (_event, id, options) => backend.loadNonconformance(id, options || {}));
   registerIpc("save-nonconformance", (_event, record) => backend.saveNonconformance(record));
@@ -708,9 +761,13 @@ app.whenReady().then(async () => {
   registerIpc("archive-kanban-card", (_event, id) => backend.archiveKanbanCard(id));
   registerIpc("unarchive-kanban-card", (_event, id) => backend.unarchiveKanbanCard(id));
   registerIpc("delete-kanban-card", (_event, id) => backend.deleteKanbanCard(id));
+  registerIpc("undo-kanban-import", (_event, cardIds) => backend.undoKanbanImport(cardIds));
   registerIpc("choose-kanban-photo", (_event, cardId) => backend.chooseKanbanPhoto(cardId, mainWindow));
   registerIpc("import-kanban-from-url", (_event, url) => backend.importKanbanFromUrl(url));
   registerIpc("import-kanban-from-urls", (_event, urls) => backend.importKanbanFromUrls(urls));
+  registerIpc("import-kanban-urls-from-csv", (_event, filePaths) => backend.importKanbanUrlsFromCsv(filePaths || null, mainWindow));
+  registerIpc("import-kanban-cards-from-csv", (_event, filePaths) => backend.importKanbanCardsFromCsv(filePaths || null, mainWindow));
+  registerIpc("import-kanban-fusion-tool-library", (_event, filePaths) => backend.importKanbanFusionToolLibrary(filePaths || null, mainWindow));
   registerIpc("ai-fill-kanban-card", (_event, card) => backend.aiFillKanbanCard(card));
   registerIpc("generate-kanban-image", (_event, card) => backend.generateKanbanImage(card));
   registerIpc("export-kanban-pdf", (_event, cardId, destinationPath, sizeId, options) => backend.exportKanbanPdf(cardId, destinationPath, sizeId, options));

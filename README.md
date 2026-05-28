@@ -34,6 +34,7 @@ Packaged installers are produced by GitHub Actions from `.github/workflows/relea
 
 - Windows builds an unsigned NSIS one-click installer.
 - macOS builds unsigned DMG and ZIP artifacts.
+- Linux builds unsigned AppImage, DEB, and tar.gz artifacts.
 - Release jobs attach artifacts and update metadata to a draft GitHub Release.
 - Draft releases must be reviewed and manually published.
 - No app update check runs automatically on startup.
@@ -48,6 +49,7 @@ Before sharing a public beta:
 2. Confirm Trivy completes with zero vulnerabilities for `pnpm-lock.yaml`.
 3. Confirm the production build completes and only the known Vite chunk-size warning remains.
 4. Install from a fresh GitHub ZIP with `Install-AMERP.cmd` on a clean Windows machine.
+   Or run the automated Windows/macOS/Linux smoke workflows and installer smoke scripts.
 5. Launch AMERP, choose a new data folder, create a job, add a part, and export a job traveler PDF.
 6. Create or open one material, Kanban card, inspection report, and NCR enough to confirm major navigation and PDF export paths.
 7. Reopen AMERP and confirm the data persists.
@@ -70,6 +72,9 @@ Preferred Windows entry points:
 - `Start-App.cmd` launches the built Electron app from `dist/`.
 - `Start-Dev.cmd` launches the development app.
 - `Build-App.cmd` rebuilds the renderer bundle.
+- `scripts/windows-install-smoke.ps1` automates clean-Windows source and packaged installer smoke tests using isolated data/user-data folders.
+- `scripts/macos-install-smoke.sh` automates macOS DMG/ZIP packaged app smoke tests using isolated data/user-data folders.
+- `scripts/linux-install-smoke.sh` automates Linux AppImage/DEB/tar.gz packaged app smoke tests using isolated data/user-data folders.
 
 Package scripts are also available:
 
@@ -79,6 +84,7 @@ Package scripts are also available:
 - `npm run pack`
 - `npm run dist:win`
 - `npm run dist:mac`
+- `npm run dist:linux`
 - `npm run release:artifacts`
 
 The command files prefer a known Codex Node runtime when present, then fall back to installed Node.js on `PATH`. Git is not required for the installer because it downloads the GitHub ZIP directly.
@@ -121,9 +127,12 @@ Current one-time import flows include:
 - Xometry purchase-order PDFs into new jobs.
 - Subtract Manufacturing purchase-order PDFs into new jobs.
 - Fusion/setup-sheet imports into part operations.
+- Kanban product URL lists from CSV files, and complete Kanban card records from CSV files.
 - Legacy Materials-Database import through `scripts/import_materials_sqlite.py`.
 
 The importer paths are intentionally separate. Do not merge unrelated parser logic.
+
+The expected full-card Kanban CSV format is documented by `docs/samples/kanban-card-import-sample.csv`.
 
 ## Documents And PDFs
 
@@ -174,7 +183,7 @@ Before sharing a build, run:
 npm.cmd run release:check
 ```
 
-Before publishing a packaged beta, also confirm the GitHub Actions draft release completes on Windows and macOS, then manually inspect the draft release assets before publishing.
+Before publishing a packaged beta, also confirm the GitHub Actions draft release completes on Windows, macOS, and Linux, then manually inspect the draft release assets before publishing.
 
 For faster local iteration, the release check is split into:
 
@@ -185,6 +194,21 @@ npm.cmd test
 npm.cmd run audit:deps
 npm.cmd run secret:scan
 npm.cmd run build
+npm.cmd run smoke:install:source:win
+# or after building a Windows installer:
+npm.cmd run smoke:install:packaged:win -- -InstallerPath .\release\AMERP-...-Setup.exe
+```
+
+On macOS, after building macOS artifacts:
+
+```bash
+npm run smoke:install:packaged:mac -- --artifact ./release/AMERP-...-mac-universal.dmg
+```
+
+On Linux, after building Linux artifacts:
+
+```bash
+npm run smoke:install:packaged:linux -- --artifact ./release/AMERP-...-linux-x64.tar.gz
 ```
 
 `node_modules/` and `dist/` are intentionally ignored by git. A receiving computer should run `Install-AMERP.cmd` for a full install or `Setup-AMERP.cmd` if the repository is already in its final folder.

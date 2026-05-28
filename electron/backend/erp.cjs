@@ -39,6 +39,13 @@ const {
   inferVendorName
 } = require("./kanban-vendors.cjs");
 const {
+  parseFusionToolLibraryKanbanItems
+} = require("./fusion-tool-library.cjs");
+const {
+  extractKanbanUrlsFromCsv,
+  parseKanbanCardsCsv
+} = require("./kanban-csv.cjs");
+const {
   enrichKanbanCardDraft,
   generateKanbanReferenceImage
 } = require("./kanban-ai.cjs");
@@ -82,6 +89,7 @@ const DEFAULT_KANBAN_PRINT_SIZES = [
   { id: "kanban-size-3x5", name: '3" x 5"', widthIn: 3, heightIn: 5 },
   { id: "kanban-size-4x6", name: '4" x 6"', widthIn: 4, heightIn: 6 }
 ];
+const KANBAN_STATUS_OPTIONS = ["Active", "Unprinted", "Needs Review", "Archived"];
 const NONCONFORMANCE_STATUS_OPTIONS = [
   "Open",
   "Contained",
@@ -155,9 +163,12 @@ const DEFAULT_ENABLED_MODULES = {
   inspections: true,
   nonconformance: true,
   kanban: true,
+  timeclock: true,
+  timeclockAdmin: true,
   materials: true,
   metrology: true
 };
+const WEEKDAY_IDS = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
 const DEFAULT_INSPECTION_REPORT_EXPORT_OPTIONS = {
   includeBalloonedDrawing: true,
   includeReportControl: true,
@@ -262,6 +273,8 @@ class ERPBackend {
       "jobs",
       "nonconformances",
       "kanban",
+      "employees",
+      "time-clock/sessions",
       "materials",
       "metrology/instruments",
       "metrology/standards",
@@ -322,6 +335,7 @@ class ERPBackend {
       jobs: [],
       nonconformances: [],
       kanbanCards: [],
+      employees: [],
       materials: [],
       instruments: []
       });
@@ -483,6 +497,12 @@ class ERPBackend {
     const defaultKanbanPrintSizeId = kanbanPrintSizes.some((item) => item.id === preferences?.defaultKanbanPrintSizeId)
       ? preferences.defaultKanbanPrintSizeId
       : (kanbanPrintSizes[0]?.id || DEFAULT_KANBAN_PRINT_SIZES[0].id);
+    const payPeriodStartDay = WEEKDAY_IDS.includes(String(preferences?.payPeriodStartDay || "").trim().toLowerCase())
+      ? String(preferences.payPeriodStartDay).trim().toLowerCase()
+      : "thursday";
+    const payPeriodLengthDays = Number.isInteger(Number(preferences?.payPeriodLengthDays)) && Number(preferences.payPeriodLengthDays) > 0 && Number(preferences.payPeriodLengthDays) <= 31
+      ? Number(preferences.payPeriodLengthDays)
+      : 7;
     return {
       appTitle: String(preferences?.appTitle || "AMERP").trim() || "AMERP",
       appTagline: String(preferences?.appTagline || "Operator ERP").trim() || "Operator ERP",
@@ -515,6 +535,8 @@ class ERPBackend {
       nonconformanceDispositions: listPreference(preferences?.nonconformanceDispositions, DEFAULT_NONCONFORMANCE_DISPOSITIONS),
       kanbanPrintSizes,
       defaultKanbanPrintSizeId,
+      payPeriodStartDay,
+      payPeriodLengthDays,
       openaiApiKey: String(preferences?.openaiApiKey || "").trim(),
       lastInitializedAt: String(preferences?.lastInitializedAt || nowIso()).trim() || nowIso()
     };
@@ -730,7 +752,10 @@ class ERPBackend {
       if (!response.ok) {
         throw new Error(`Vendor page returned ${response.status} ${response.statusText}`.trim());
       }
-      return response.text();
+      return {
+        html: await response.text(),
+        finalUrl: String(response.url || url)
+      };
     } finally {
       clearTimeout(timer);
     }
@@ -775,14 +800,24 @@ class ERPBackend {
         const absolute = (value) => {
           try { return new URL(value, document.baseURI).toString(); } catch { return ""; }
         };
+        const isLikelyProductImage = (image) => {
+          const text = [image.src || "", image.currentSrc || "", image.alt || "", image.className || "", image.id || ""].join(" ").toLowerCase();
+          if (/logo|sprite|icon|favicon|placeholder|avatar|banner|tracking|pixel/.test(text)) {
+            return false;
+          }
+          return true;
+        };
         const images = Array.from(document.images || [])
           .map((image) => ({
             src: absolute(image.currentSrc || image.src || ""),
             alt: image.alt || "",
             width: image.naturalWidth || image.width || 0,
-            height: image.naturalHeight || image.height || 0
+            height: image.naturalHeight || image.height || 0,
+            area: (image.naturalWidth || image.width || 0) * (image.naturalHeight || image.height || 0)
           }))
           .filter((image) => image.src && image.width >= 80 && image.height >= 80)
+          .filter(isLikelyProductImage)
+          .sort((a, b) => b.area - a.area)
           .slice(0, 20);
         return {
           title: document.title || "",
@@ -792,12 +827,15 @@ class ERPBackend {
         };
       })()`, true);
       const html = await window.webContents.executeJavaScript("document.documentElement.outerHTML", true);
-      return [
-        html,
-        `<script type="application/json" id="amerp-rendered-product-snapshot">${JSON.stringify(snapshot || {})}</script>`,
-        `<meta property="og:title" content="${String(snapshot?.title || "").replace(/"/g, "&quot;")}">`,
-        snapshot?.images?.[0]?.src ? `<meta property="og:image" content="${String(snapshot.images[0].src).replace(/"/g, "&quot;")}">` : ""
-      ].join("\n");
+      return {
+        finalUrl: String(window.webContents.getURL() || url),
+        html: [
+          html,
+          `<script type="application/json" id="amerp-rendered-product-snapshot">${JSON.stringify(snapshot || {})}</script>`,
+          `<meta property="og:title" content="${String(snapshot?.title || "").replace(/"/g, "&quot;")}">`,
+          snapshot?.images?.[0]?.src ? `<meta property="og:image" content="${String(snapshot.images[0].src).replace(/"/g, "&quot;")}">` : ""
+        ].join("\n")
+      };
     } finally {
       window.destroy();
     }
@@ -807,26 +845,30 @@ class ERPBackend {
     let html = "";
     let imported = null;
     let finalHtml = "";
+    let finalUrl = url;
     let usedRenderedFallback = false;
     try {
-      html = await this.fetchHtml(url);
-      imported = extractProductData(url, html);
+      const fetched = await this.fetchHtml(url);
+      html = fetched.html;
+      finalUrl = fetched.finalUrl || url;
+      imported = extractProductData(finalUrl, html);
       finalHtml = html;
     } catch (error) {
       html = "";
       imported = {
-        vendor: inferVendorName(url),
-        purchaseUrl: url,
-        pageContext: buildPageContext(url, ""),
+        vendor: inferVendorName(finalUrl),
+        purchaseUrl: finalUrl,
+        pageContext: buildPageContext(finalUrl, ""),
         warnings: [`Direct page fetch failed: ${error.message}`]
       };
     }
-    if (!finalHtml || this.shouldUseRenderedKanbanFallback(url, finalHtml, imported)) {
+    if (!finalHtml || this.shouldUseRenderedKanbanFallback(finalUrl, finalHtml, imported)) {
       try {
-        const renderedHtml = await this.fetchRenderedHtml(url);
-        const renderedImported = extractProductData(url, renderedHtml);
-        imported = this.mergeKanbanImportedData(url, imported, renderedImported);
-        finalHtml = renderedHtml;
+        const rendered = await this.fetchRenderedHtml(finalUrl);
+        finalUrl = rendered.finalUrl || finalUrl;
+        const renderedImported = extractProductData(finalUrl, rendered.html);
+        imported = this.mergeKanbanImportedData(finalUrl, imported, renderedImported);
+        finalHtml = rendered.html;
         usedRenderedFallback = true;
       } catch (error) {
         imported = {
@@ -836,22 +878,23 @@ class ERPBackend {
       }
     }
     if (!finalHtml) {
-      finalHtml = `<html><head><title>${url}</title></head><body>${url}</body></html>`;
+      finalHtml = `<html><head><title>${finalUrl}</title></head><body>${finalUrl}</body></html>`;
     }
     imported = {
       ...imported,
-      vendor: imported?.vendor || inferVendorName(url),
-      purchaseUrl: imported?.purchaseUrl || url,
-      pageContext: imported?.pageContext || buildPageContext(url, finalHtml)
+      vendor: imported?.vendor || inferVendorName(finalUrl),
+      purchaseUrl: imported?.purchaseUrl || finalUrl,
+      pageContext: imported?.pageContext || buildPageContext(finalUrl, finalHtml)
     };
     return { html: finalHtml, imported, usedRenderedFallback };
   }
 
-  async downloadRemoteFile(url, destinationFolder, preferredBaseName = "image") {
+  async downloadRemoteFile(url, destinationFolder, preferredBaseName = "image", refererUrl = "") {
     const response = await fetch(url, {
       headers: {
         "user-agent": BROWSER_USER_AGENT,
-        accept: "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8"
+        accept: "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+        referer: refererUrl || new URL(url).origin
       },
       redirect: "follow"
     });
@@ -870,6 +913,9 @@ class ERPBackend {
             : contentType.includes("bmp")
               ? ".bmp"
               : path.extname(new URL(response.url || url).pathname) || ".png";
+    if (!IMAGE_EXTENSIONS.has(extension.toLowerCase())) {
+      throw new Error(`Unsupported image type: ${contentType || extension}`);
+    }
     const baseName = safeFileName(preferredBaseName, "image");
     await ensureDir(destinationFolder);
     let fileName = `${baseName}${extension}`;
@@ -882,6 +928,37 @@ class ERPBackend {
     const buffer = Buffer.from(await response.arrayBuffer());
     await fs.writeFile(destination, buffer);
     return destination;
+  }
+
+  async generateFallbackKanbanPhoto(dataRoot, card, preferences) {
+    if (!preferences?.openaiApiKey) {
+      return { card, generated: false };
+    }
+    const normalizedCard = this.normalizeKanbanCard(card);
+    const generated = await generateKanbanReferenceImage({
+      apiKey: preferences.openaiApiKey,
+      card: normalizedCard
+    });
+    const assetsRoot = path.join(this.getKanbanRoot(dataRoot, normalizedCard.id), "assets");
+    await ensureDir(assetsRoot);
+    const extension = generated.extension || ".png";
+    const filename = `ai-generated-${Date.now()}${extension}`;
+    const destination = path.join(assetsRoot, filename);
+    await fs.writeFile(destination, generated.buffer);
+    return {
+      card: this.normalizeKanbanCard({
+        ...normalizedCard,
+        photo: {
+          id: randomId("photo"),
+          originalFilename: filename,
+          storedFilename: filename,
+          relativePath: path.relative(dataRoot, destination).replaceAll("\\", "/"),
+          sourceUrl: "ai-generated",
+          attachedAt: nowIso()
+        }
+      }),
+      generated: true
+    };
   }
 
   getLockPath(dataRoot, kind, id) {
@@ -1144,11 +1221,15 @@ class ERPBackend {
         id: normalized.id,
         itemName: normalized.itemName,
         internalInventoryNumber: normalized.internalInventoryNumber,
+        status: normalized.status,
         vendor: normalized.vendor,
         category: normalized.category,
         department: normalized.department,
         storageLocation: normalized.storageLocation,
+        purchaseUrl: normalized.purchaseUrl,
         orderingNotes: normalized.orderingNotes,
+        needsReview: normalized.needsReview,
+        lastPrintedAt: normalized.lastPrintedAt,
         active: normalized.active,
         archivedAt: normalized.archivedAt,
         updatedAt: normalized.updatedAt
@@ -1203,6 +1284,7 @@ class ERPBackend {
     const saved = await this.saveKanbanCard({
       ...card,
       active: false,
+      status: "Archived",
       archivedAt: nowIso()
     });
     await this.appendAudit("kanban_archived", cardId, `Archived kanban card ${card.itemName || card.internalInventoryNumber || card.id}.`);
@@ -1217,6 +1299,8 @@ class ERPBackend {
     const saved = await this.saveKanbanCard({
       ...card,
       active: true,
+      status: "Active",
+      needsReview: false,
       archivedAt: ""
     });
     await this.appendAudit("kanban_unarchived", cardId, `Unarchived kanban card ${card.itemName || card.internalInventoryNumber || card.id}.`);
@@ -1231,11 +1315,48 @@ class ERPBackend {
     if (card.active !== false) {
       throw new Error("Only archived Kanban cards can be deleted.");
     }
-    const root = this.kanbanRoot(cardId);
-    await removePath(root);
+    const dataRoot = await this.requireDataFolder();
+    const root = this.getKanbanRoot(dataRoot, cardId);
+    await fs.rm(root, { recursive: true, force: true });
     await this.appendAudit("kanban_deleted", cardId, `Deleted archived kanban card ${card.itemName || card.internalInventoryNumber || card.id}.`);
     await this.rebuildIndex();
     return { ok: true };
+  }
+
+  async undoKanbanImport(cardIds = []) {
+    if (!Array.isArray(cardIds)) {
+      throw new Error("Provide the imported Kanban card IDs to undo.");
+    }
+    const ids = [...new Set(cardIds.map((item) => String(item || "").trim()).filter(Boolean))];
+    if (!ids.length) {
+      return { deleted: [], missing: [], errors: [] };
+    }
+    if (ids.length > 200) {
+      throw new Error("Undo at most 200 imported Kanban cards at a time.");
+    }
+
+    const dataRoot = await this.requireDataFolder();
+    const deleted = [];
+    const missing = [];
+    const errors = [];
+    for (const cardId of ids) {
+      try {
+        const root = this.getKanbanRoot(dataRoot, cardId);
+        const cardPath = path.join(root, "card.json");
+        const card = await readJson(cardPath, null);
+        if (!card?.id) {
+          missing.push(cardId);
+          continue;
+        }
+        await fs.rm(root, { recursive: true, force: true });
+        deleted.push(cardId);
+        await this.appendAudit("kanban_import_undone", cardId, `Undid imported Kanban card ${card.itemName || card.internalInventoryNumber || card.id}.`);
+      } catch (error) {
+        errors.push({ id: cardId, message: error.message || String(error) });
+      }
+    }
+    await this.rebuildIndex();
+    return { deleted, missing, errors };
   }
 
   async chooseKanbanPhoto(cardId, mainWindow = null) {
@@ -1308,7 +1429,7 @@ class ERPBackend {
       });
       draft = baseDraft;
       const imagePromise = imported.imageUrl
-        ? this.downloadRemoteFile(imported.imageUrl, path.join(this.getKanbanRoot(dataRoot, cardId), "assets"), "vendor-photo")
+        ? this.downloadRemoteFile(imported.imageUrl, path.join(this.getKanbanRoot(dataRoot, cardId), "assets"), "vendor-photo", validatedUrl)
         : null;
       const aiPromise = preferences.openaiApiKey
         ? enrichKanbanCardDraft({
@@ -1362,6 +1483,17 @@ class ERPBackend {
       }
     } catch (error) {
       warnings.push(`Could not import product details automatically: ${error.message}`);
+    }
+    if (!draft.photo && preferences.openaiApiKey) {
+      try {
+        const generated = await this.generateFallbackKanbanPhoto(dataRoot, draft, preferences);
+        draft = generated.card;
+        if (generated.generated) {
+          warnings.push("Generated a fallback product image because no website image was available.");
+        }
+      } catch (error) {
+        warnings.push(`Could not generate fallback product image: ${error.message}`);
+      }
     }
 
     await this.appendAudit("kanban_url_import_prepared", cardId, `Prepared kanban card draft from ${validatedUrl}.`);
@@ -1420,7 +1552,11 @@ class ERPBackend {
           errors.push({ url: item.url, message: "No card data was returned." });
           continue;
         }
-        const saved = await this.saveKanbanCard(imported.card);
+        const saved = await this.saveKanbanCard({
+          ...imported.card,
+          status: "Needs Review",
+          needsReview: true
+        });
         cards.push(saved);
         for (const warning of imported.warnings || []) {
           warnings.push({ url: item.url, message: warning });
@@ -1433,6 +1569,247 @@ class ERPBackend {
       await this.appendAudit("kanban_url_list_imported", cards[0].id, `Imported ${cards.length} Kanban card${cards.length === 1 ? "" : "s"} from URL list.`);
     }
     return { cards, warnings, errors };
+  }
+
+  async importKanbanUrlsFromCsv(filePaths = null, mainWindow = null) {
+    const selectedPaths = Array.isArray(filePaths) ? filePaths : null;
+    let sourcePaths = selectedPaths;
+    if (!sourcePaths) {
+      const result = await dialog.showOpenDialog(mainWindow || null, {
+        title: "Import Kanban URLs From CSV",
+        properties: ["openFile", "multiSelections"],
+        filters: [{ name: "CSV files", extensions: ["csv"] }]
+      });
+      if (result.canceled || !result.filePaths?.length) {
+        return { cards: [], warnings: [], errors: [], summaries: [] };
+      }
+      sourcePaths = result.filePaths;
+    }
+
+    const uniqueFilePaths = [...new Set(sourcePaths.map((item) => path.resolve(String(item || ""))).filter(Boolean))];
+    const urls = [];
+    const seen = new Set();
+    const summaries = [];
+    const errors = [];
+    for (const filePath of uniqueFilePaths) {
+      const sourceLabel = path.basename(filePath);
+      if (path.extname(filePath).toLowerCase() !== ".csv") {
+        errors.push({ file: sourceLabel, message: "Only CSV files are supported." });
+        continue;
+      }
+      try {
+        const raw = await fs.readFile(filePath, "utf8");
+        const extracted = extractKanbanUrlsFromCsv(raw);
+        for (const url of extracted) {
+          const key = url.toLowerCase();
+          if (!seen.has(key)) {
+            seen.add(key);
+            urls.push(url);
+          }
+        }
+        summaries.push({ file: sourceLabel, message: `Found ${extracted.length} product URL${extracted.length === 1 ? "" : "s"}.` });
+      } catch (error) {
+        errors.push({ file: sourceLabel, message: error.message || String(error) });
+      }
+    }
+    if (!urls.length) {
+      return { cards: [], warnings: [], errors, summaries };
+    }
+    const imported = await this.importKanbanFromUrls(urls);
+    return {
+      ...imported,
+      summaries,
+      errors: [...errors, ...(imported.errors || [])]
+    };
+  }
+
+  async importKanbanCardsFromCsv(filePaths = null, mainWindow = null) {
+    const selectedPaths = Array.isArray(filePaths) ? filePaths : null;
+    let sourcePaths = selectedPaths;
+    if (!sourcePaths) {
+      const result = await dialog.showOpenDialog(mainWindow || null, {
+        title: "Import Kanban Cards From CSV",
+        properties: ["openFile", "multiSelections"],
+        filters: [{ name: "Kanban card CSV", extensions: ["csv"] }]
+      });
+      if (result.canceled || !result.filePaths?.length) {
+        return { cards: [], warnings: [], errors: [], summaries: [] };
+      }
+      sourcePaths = result.filePaths;
+    }
+
+    const uniqueFilePaths = [...new Set(sourcePaths.map((item) => path.resolve(String(item || ""))).filter(Boolean))];
+    const cards = [];
+    const warnings = [];
+    const errors = [];
+    const summaries = [];
+    const existingCards = await this.listKanbanCards();
+    const seenInventoryNumbers = new Set(existingCards.map((card) => normalizeText(card.internalInventoryNumber)).filter(Boolean));
+    const seenPurchaseUrls = new Set(existingCards.map((card) => String(card.purchaseUrl || "").trim().toLowerCase()).filter(Boolean));
+
+    for (const filePath of uniqueFilePaths) {
+      const sourceLabel = path.basename(filePath);
+      if (path.extname(filePath).toLowerCase() !== ".csv") {
+        errors.push({ file: sourceLabel, message: "Only CSV files are supported." });
+        continue;
+      }
+      try {
+        const raw = await fs.readFile(filePath, "utf8");
+        const rows = parseKanbanCardsCsv(raw, sourceLabel);
+        if (!rows.length) {
+          errors.push({ file: sourceLabel, message: "No Kanban card rows could be parsed. Check the sample CSV headers." });
+          continue;
+        }
+        let importedFromFile = 0;
+        for (const row of rows) {
+          const inventoryKey = normalizeText(row.internalInventoryNumber);
+          const urlKey = String(row.purchaseUrl || "").trim().toLowerCase();
+          const rowLabel = `row ${row.sourceRow || "?"}`;
+          if (inventoryKey && seenInventoryNumbers.has(inventoryKey)) {
+            warnings.push({ file: sourceLabel, message: `Skipped ${rowLabel}: inventory number already exists (${row.internalInventoryNumber}).` });
+            continue;
+          }
+          if (urlKey && seenPurchaseUrls.has(urlKey)) {
+            warnings.push({ file: sourceLabel, message: `Skipped ${rowLabel}: purchase URL already exists (${row.purchaseUrl}).` });
+            continue;
+          }
+          const saved = await this.saveKanbanCard({
+            ...row,
+            id: randomId("kanban"),
+            active: row.active !== false,
+            archivedAt: row.active === false ? nowIso() : ""
+          });
+          cards.push(saved);
+          importedFromFile += 1;
+          if (inventoryKey) {
+            seenInventoryNumbers.add(inventoryKey);
+          }
+          if (urlKey) {
+            seenPurchaseUrls.add(urlKey);
+          }
+        }
+        summaries.push({ file: sourceLabel, message: `Parsed ${rows.length} row${rows.length === 1 ? "" : "s"}; created ${importedFromFile} Kanban card${importedFromFile === 1 ? "" : "s"}.` });
+      } catch (error) {
+        errors.push({ file: sourceLabel, message: error.message || String(error) });
+      }
+    }
+
+    if (cards.length) {
+      await this.appendAudit("kanban_card_csv_imported", cards[0].id, `Imported ${cards.length} Kanban card${cards.length === 1 ? "" : "s"} from CSV.`);
+    }
+    return { cards, warnings, errors, summaries };
+  }
+
+  async importKanbanFusionToolLibrary(filePaths = null, mainWindow = null) {
+    const selectedPaths = Array.isArray(filePaths) ? filePaths : null;
+    let sourcePaths = selectedPaths;
+    if (!sourcePaths) {
+      const result = await dialog.showOpenDialog(mainWindow || null, {
+        title: "Import Fusion Tool Library",
+        properties: ["openFile", "multiSelections"],
+        filters: [{ name: "Fusion tool library CSV", extensions: ["csv"] }]
+      });
+      if (result.canceled || !result.filePaths?.length) {
+        return { cards: [], warnings: [], errors: [], summaries: [] };
+      }
+      sourcePaths = result.filePaths;
+    }
+
+    const uniqueFilePaths = [...new Set(sourcePaths.map((item) => path.resolve(String(item || ""))).filter(Boolean))];
+    const cards = [];
+    const warnings = [];
+    const errors = [];
+    const summaries = [];
+    const existingCards = await this.listKanbanCards();
+    const seenInventoryNumbers = new Set(existingCards.map((card) => normalizeText(card.internalInventoryNumber)).filter(Boolean));
+    const seenPurchaseUrls = new Set(existingCards.map((card) => String(card.purchaseUrl || "").trim().toLowerCase()).filter(Boolean));
+
+    for (const filePath of uniqueFilePaths) {
+      const sourceLabel = path.basename(filePath);
+      if (path.extname(filePath).toLowerCase() !== ".csv") {
+        errors.push({ file: sourceLabel, message: "Only Fusion tool library CSV files are supported." });
+        continue;
+      }
+      try {
+        const raw = await fs.readFile(filePath, "utf8");
+        const items = parseFusionToolLibraryKanbanItems(raw, sourceLabel);
+        if (!items.length) {
+          errors.push({ file: sourceLabel, message: "No tool rows could be parsed from this Fusion tool library." });
+          continue;
+        }
+        let importedFromFile = 0;
+        for (const item of items) {
+          const urlKey = String(item.purchaseUrl || "").trim().toLowerCase();
+          if (urlKey && seenPurchaseUrls.has(urlKey)) {
+            warnings.push({ file: sourceLabel, message: `Skipped ${item.itemName || item.purchaseUrl}: a Kanban card with that purchase URL already exists.` });
+            continue;
+          }
+          let enrichedItem = item;
+          if (item.purchaseUrl) {
+            try {
+              const imported = await this.importKanbanFromUrl(item.purchaseUrl);
+              if (imported?.card) {
+                const toolPrefix = String(item.itemName || "").match(/^(T[^\s-]+)\s*-\s*/i)?.[1] || "";
+                const importedName = String(imported.card.itemName || "").replace(/^(T[^\s-]+)\s*-\s*/i, "").trim();
+                const fallbackName = String(item.itemName || "").replace(/^(T[^\s-]+)\s*-\s*/i, "").trim();
+                enrichedItem = {
+                  ...item,
+                  ...imported.card,
+                  itemName: toolPrefix ? `${toolPrefix} - ${importedName || fallbackName || "Fusion Tool"}` : (importedName || item.itemName),
+                  vendor: imported.card.vendor || item.vendor,
+                  minimumLevel: imported.card.minimumLevel || item.minimumLevel,
+                  orderQuantity: imported.card.orderQuantity || item.orderQuantity,
+                  packSize: imported.card.packSize || item.packSize,
+                  description: imported.card.description || item.description,
+                  photo: imported.card.photo || item.photo,
+                  category: item.category || imported.card.category,
+                  purchaseUrl: item.purchaseUrl,
+                  orderingNotes: "",
+                  status: "Needs Review",
+                  needsReview: true,
+                  active: true
+                };
+              }
+              for (const warning of imported?.warnings || []) {
+                warnings.push({ file: sourceLabel, message: `${item.itemName || item.purchaseUrl}: ${warning}` });
+              }
+            } catch (error) {
+              warnings.push({ file: sourceLabel, message: `${item.itemName || item.purchaseUrl}: could not enrich from product URL (${error.message || String(error)}).` });
+            }
+          }
+          const internalInventoryNumber = await this.generateNextKanbanInventoryNumber();
+          const inventoryKey = normalizeText(internalInventoryNumber);
+          if (inventoryKey && seenInventoryNumbers.has(inventoryKey)) {
+            warnings.push({ file: sourceLabel, message: `Skipped ${enrichedItem.itemName || "tool"}: generated inventory number already exists (${internalInventoryNumber}).` });
+            continue;
+          }
+          const saved = await this.saveKanbanCard({
+            ...enrichedItem,
+            id: enrichedItem.id || randomId("kanban"),
+            internalInventoryNumber,
+            status: "Needs Review",
+            needsReview: true,
+            active: true
+          });
+          cards.push(saved);
+          importedFromFile += 1;
+          if (inventoryKey) {
+            seenInventoryNumbers.add(inventoryKey);
+          }
+          if (urlKey) {
+            seenPurchaseUrls.add(urlKey);
+          }
+        }
+        summaries.push({ file: sourceLabel, message: `Parsed ${items.length} unique tool${items.length === 1 ? "" : "s"}; created ${importedFromFile} Kanban card${importedFromFile === 1 ? "" : "s"}.` });
+      } catch (error) {
+        errors.push({ file: sourceLabel, message: error.message || String(error) });
+      }
+    }
+
+    if (cards.length) {
+      await this.appendAudit("kanban_fusion_tool_library_imported", cards[0].id, `Imported ${cards.length} Kanban card${cards.length === 1 ? "" : "s"} from Fusion tool library CSV.`);
+    }
+    return { cards, warnings, errors, summaries };
   }
 
   async aiFillKanbanCard(card) {
@@ -1490,29 +1867,14 @@ class ERPBackend {
   async generateKanbanImage(card) {
     const dataRoot = await this.requireDataFolder();
     const preferences = await this.loadPreferences(dataRoot);
+    if (!preferences.openaiApiKey) {
+      throw new Error("Set an OpenAI API key in Settings before generating Kanban images.");
+    }
     const normalizedCard = this.normalizeKanbanCard(card);
-    const generated = await generateKanbanReferenceImage({
-      apiKey: preferences.openaiApiKey,
-      card: normalizedCard
-    });
-    const assetsRoot = path.join(this.getKanbanRoot(dataRoot, normalizedCard.id), "assets");
-    await ensureDir(assetsRoot);
-    const filename = `ai-generated-${Date.now()}${generated.extension || ".png"}`;
-    const destination = path.join(assetsRoot, filename);
-    await fs.writeFile(destination, generated.buffer);
-    const updatedCard = this.normalizeKanbanCard({
-      ...normalizedCard,
-      photo: {
-        id: randomId("photo"),
-        originalFilename: filename,
-        storedFilename: filename,
-        relativePath: path.relative(dataRoot, destination).replaceAll("\\", "/"),
-        sourceUrl: "ai-generated",
-        attachedAt: nowIso()
-      }
-    });
-    await this.appendAudit("kanban_ai_image_generated", updatedCard.id, `Generated AI image for kanban card ${updatedCard.itemName || updatedCard.internalInventoryNumber || updatedCard.id}.`);
-    return updatedCard;
+    const generated = await this.generateFallbackKanbanPhoto(dataRoot, normalizedCard, preferences);
+    const saved = await this.saveKanbanCard(generated.card);
+    await this.appendAudit("kanban_ai_image_generated", saved.id, `Generated AI image for kanban card ${saved.itemName || saved.internalInventoryNumber || saved.id}.`);
+    return saved;
   }
 
   async waitForPrintSelector(printWindow, selector, timeoutMs = 15000) {
@@ -1537,6 +1899,38 @@ class ERPBackend {
           }
           if (Date.now() - startedAt > timeoutMs) {
             reject(new Error(\`Timed out waiting for print layout: \${selector}\`));
+            return;
+          }
+          setTimeout(check, 50);
+        };
+        check();
+      });
+    `, true);
+  }
+
+  async waitForPrintRenderSettled(printWindow, timeoutMs = 15000) {
+    if (!printWindow?.webContents) {
+      return;
+    }
+    await printWindow.webContents.executeJavaScript(`
+      new Promise((resolve, reject) => {
+        const timeoutMs = ${Number(timeoutMs)};
+        const startedAt = Date.now();
+        const finish = () => requestAnimationFrame(() => requestAnimationFrame(() => resolve(true)));
+        const check = () => {
+          const fatal = document.querySelector(".fatal");
+          if (fatal) {
+            reject(new Error(fatal.innerText || "Print route failed to render."));
+            return;
+          }
+          const pending = document.querySelector(".print-render-pending");
+          const pendingImage = Array.from(document.images || []).find((image) => !image.complete);
+          if (!pending && !pendingImage) {
+            finish();
+            return;
+          }
+          if (Date.now() - startedAt > timeoutMs) {
+            reject(new Error("Timed out waiting for print assets to render."));
             return;
           }
           setTimeout(check, 50);
@@ -1604,6 +1998,11 @@ class ERPBackend {
     });
     await fs.writeFile(outputPath, pdf);
     printWindow.close();
+    await this.saveKanbanCard({
+      ...card,
+      lastPrintedAt: nowIso(),
+      status: card.status === "Unprinted" ? "Active" : card.status
+    });
     const openError = await shell.openPath(outputPath);
     if (openError) {
       console.warn(`Unable to open exported Kanban PDF: ${openError}`);
@@ -1812,6 +2211,539 @@ class ERPBackend {
     return path.join(dataRoot, "customers", `${safeFileName(customerId)}.json`);
   }
 
+  getEmployeeRoot(dataRoot, employeeId) {
+    return path.join(dataRoot, "employees", safeFileName(employeeId));
+  }
+
+  getTimeClockRoot(dataRoot) {
+    return path.join(dataRoot, "time-clock");
+  }
+
+  getTimeClockSessionRoot(dataRoot, sessionId) {
+    return path.join(this.getTimeClockRoot(dataRoot), "sessions", safeFileName(sessionId));
+  }
+
+  getTimeClockEventsPath(dataRoot) {
+    return path.join(this.getTimeClockRoot(dataRoot), "events.jsonl");
+  }
+
+  localDateKey(date) {
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, "0");
+    const day = String(date.getDate()).padStart(2, "0");
+    return `${year}-${month}-${day}`;
+  }
+
+  parseLocalDateKey(value) {
+    const match = String(value || "").trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!match) {
+      return null;
+    }
+    const date = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+    return Number.isNaN(date.getTime()) ? null : date;
+  }
+
+  displayDateRange(startDate, endDate) {
+    const formatter = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", year: "numeric" });
+    return `${formatter.format(startDate)} through ${formatter.format(endDate)}`;
+  }
+
+  normalizeTimestamp(value, label = "timestamp", fallback = null) {
+    if (value == null || value === "") {
+      if (fallback) {
+        return fallback;
+      }
+      throw new Error(`${label} is required.`);
+    }
+    const date = value instanceof Date ? value : new Date(value);
+    if (Number.isNaN(date.getTime())) {
+      throw new Error(`${label} must be a valid date/time.`);
+    }
+    return date.toISOString();
+  }
+
+  calculateDurationMinutes(clockInAt, clockOutAt) {
+    if (!clockInAt || !clockOutAt) {
+      return 0;
+    }
+    const start = new Date(clockInAt).getTime();
+    const end = new Date(clockOutAt).getTime();
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) {
+      throw new Error("Clock-out time must be after clock-in time.");
+    }
+    return Math.round((end - start) / 60000);
+  }
+
+  buildPayPeriodFromStartDate(startDateValue, preferences = {}) {
+    const normalizedPreferences = this.normalizePreferences(preferences);
+    const start = this.parseLocalDateKey(startDateValue) || new Date();
+    start.setHours(0, 0, 0, 0);
+    const lengthDays = normalizedPreferences.payPeriodLengthDays || 7;
+    const endExclusive = new Date(start);
+    endExclusive.setDate(start.getDate() + lengthDays);
+    const endDate = new Date(endExclusive);
+    endDate.setDate(endExclusive.getDate() - 1);
+    const previous = new Date(start);
+    previous.setDate(start.getDate() - lengthDays);
+    const next = new Date(start);
+    next.setDate(start.getDate() + lengthDays);
+    return {
+      startDate: this.localDateKey(start),
+      endDate: this.localDateKey(endDate),
+      startAt: start.toISOString(),
+      endAt: endExclusive.toISOString(),
+      previousStartDate: this.localDateKey(previous),
+      nextStartDate: this.localDateKey(next),
+      startDay: normalizedPreferences.payPeriodStartDay,
+      lengthDays,
+      label: this.displayDateRange(start, endDate)
+    };
+  }
+
+  getPayPeriodForDate(value, preferences = {}) {
+    const normalizedPreferences = this.normalizePreferences(preferences);
+    const date = value ? new Date(value) : new Date();
+    const anchor = Number.isNaN(date.getTime()) ? new Date() : date;
+    const localMidnight = new Date(anchor.getFullYear(), anchor.getMonth(), anchor.getDate());
+    const startDayIndex = WEEKDAY_IDS.indexOf(normalizedPreferences.payPeriodStartDay);
+    const daysSinceStart = (localMidnight.getDay() - Math.max(startDayIndex, 0) + 7) % 7;
+    const start = new Date(localMidnight);
+    start.setDate(localMidnight.getDate() - daysSinceStart);
+    return this.buildPayPeriodFromStartDate(this.localDateKey(start), normalizedPreferences);
+  }
+
+  shiftPayPeriod(period, offset = 0) {
+    const start = this.parseLocalDateKey(period.startDate) || new Date();
+    start.setDate(start.getDate() + (Number(offset) || 0) * Number(period.lengthDays || 7));
+    return this.buildPayPeriodFromStartDate(this.localDateKey(start), {
+      payPeriodStartDay: period.startDay,
+      payPeriodLengthDays: period.lengthDays
+    });
+  }
+
+  normalizeEmployee(employee = {}, existing = null) {
+    const id = String(employee.id || existing?.id || randomId("employee")).trim();
+    const name = String(employee.name || existing?.name || "").trim();
+    if (!name) {
+      throw new Error("Employee name is required.");
+    }
+    const createdAt = String(existing?.createdAt || employee.createdAt || nowIso()).trim() || nowIso();
+    const archivedAt = String(employee.archivedAt || existing?.archivedAt || "").trim();
+    const active = archivedAt ? false : employee.active !== false;
+    return {
+      id,
+      name,
+      active,
+      archivedAt,
+      createdAt,
+      updatedAt: String(employee.updatedAt || existing?.updatedAt || nowIso()).trim() || nowIso()
+    };
+  }
+
+  employeeHistoryMarkdown(employee) {
+    const status = employee.active !== false ? "Active" : "Archived";
+    return [
+      `# Employee: ${employee.name}`,
+      "",
+      `- ID: ${employee.id}`,
+      `- Status: ${status}`,
+      `- Created: ${employee.createdAt || ""}`,
+      `- Updated: ${employee.updatedAt || ""}`,
+      employee.archivedAt ? `- Archived: ${employee.archivedAt}` : "",
+      "",
+      "This file intentionally stores only operational metadata. Sensitive employee data does not belong in AMERP employee records.",
+      ""
+    ].filter((line) => line !== "").join("\n");
+  }
+
+  async loadEmployee(employeeId) {
+    const dataRoot = await this.requireDataFolder();
+    const record = await readJson(path.join(this.getEmployeeRoot(dataRoot, employeeId), "employee.json"), null);
+    return record ? this.normalizeEmployee(record, record) : null;
+  }
+
+  async listEmployees(options = {}) {
+    const dataRoot = await this.requireDataFolder();
+    const employeesRoot = path.join(dataRoot, "employees");
+    const entries = (await pathExists(employeesRoot)) ? await fs.readdir(employeesRoot, { withFileTypes: true }) : [];
+    const employees = [];
+    for (const entry of entries) {
+      if (!entry.isDirectory()) {
+        continue;
+      }
+      const record = await readJson(path.join(employeesRoot, entry.name, "employee.json"), null);
+      if (!record?.id) {
+        continue;
+      }
+      try {
+        const normalized = this.normalizeEmployee(record, record);
+        if (options.includeArchived || normalized.active !== false) {
+          employees.push(normalized);
+        }
+      } catch {
+        // Ignore malformed employee records so one bad file does not block the workspace.
+      }
+    }
+    employees.sort((left, right) => Number(left.active === false) - Number(right.active === false)
+      || String(left.name || "").localeCompare(String(right.name || "")));
+    return employees;
+  }
+
+  async saveEmployee(employee) {
+    const dataRoot = await this.requireDataFolder();
+    const existing = employee?.id ? await this.loadEmployee(employee.id) : null;
+    const normalized = this.normalizeEmployee(employee, existing);
+    normalized.updatedAt = nowIso();
+    const root = this.getEmployeeRoot(dataRoot, normalized.id);
+    await ensureDir(root);
+    await writeJson(path.join(root, "employee.json"), normalized);
+    await writeText(path.join(root, "history.md"), this.employeeHistoryMarkdown(normalized));
+    await this.appendAudit(existing ? "employee_saved" : "employee_created", normalized.id, `${existing ? "Saved" : "Created"} employee ${normalized.name}.`);
+    await this.rebuildIndex().catch(() => {});
+    return normalized;
+  }
+
+  async archiveEmployee(employeeId) {
+    const employee = await this.loadEmployee(employeeId);
+    if (!employee) {
+      throw new Error("Employee not found.");
+    }
+    return this.saveEmployee({
+      ...employee,
+      active: false,
+      archivedAt: employee.archivedAt || nowIso()
+    });
+  }
+
+  async unarchiveEmployee(employeeId) {
+    const employee = await this.loadEmployee(employeeId);
+    if (!employee) {
+      throw new Error("Employee not found.");
+    }
+    return this.saveEmployee({
+      ...employee,
+      active: true,
+      archivedAt: ""
+    });
+  }
+
+  normalizeTimeClockSession(session = {}, existing = null) {
+    const id = String(session.id || existing?.id || randomId("time-session")).trim();
+    const employeeId = String(session.employeeId || existing?.employeeId || "").trim();
+    if (!employeeId) {
+      throw new Error("Employee ID is required for time clock sessions.");
+    }
+    const clockInAt = this.normalizeTimestamp(session.clockInAt || existing?.clockInAt, "Clock-in time");
+    const clockOutAt = session.clockOutAt || existing?.clockOutAt
+      ? this.normalizeTimestamp(session.clockOutAt || existing?.clockOutAt, "Clock-out time")
+      : "";
+    const status = clockOutAt ? "Closed" : "Open";
+    const durationMinutes = clockOutAt ? this.calculateDurationMinutes(clockInAt, clockOutAt) : 0;
+    const createdAt = String(existing?.createdAt || session.createdAt || nowIso()).trim() || nowIso();
+    return {
+      id,
+      employeeId,
+      employeeName: String(session.employeeName || existing?.employeeName || "").trim(),
+      clockInAt,
+      clockOutAt,
+      status,
+      durationMinutes,
+      paid: Boolean(session.paid ?? existing?.paid),
+      paidAt: session.paid ?? existing?.paid ? String(session.paidAt || existing?.paidAt || "").trim() : "",
+      payPeriodStartDate: String(session.payPeriodStartDate || existing?.payPeriodStartDate || "").trim(),
+      corrected: Boolean(session.corrected ?? existing?.corrected),
+      corrections: Array.isArray(session.corrections) ? session.corrections : (Array.isArray(existing?.corrections) ? existing.corrections : []),
+      createdAt,
+      updatedAt: String(session.updatedAt || existing?.updatedAt || nowIso()).trim() || nowIso()
+    };
+  }
+
+  async writeTimeClockSession(session) {
+    const dataRoot = await this.requireDataFolder();
+    session.updatedAt = nowIso();
+    const root = this.getTimeClockSessionRoot(dataRoot, session.id);
+    await ensureDir(root);
+    await writeJson(path.join(root, "session.json"), session);
+    return session;
+  }
+
+  async loadTimeClockSession(sessionId) {
+    const dataRoot = await this.requireDataFolder();
+    const record = await readJson(path.join(this.getTimeClockSessionRoot(dataRoot, sessionId), "session.json"), null);
+    if (!record?.id) {
+      return null;
+    }
+    return this.normalizeTimeClockSession(record, record);
+  }
+
+  async appendTimeClockEvent(eventType, session, extra = {}) {
+    const dataRoot = await this.requireDataFolder();
+    const event = {
+      id: randomId("time-event"),
+      timestamp: nowIso(),
+      eventType,
+      employeeId: session.employeeId,
+      employeeName: session.employeeName || "",
+      sessionId: session.id,
+      ...extra
+    };
+    await appendJsonLine(this.getTimeClockEventsPath(dataRoot), event);
+    return event;
+  }
+
+  async listTimeClockSessions(filters = {}) {
+    const dataRoot = await this.requireDataFolder();
+    const sessionsRoot = path.join(this.getTimeClockRoot(dataRoot), "sessions");
+    const entries = (await pathExists(sessionsRoot)) ? await fs.readdir(sessionsRoot, { withFileTypes: true }) : [];
+    const employees = await this.listEmployees({ includeArchived: true }).catch(() => []);
+    const employeeMap = new Map(employees.map((employee) => [employee.id, employee]));
+    const sessions = [];
+    for (const entry of entries) {
+      if (!entry.isDirectory()) {
+        continue;
+      }
+      const record = await readJson(path.join(sessionsRoot, entry.name, "session.json"), null);
+      if (!record?.id) {
+        continue;
+      }
+      try {
+        const normalized = this.normalizeTimeClockSession(record, record);
+        const employee = employeeMap.get(normalized.employeeId);
+        sessions.push({
+          ...normalized,
+          employeeName: employee?.name || normalized.employeeName || normalized.employeeId,
+          employeeActive: employee ? employee.active !== false : false
+        });
+      } catch {
+        // Ignore malformed sessions so readable data can be repaired manually.
+      }
+    }
+    const filtered = sessions.filter((session) => {
+      if (filters.employeeId && session.employeeId !== filters.employeeId) {
+        return false;
+      }
+      if (filters.status && session.status !== filters.status) {
+        return false;
+      }
+      if (Object.prototype.hasOwnProperty.call(filters, "paid") && filters.paid !== "" && Boolean(session.paid) !== Boolean(filters.paid)) {
+        return false;
+      }
+      if (filters.periodStartDate && session.payPeriodStartDate && session.payPeriodStartDate !== filters.periodStartDate) {
+        return false;
+      }
+      if (filters.dateFrom && String(session.clockInAt || "") < String(filters.dateFrom)) {
+        return false;
+      }
+      if (filters.dateTo && String(session.clockInAt || "") >= String(filters.dateTo)) {
+        return false;
+      }
+      return true;
+    });
+    filtered.sort((left, right) => String(right.clockInAt || "").localeCompare(String(left.clockInAt || "")));
+    return filtered;
+  }
+
+  async findOpenTimeClockSession(employeeId) {
+    const sessions = await this.listTimeClockSessions({ employeeId, status: "Open" });
+    return sessions[0] || null;
+  }
+
+  async clockInEmployee(employeeId, options = {}) {
+    const employee = await this.loadEmployee(employeeId);
+    if (!employee) {
+      throw new Error("Employee not found.");
+    }
+    if (employee.active === false) {
+      throw new Error("Archived employees cannot clock in.");
+    }
+    const openSession = await this.findOpenTimeClockSession(employee.id);
+    if (openSession) {
+      throw new Error(`${employee.name} is already clocked in.`);
+    }
+    const preferences = await this.loadPreferences();
+    const clockInAt = this.normalizeTimestamp(options.clockInAt || nowIso(), "Clock-in time");
+    const payPeriod = this.getPayPeriodForDate(clockInAt, preferences);
+    const session = this.normalizeTimeClockSession({
+      employeeId: employee.id,
+      employeeName: employee.name,
+      clockInAt,
+      payPeriodStartDate: payPeriod.startDate,
+      paid: false
+    });
+    await this.writeTimeClockSession(session);
+    await this.appendTimeClockEvent("clock_in", session, { clockInAt });
+    await this.appendAudit("time_clock_in", session.id, `${employee.name} clocked in.`, { employeeId: employee.id });
+    return session;
+  }
+
+  async clockOutEmployee(employeeId, options = {}) {
+    const employee = await this.loadEmployee(employeeId);
+    if (!employee) {
+      throw new Error("Employee not found.");
+    }
+    const existing = await this.findOpenTimeClockSession(employee.id);
+    if (!existing) {
+      throw new Error(`${employee.name} is not currently clocked in.`);
+    }
+    const clockOutAt = this.normalizeTimestamp(options.clockOutAt || nowIso(), "Clock-out time");
+    const session = this.normalizeTimeClockSession({
+      ...existing,
+      employeeName: employee.name,
+      clockOutAt
+    }, existing);
+    await this.writeTimeClockSession(session);
+    await this.appendTimeClockEvent("clock_out", session, { clockOutAt, durationMinutes: session.durationMinutes });
+    await this.appendAudit("time_clock_out", session.id, `${employee.name} clocked out.`, { employeeId: employee.id, durationMinutes: session.durationMinutes });
+    return session;
+  }
+
+  sessionCorrectionSnapshot(session) {
+    return {
+      employeeId: session.employeeId,
+      employeeName: session.employeeName || "",
+      clockInAt: session.clockInAt || "",
+      clockOutAt: session.clockOutAt || "",
+      status: session.status || "",
+      durationMinutes: Number(session.durationMinutes || 0),
+      paid: Boolean(session.paid),
+      payPeriodStartDate: session.payPeriodStartDate || ""
+    };
+  }
+
+  async correctTimeClockSession(sessionId, patch = {}, reason = "") {
+    const existing = await this.loadTimeClockSession(sessionId);
+    if (!existing) {
+      throw new Error("Time clock session not found.");
+    }
+    const correctionReason = String(reason || "").trim();
+    if (!correctionReason) {
+      throw new Error("A correction reason is required.");
+    }
+    const allowedPatch = {};
+    if (Object.prototype.hasOwnProperty.call(patch || {}, "clockInAt")) {
+      allowedPatch.clockInAt = this.normalizeTimestamp(patch.clockInAt, "Clock-in time");
+    }
+    if (Object.prototype.hasOwnProperty.call(patch || {}, "clockOutAt")) {
+      allowedPatch.clockOutAt = patch.clockOutAt ? this.normalizeTimestamp(patch.clockOutAt, "Clock-out time") : "";
+    }
+    const preferences = await this.loadPreferences();
+    const before = this.sessionCorrectionSnapshot(existing);
+    const corrected = this.normalizeTimeClockSession({
+      ...existing,
+      ...allowedPatch,
+      payPeriodStartDate: this.getPayPeriodForDate(allowedPatch.clockInAt || existing.clockInAt, preferences).startDate,
+      corrected: true,
+      corrections: [
+        ...(existing.corrections || []),
+        {
+          id: randomId("time-correction"),
+          correctedAt: nowIso(),
+          reason: correctionReason,
+          before,
+          afterPatch: allowedPatch
+        }
+      ]
+    }, existing);
+    const after = this.sessionCorrectionSnapshot(corrected);
+    corrected.corrections = corrected.corrections.map((item, index, items) => index === items.length - 1 ? { ...item, after } : item);
+    await this.writeTimeClockSession(corrected);
+    await this.appendTimeClockEvent("session_corrected", corrected, { reason: correctionReason, before, after });
+    await this.appendAudit("time_clock_session_corrected", corrected.id, `Corrected time clock session for ${corrected.employeeName || corrected.employeeId}.`, { employeeId: corrected.employeeId, reason: correctionReason });
+    return corrected;
+  }
+
+  async markTimeClockSessionsPaid(sessionIds = [], paid = true) {
+    const ids = Array.from(new Set((Array.isArray(sessionIds) ? sessionIds : []).map((id) => String(id || "").trim()).filter(Boolean)));
+    if (!ids.length) {
+      throw new Error("Choose at least one time clock session.");
+    }
+    const now = nowIso();
+    const sessions = [];
+    for (const sessionId of ids) {
+      const existing = await this.loadTimeClockSession(sessionId);
+      if (!existing) {
+        continue;
+      }
+      const updated = this.normalizeTimeClockSession({
+        ...existing,
+        paid: Boolean(paid),
+        paidAt: paid ? now : ""
+      }, existing);
+      await this.writeTimeClockSession(updated);
+      await this.appendTimeClockEvent(paid ? "session_paid_marked" : "session_paid_unmarked", updated, { paid: Boolean(paid), paidAt: updated.paidAt });
+      sessions.push(updated);
+    }
+    await this.appendAudit(paid ? "time_clock_sessions_paid" : "time_clock_sessions_unpaid", "time-clock", `${paid ? "Marked" : "Unmarked"} ${sessions.length} time clock session${sessions.length === 1 ? "" : "s"} as paid.`);
+    return sessions;
+  }
+
+  async getTimeClockDashboard(filters = {}) {
+    const preferences = await this.loadPreferences();
+    const basePeriod = filters.periodStartDate
+      ? this.buildPayPeriodFromStartDate(filters.periodStartDate, preferences)
+      : this.getPayPeriodForDate(filters.referenceDate || new Date(), preferences);
+    const payPeriod = filters.periodOffset ? this.shiftPayPeriod(basePeriod, filters.periodOffset) : basePeriod;
+    const [employees, periodSessions, openSessions] = await Promise.all([
+      this.listEmployees({ includeArchived: true }),
+      this.listTimeClockSessions({
+        employeeId: filters.employeeId || "",
+        dateFrom: payPeriod.startAt,
+        dateTo: payPeriod.endAt
+      }),
+      this.listTimeClockSessions({
+        employeeId: filters.employeeId || "",
+        status: "Open"
+      })
+    ]);
+    const employeeMap = new Map(employees.map((employee) => [employee.id, employee]));
+    const groupsByEmployee = new Map();
+    for (const session of periodSessions) {
+      if (!groupsByEmployee.has(session.employeeId)) {
+        const employee = employeeMap.get(session.employeeId);
+        groupsByEmployee.set(session.employeeId, {
+          employeeId: session.employeeId,
+          employeeName: employee?.name || session.employeeName || session.employeeId,
+          employeeActive: employee ? employee.active !== false : false,
+          sessions: [],
+          totalMinutes: 0,
+          paidMinutes: 0,
+          unpaidMinutes: 0
+        });
+      }
+      const group = groupsByEmployee.get(session.employeeId);
+      group.sessions.push(session);
+      if (session.status === "Closed") {
+        group.totalMinutes += Number(session.durationMinutes || 0);
+        if (session.paid) {
+          group.paidMinutes += Number(session.durationMinutes || 0);
+        } else {
+          group.unpaidMinutes += Number(session.durationMinutes || 0);
+        }
+      }
+    }
+    const groups = Array.from(groupsByEmployee.values())
+      .map((group) => ({
+        ...group,
+        sessions: group.sessions.sort((left, right) => String(left.clockInAt || "").localeCompare(String(right.clockInAt || "")))
+      }))
+      .sort((left, right) => String(left.employeeName || "").localeCompare(String(right.employeeName || "")));
+    return {
+      payPeriod,
+      employees,
+      activeEmployees: employees.filter((employee) => employee.active !== false),
+      openSessions,
+      sessions: periodSessions,
+      groups,
+      totals: {
+        sessionCount: periodSessions.length,
+        openSessionCount: openSessions.length,
+        totalMinutes: groups.reduce((sum, group) => sum + group.totalMinutes, 0),
+        paidMinutes: groups.reduce((sum, group) => sum + group.paidMinutes, 0),
+        unpaidMinutes: groups.reduce((sum, group) => sum + group.unpaidMinutes, 0)
+      }
+    };
+  }
+
   getPartRoot(dataRoot, jobId, partId) {
     return path.join(this.getJobRoot(dataRoot, jobId), "parts", safeFileName(partId));
   }
@@ -1941,8 +2873,26 @@ class ERPBackend {
     };
   }
 
+  normalizeKanbanStatus(card) {
+    if (card?.active === false) {
+      return "Archived";
+    }
+    const explicitStatus = String(card?.status || "").trim();
+    if (KANBAN_STATUS_OPTIONS.includes(explicitStatus)) {
+      return explicitStatus;
+    }
+    if (card?.needsReview === true) {
+      return "Needs Review";
+    }
+    if (!String(card?.lastPrintedAt || "").trim()) {
+      return "Unprinted";
+    }
+    return "Active";
+  }
+
   normalizeKanbanCard(card) {
     const orderingNotes = mergeKanbanOrderingNotes(card?.orderingNotes, card?.vendorPartNumber);
+    const status = this.normalizeKanbanStatus(card);
     return {
       id: card?.id || randomId("kanban"),
       itemName: String(card?.itemName || "").trim(),
@@ -1959,8 +2909,11 @@ class ERPBackend {
       packSize: String(card?.packSize || "").trim(),
       description: String(card?.description || "").trim(),
       photo: this.normalizeKanbanPhoto(card?.photo),
-      active: card?.active !== false,
-      archivedAt: String(card?.archivedAt || "").trim(),
+      status,
+      needsReview: status === "Needs Review",
+      lastPrintedAt: String(card?.lastPrintedAt || "").trim(),
+      active: status !== "Archived",
+      archivedAt: status === "Archived" ? (String(card?.archivedAt || "").trim() || nowIso()) : "",
       createdAt: String(card?.createdAt || nowIso()).trim() || nowIso(),
       updatedAt: String(card?.updatedAt || nowIso()).trim() || nowIso()
     };
@@ -1981,7 +2934,8 @@ class ERPBackend {
       `- Order Quantity: ${card.orderQuantity || "-"}`,
       `- Pack Size: ${card.packSize || "-"}`,
       `- Purchase URL: ${card.purchaseUrl || "-"}`,
-      `- Active: ${card.active !== false ? "Yes" : "No"}`,
+      `- Status: ${card.status || "-"}`,
+      `- Last Printed: ${card.lastPrintedAt || "-"}`,
       "",
       "## Description",
       "",
@@ -4896,10 +5850,11 @@ class ERPBackend {
 
   async rebuildIndex() {
     const dataRoot = await this.requireDataFolder();
-    const [jobSummaries, nonconformances, kanbanCards, materials, instruments] = await Promise.all([
+    const [jobSummaries, nonconformances, kanbanCards, employees, materials, instruments] = await Promise.all([
       this.listJobSummaries(),
       this.listNonconformances(),
       this.listKanbanCards(),
+      this.listEmployees({ includeArchived: true }),
       this.listMaterials(),
       this.listInstruments()
     ]);
@@ -4940,7 +5895,12 @@ class ERPBackend {
       kanbanCards: kanbanCards.map((card) => ({
         id: card.id,
         label: `${card.itemName || card.internalInventoryNumber || card.id} ${card.vendor || ""}`.trim(),
-        searchText: `${card.itemName} ${card.internalInventoryNumber} ${card.vendor} ${card.category || ""} ${card.department} ${card.storageLocation} ${card.orderingNotes || ""}`.toLowerCase()
+        searchText: `${card.itemName} ${card.internalInventoryNumber} ${card.status || ""} ${card.vendor} ${card.category || ""} ${card.department} ${card.storageLocation} ${card.orderingNotes || ""} ${card.lastPrintedAt || ""}`.toLowerCase()
+      })),
+      employees: employees.map((employee) => ({
+        id: employee.id,
+        label: employee.name,
+        searchText: `${employee.name} ${employee.active === false ? "archived" : "active"}`.toLowerCase()
       })),
       materials: materials.map((material) => ({
         id: material.id,
@@ -5031,8 +5991,10 @@ class ERPBackend {
   }
 
   async getDashboardState() {
-    const [jobs, materials, instruments, audit] = await Promise.all([
+    const [jobs, employees, openSessions, materials, instruments, audit] = await Promise.all([
       this.listJobSummaries(),
+      this.listEmployees(),
+      this.listTimeClockSessions({ status: "Open" }),
       this.listMaterials(),
       this.listInstruments(),
       this.readAuditLog(20)
@@ -5040,6 +6002,8 @@ class ERPBackend {
     return {
       counts: {
         openJobs: jobs.filter((job) => job.active).length,
+        employees: employees.filter((employee) => employee.active !== false).length,
+        openTimeClockSessions: openSessions.length,
         materials: materials.filter((item) => item.status !== "archived").length,
         instruments: instruments.filter((item) => item.active).length,
         overdueInstruments: instruments.filter((item) => item.dueState === "Overdue").length
@@ -5051,13 +6015,15 @@ class ERPBackend {
 
   async loadWorkspace() {
     const dataFolder = await this.requireDataFolder();
-    const [dashboard, jobs, inspections, nonconformances, kanbanCards, customers, materials, instruments, templates, libraries, standards, preferences] = await Promise.all([
+    const [dashboard, jobs, inspections, nonconformances, kanbanCards, customers, employees, timeClockDashboard, materials, instruments, templates, libraries, standards, preferences] = await Promise.all([
       this.getDashboardState(),
       this.listJobSummaries(),
       this.listInspectionReports(),
       this.listNonconformances(),
       this.listKanbanCards(),
       this.listCustomers(),
+      this.listEmployees({ includeArchived: true }),
+      this.getTimeClockDashboard(),
       this.listMaterials(),
       this.listInstruments(),
       this.loadTemplates(),
@@ -5073,6 +6039,8 @@ class ERPBackend {
       nonconformances,
       kanbanCards,
       customers,
+      employees,
+      timeClockDashboard,
       materials,
       instruments,
       templates,
@@ -5979,7 +6947,8 @@ class ERPBackend {
         hash: `/print/${encodeURIComponent(jobId)}`
       });
     }
-    await this.waitForPrintSelector(printWindow, ".traveler-header");
+    await this.waitForPrintSelector(printWindow, ".traveler-print-ready");
+    await this.waitForPrintRenderSettled(printWindow);
     const pdf = await printWindow.webContents.printToPDF({
       pageSize: "Letter",
       printBackground: true,
