@@ -1834,7 +1834,7 @@ class ERPBackend {
     const baseCard = this.normalizeKanbanCard({
       ...normalizedCard,
       vendor: vendorContext?.scraped?.vendor || normalizedCard.vendor,
-      purchaseUrl: vendorContext?.scraped?.purchaseUrl || normalizedCard.purchaseUrl,
+      purchaseUrl: normalizedCard.purchaseUrl || vendorContext?.scraped?.purchaseUrl,
       packSize: vendorContext?.scraped?.packSize || normalizedCard.packSize,
       orderingNotes: mergeKanbanOrderingNotes(normalizedCard.orderingNotes, vendorContext?.scraped?.vendorPartNumber)
     });

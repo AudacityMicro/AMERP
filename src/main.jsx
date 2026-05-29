@@ -904,6 +904,38 @@ function kanbanPhotoSrc(card) {
   return api.assetUrl(card.photo.relativePath);
 }
 
+function isKanbanCardReadyToSave(card) {
+  return Boolean(card?.itemName || card?.internalInventoryNumber || card?.purchaseUrl || card?.vendor || card?.category);
+}
+
+function isJobReadyToSave(job) {
+  return Boolean(job?.jobNumber || job?.customer);
+}
+
+function isNonconformanceReadyToSave(current) {
+  if (!current?.jobId || !current?.partId || !current?.ncrNumber) {
+    return false;
+  }
+  if (!String(current.reportedBy || "").trim()) {
+    return false;
+  }
+  if (current.status !== "Cancelled" && !(Number(current.quantityAffected || 0) > 0)) {
+    return false;
+  }
+  if (current.status !== "Closed" && current.status !== "Cancelled" && !String(current.owner || "").trim()) {
+    return false;
+  }
+  return Boolean(String(current.nonconformanceDescription || current.issueDescription || "").trim());
+}
+
+function isMaterialReadyToSave(current) {
+  return Boolean(current?.supplier && materialDisplayType(current));
+}
+
+function isInstrumentReadyToSave(current) {
+  return Boolean(current?.instrument?.tool_name);
+}
+
 function materialLabelPhotoSrc(material) {
   const imageExtensions = new Set(["png", "jpg", "jpeg", "webp", "gif", "bmp"]);
   const attachment = (material?.attachments || []).find((item) => {
@@ -1891,8 +1923,13 @@ function Workspace() {
   const fusionImportInFlight = useRef(false);
   const refreshWorkspaceRef = useRef(null);
   const openKanbanCardRef = useRef(null);
+  const jobRef = useRef(null);
+  const nonconformanceRef = useRef(null);
   const kanbanCardIdRef = useRef(null);
+  const kanbanCardRef = useRef(null);
   const openMaterialRef = useRef(null);
+  const materialRef = useRef(null);
+  const instrumentRef = useRef(null);
 
   const [selectedJobId, setSelectedJobId] = useState(null);
   const [job, setJob] = useState(null);
@@ -1933,6 +1970,11 @@ function Workspace() {
   useEffect(() => {
     kanbanCardIdRef.current = kanbanCard?.id || null;
   }, [kanbanCard?.id]);
+  jobRef.current = job;
+  nonconformanceRef.current = nonconformanceRecord;
+  kanbanCardRef.current = kanbanCard;
+  materialRef.current = material;
+  instrumentRef.current = instrumentPayload;
   const enabledModules = effectiveEnabledModules(workspace?.preferences?.enabledModules, workspace?.preferences);
   const moduleIsEnabled = (moduleId) => moduleId === "settings" || enabledModules[moduleId] !== false;
   const firstAvailableView = firstEnabledModuleId(enabledModules);
@@ -1941,6 +1983,134 @@ function Workspace() {
     setStatus(message);
     window.clearTimeout(showStatus.timer);
     showStatus.timer = window.setTimeout(() => setStatus(""), 5000);
+  };
+
+  const persistCurrentKanbanCard = async () => {
+    const current = kanbanCardRef.current;
+    if (!current || !isKanbanCardReadyToSave(current)) {
+      return true;
+    }
+    setBusy(true);
+    try {
+      const saved = await api.saveKanbanCard(current);
+      if (kanbanCardIdRef.current === saved?.id) {
+        await applySavedKanbanCard(saved);
+      } else {
+        await refreshWorkspace();
+      }
+      return true;
+    } catch (error) {
+      showStatus(error.message || String(error));
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const persistCurrentJob = async () => {
+    const current = jobRef.current;
+    if (!current || !isJobReadyToSave(current)) {
+      return true;
+    }
+    setBusy(true);
+    try {
+      const saved = await api.saveJob(current);
+      await applySavedJob(saved);
+      return true;
+    } catch (error) {
+      showStatus(error.message || String(error));
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const persistCurrentNonconformance = async () => {
+    const current = nonconformanceRef.current;
+    if (!current || !isNonconformanceReadyToSave(current)) {
+      return true;
+    }
+    setBusy(true);
+    try {
+      const saved = await api.saveNonconformance(current);
+      await applySavedNonconformance(saved);
+      return true;
+    } catch (error) {
+      showStatus(error.message || String(error));
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const persistCurrentMaterial = async () => {
+    const current = materialRef.current;
+    if (!current || !isMaterialReadyToSave(current)) {
+      return true;
+    }
+    setBusy(true);
+    try {
+      const saved = await api.saveMaterial(current);
+      await applySavedMaterial(saved);
+      return true;
+    } catch (error) {
+      showStatus(error.message || String(error));
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const persistCurrentInstrument = async () => {
+    const current = instrumentRef.current;
+    if (!current || !isInstrumentReadyToSave(current)) {
+      return true;
+    }
+    setBusy(true);
+    try {
+      const saved = await api.saveInstrument(current);
+      await applySavedInstrument(saved);
+      return true;
+    } catch (error) {
+      showStatus(error.message || String(error));
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const persistPendingEditorsBeforeNavigation = async () => {
+    if (view === "jobs" && jobScreen !== "list" && jobScreen !== "nonconformance") {
+      const didSave = await persistCurrentJob();
+      if (!didSave) {
+        return false;
+      }
+    }
+    if ((view === "nonconformance" && nonconformanceScreen === "detail") || (view === "jobs" && jobScreen === "nonconformance")) {
+      const didSave = await persistCurrentNonconformance();
+      if (!didSave) {
+        return false;
+      }
+    }
+    if (view === "kanban" && kanbanScreen === "detail") {
+      const didSave = await persistCurrentKanbanCard();
+      if (!didSave) {
+        return false;
+      }
+    }
+    if (view === "materials" && materialScreen === "detail") {
+      const didSave = await persistCurrentMaterial();
+      if (!didSave) {
+        return false;
+      }
+    }
+    if (view === "metrology" && metrologyScreen === "detail") {
+      const didSave = await persistCurrentInstrument();
+      if (!didSave) {
+        return false;
+      }
+    }
+    return true;
   };
 
   const refreshWorkspace = async (preserveSelection = true) => {
@@ -2097,6 +2267,10 @@ useEffect(() => api.onDeepLink?.((payload) => {
   const openJob = async (jobId) => {
     setBusy(true);
     try {
+      const didSave = await persistPendingEditorsBeforeNavigation();
+      if (!didSave) {
+        return;
+      }
       if (selectedJobId && selectedJobId !== jobId) {
         await api.releaseLock("job", selectedJobId);
       }
@@ -2118,6 +2292,10 @@ useEffect(() => api.onDeepLink?.((payload) => {
   const openKanbanCard = async (cardId) => {
     setBusy(true);
     try {
+      const didSave = await persistPendingEditorsBeforeNavigation();
+      if (!didSave) {
+        return;
+      }
       if (selectedKanbanId && selectedKanbanId !== cardId) {
         await api.releaseLock("kanban", selectedKanbanId);
       }
@@ -2139,6 +2317,10 @@ useEffect(() => api.onDeepLink?.((payload) => {
   const openNonconformance = async (ncrId, { sourceView = "nonconformance", partId = null } = {}) => {
     setBusy(true);
     try {
+      const didSave = await persistPendingEditorsBeforeNavigation();
+      if (!didSave) {
+        return;
+      }
       if (selectedNonconformanceId && selectedNonconformanceId !== ncrId) {
         await api.releaseLock("nonconformance", selectedNonconformanceId);
       }
@@ -2166,6 +2348,10 @@ useEffect(() => api.onDeepLink?.((payload) => {
   const openMaterial = async (materialId) => {
     setBusy(true);
     try {
+      const didSave = await persistPendingEditorsBeforeNavigation();
+      if (!didSave) {
+        return;
+      }
       if (selectedMaterialId && selectedMaterialId !== materialId) {
         await api.releaseLock("material", selectedMaterialId);
       }
@@ -2186,6 +2372,10 @@ useEffect(() => api.onDeepLink?.((payload) => {
   const openInstrument = async (instrumentId) => {
     setBusy(true);
     try {
+      const didSave = await persistPendingEditorsBeforeNavigation();
+      if (!didSave) {
+        return;
+      }
       if (selectedInstrumentId && selectedInstrumentId !== instrumentId) {
         await api.releaseLock("instrument", selectedInstrumentId);
       }
@@ -2202,7 +2392,11 @@ useEffect(() => api.onDeepLink?.((payload) => {
     }
   };
 
-  const createNewJob = () => {
+  const createNewJob = async () => {
+    const didSave = await persistPendingEditorsBeforeNavigation();
+    if (!didSave) {
+      return;
+    }
     if (selectedNonconformanceId) api.releaseLock("nonconformance", selectedNonconformanceId).catch(() => {});
     if (selectedJobId) api.releaseLock("job", selectedJobId).catch(() => {});
     setSelectedJobId(null);
@@ -2216,7 +2410,11 @@ useEffect(() => api.onDeepLink?.((payload) => {
     setSaveState("saved");
   };
 
-  const createNewKanbanCard = (draft = null) => {
+  const createNewKanbanCard = async (draft = null) => {
+    const didSave = await persistPendingEditorsBeforeNavigation();
+    if (!didSave) {
+      return;
+    }
     if (selectedNonconformanceId) api.releaseLock("nonconformance", selectedNonconformanceId).catch(() => {});
     if (selectedKanbanId) api.releaseLock("kanban", selectedKanbanId).catch(() => {});
     setSelectedKanbanId(null);
@@ -2232,6 +2430,10 @@ useEffect(() => api.onDeepLink?.((payload) => {
       return;
     }
     try {
+      const didSave = await persistPendingEditorsBeforeNavigation();
+      if (!didSave) {
+        return;
+      }
       const nextNumber = await api.generateNextNonconformanceNumber().catch(() => "");
       const linkedMaterialIds = Array.from(new Set(part.requiredMaterialLots || []));
       const linkedMaterials = (await Promise.all(
@@ -2271,7 +2473,11 @@ useEffect(() => api.onDeepLink?.((payload) => {
     }
   };
 
-  const showJobList = () => {
+  const showJobList = async () => {
+    const didSave = await persistPendingEditorsBeforeNavigation();
+    if (!didSave) {
+      return;
+    }
     if (selectedJobId) {
       api.releaseLock("job", selectedJobId).catch(() => {});
     }
@@ -2289,7 +2495,11 @@ useEffect(() => api.onDeepLink?.((payload) => {
     setSaveState("saved");
   };
 
-  const showKanbanList = () => {
+  const showKanbanList = async () => {
+    const didSave = await persistPendingEditorsBeforeNavigation();
+    if (!didSave) {
+      return;
+    }
     if (selectedNonconformanceId) {
       api.releaseLock("nonconformance", selectedNonconformanceId).catch(() => {});
       setSelectedNonconformanceId(null);
@@ -2306,7 +2516,11 @@ useEffect(() => api.onDeepLink?.((payload) => {
     setSaveState("saved");
   };
 
-  const showNonconformanceList = () => {
+  const showNonconformanceList = async () => {
+    const didSave = await persistPendingEditorsBeforeNavigation();
+    if (!didSave) {
+      return;
+    }
     if (selectedNonconformanceId) {
       api.releaseLock("nonconformance", selectedNonconformanceId).catch(() => {});
     }
@@ -2317,7 +2531,11 @@ useEffect(() => api.onDeepLink?.((payload) => {
     setSaveState("saved");
   };
 
-  const showInspectionList = () => {
+  const showInspectionList = async () => {
+    const didSave = await persistPendingEditorsBeforeNavigation();
+    if (!didSave) {
+      return;
+    }
     if (selectedNonconformanceId) {
       api.releaseLock("nonconformance", selectedNonconformanceId).catch(() => {});
       setSelectedNonconformanceId(null);
@@ -2327,7 +2545,11 @@ useEffect(() => api.onDeepLink?.((payload) => {
     setSaveState("saved");
   };
 
-  const showTimeClock = () => {
+  const showTimeClock = async () => {
+    const didSave = await persistPendingEditorsBeforeNavigation();
+    if (!didSave) {
+      return;
+    }
     if (selectedNonconformanceId) {
       api.releaseLock("nonconformance", selectedNonconformanceId).catch(() => {});
       setSelectedNonconformanceId(null);
@@ -2337,7 +2559,11 @@ useEffect(() => api.onDeepLink?.((payload) => {
     setSaveState("saved");
   };
 
-  const showTimeClockAdmin = () => {
+  const showTimeClockAdmin = async () => {
+    const didSave = await persistPendingEditorsBeforeNavigation();
+    if (!didSave) {
+      return;
+    }
     if (selectedNonconformanceId) {
       api.releaseLock("nonconformance", selectedNonconformanceId).catch(() => {});
       setSelectedNonconformanceId(null);
@@ -2412,7 +2638,11 @@ useEffect(() => api.onDeepLink?.((payload) => {
     setSaveState("saved");
   };
 
-  const backToJob = () => {
+  const backToJob = async () => {
+    const didSave = await persistPendingEditorsBeforeNavigation();
+    if (!didSave) {
+      return;
+    }
     if (selectedNonconformanceId && jobScreen === "nonconformance") {
       api.releaseLock("nonconformance", selectedNonconformanceId).catch(() => {});
       setSelectedNonconformanceId(null);
@@ -2424,7 +2654,11 @@ useEffect(() => api.onDeepLink?.((payload) => {
     setSaveState("saved");
   };
 
-  const backToPart = () => {
+  const backToPart = async () => {
+    const didSave = await persistPendingEditorsBeforeNavigation();
+    if (!didSave) {
+      return;
+    }
     if (selectedNonconformanceId && jobScreen === "nonconformance") {
       api.releaseLock("nonconformance", selectedNonconformanceId).catch(() => {});
       setSelectedNonconformanceId(null);
@@ -3352,6 +3586,10 @@ useEffect(() => api.onDeepLink?.((payload) => {
   };
 
   const createNewMaterial = async () => {
+    const didSave = await persistPendingEditorsBeforeNavigation();
+    if (!didSave) {
+      return;
+    }
     if (selectedNonconformanceId) api.releaseLock("nonconformance", selectedNonconformanceId).catch(() => {});
     if (selectedMaterialId) api.releaseLock("material", selectedMaterialId).catch(() => {});
     const serial = await api.generateMaterialSerial().catch(() => "");
@@ -3481,7 +3719,11 @@ useEffect(() => api.onDeepLink?.((payload) => {
     }
   };
 
-  const createNewInstrument = () => {
+  const createNewInstrument = async () => {
+    const didSave = await persistPendingEditorsBeforeNavigation();
+    if (!didSave) {
+      return;
+    }
     if (selectedNonconformanceId) api.releaseLock("nonconformance", selectedNonconformanceId).catch(() => {});
     if (selectedInstrumentId) api.releaseLock("instrument", selectedInstrumentId).catch(() => {});
     setSelectedInstrumentId(null);
@@ -3545,7 +3787,11 @@ useEffect(() => api.onDeepLink?.((payload) => {
     return saved;
   };
 
-  const showMaterialsList = () => {
+  const showMaterialsList = async () => {
+    const didSave = await persistPendingEditorsBeforeNavigation();
+    if (!didSave) {
+      return;
+    }
     if (selectedNonconformanceId) {
       api.releaseLock("nonconformance", selectedNonconformanceId).catch(() => {});
       setSelectedNonconformanceId(null);
@@ -3561,7 +3807,11 @@ useEffect(() => api.onDeepLink?.((payload) => {
     setSaveState("saved");
   };
 
-  const showMetrologyList = () => {
+  const showMetrologyList = async () => {
+    const didSave = await persistPendingEditorsBeforeNavigation();
+    if (!didSave) {
+      return;
+    }
     if (selectedNonconformanceId) {
       api.releaseLock("nonconformance", selectedNonconformanceId).catch(() => {});
       setSelectedNonconformanceId(null);
@@ -3788,7 +4038,7 @@ useEffect(() => api.onDeepLink?.((payload) => {
           category: next.category || current.category,
           photo: next.photo || current.photo,
           vendor: next.vendor || current.vendor,
-          purchaseUrl: next.purchaseUrl || current.purchaseUrl,
+          purchaseUrl: current.purchaseUrl || next.purchaseUrl,
           orderingNotes: next.orderingNotes || current.orderingNotes,
           packSize: next.packSize || current.packSize,
           description: next.description || current.description
@@ -3951,7 +4201,7 @@ useEffect(() => api.onDeepLink?.((payload) => {
     value: job,
     resetKey: `job:${job?.id || "none"}`,
     enabled: Boolean(job),
-    isReady: (current) => Boolean(current?.jobNumber || current?.customer),
+    isReady: isJobReadyToSave,
     save: (current) => api.saveJob(current),
     onSaved: applySavedJob,
     onError: (error) => showStatus(error.message || String(error)),
@@ -3966,21 +4216,7 @@ useEffect(() => api.onDeepLink?.((payload) => {
     value: nonconformanceRecord,
     resetKey: `nonconformance:${nonconformanceRecord?.id || "none"}`,
     enabled: Boolean(nonconformanceRecord),
-    isReady: (current) => {
-      if (!current?.jobId || !current?.partId || !current?.ncrNumber) {
-        return false;
-      }
-      if (!String(current.reportedBy || "").trim()) {
-        return false;
-      }
-      if (current.status !== "Cancelled" && !(Number(current.quantityAffected || 0) > 0)) {
-        return false;
-      }
-      if (current.status !== "Closed" && current.status !== "Cancelled" && !String(current.owner || "").trim()) {
-        return false;
-      }
-      return Boolean(String(current.nonconformanceDescription || current.issueDescription || "").trim());
-    },
+    isReady: isNonconformanceReadyToSave,
     save: (current) => api.saveNonconformance(current),
     onSaved: applySavedNonconformance,
     onError: (error) => showStatus(error.message || String(error)),
@@ -3995,7 +4231,7 @@ useEffect(() => api.onDeepLink?.((payload) => {
     value: kanbanCard,
     resetKey: `kanban:${kanbanCard?.id || "none"}`,
     enabled: Boolean(kanbanCard),
-    isReady: (current) => Boolean(current?.itemName || current?.internalInventoryNumber || current?.purchaseUrl || current?.vendor || current?.category),
+    isReady: isKanbanCardReadyToSave,
     save: (current) => api.saveKanbanCard(current),
     onSaved: applySavedKanbanCard,
     onError: (error) => showStatus(error.message || String(error)),
@@ -4010,7 +4246,7 @@ useEffect(() => api.onDeepLink?.((payload) => {
     value: material,
     resetKey: `material:${material?.id || "none"}`,
     enabled: Boolean(material),
-    isReady: (current) => Boolean(current?.supplier && materialDisplayType(current)),
+    isReady: isMaterialReadyToSave,
     save: (current) => api.saveMaterial(current),
     onSaved: applySavedMaterial,
     onError: (error) => showStatus(error.message || String(error)),
@@ -4025,7 +4261,7 @@ useEffect(() => api.onDeepLink?.((payload) => {
     value: instrumentPayload,
     resetKey: `instrument:${instrumentPayload?.instrument?.instrument_id || "none"}`,
     enabled: Boolean(instrumentPayload),
-    isReady: (current) => Boolean(current?.instrument?.tool_name),
+    isReady: isInstrumentReadyToSave,
     save: (current) => api.saveInstrument(current),
     onSaved: applySavedInstrument,
     onError: (error) => showStatus(error.message || String(error)),
@@ -4611,7 +4847,7 @@ function TimeClockView({ workspace, onRefresh, onStatus }) {
 
   useEffect(() => {
     setDashboard(workspace.timeClockDashboard || null);
-  }, [workspace.dataFolder]);
+  }, [workspace.dataFolder, workspace.preferences]);
 
   useEffect(() => {
     let cancelled = false;
@@ -11136,7 +11372,7 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
     value: jobSettings,
     resetKey: `job-settings:${workspace.dataFolder}:${workspace.preferences?.jobPrefix || ""}:${workspace.preferences?.startingJobNumber ?? ""}`,
     enabled: true,
-    isReady: (current) => Boolean(current),
+    isReady: (current) => Boolean(current) && /^\d+$/.test(String(current.startingJobNumber || "").trim()),
     save: async (current) => {
       await onSavePreferences({
         jobPrefix: String(current.jobPrefix || "").trim(),
@@ -11150,7 +11386,7 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
     value: inspectionReportNumberSettings,
     resetKey: `inspection-report-number-settings:${workspace.dataFolder}:${workspace.preferences?.inspectionReportPrefix || ""}:${workspace.preferences?.startingInspectionReportNumber ?? ""}`,
     enabled: true,
-    isReady: (current) => Boolean(current),
+    isReady: (current) => Boolean(current) && /^\d+$/.test(String(current.startingInspectionReportNumber || "").trim()),
     save: async (current) => {
       await onSavePreferences({
         inspectionReportPrefix: String(current.inspectionReportPrefix || "").trim(),
@@ -11177,7 +11413,7 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
     value: nonconformanceNumberSettings,
     resetKey: `ncr-number-settings:${workspace.dataFolder}:${workspace.preferences?.nonconformancePrefix || ""}:${workspace.preferences?.startingNonconformanceNumber ?? ""}`,
     enabled: true,
-    isReady: (current) => Boolean(current),
+    isReady: (current) => Boolean(current) && /^\d+$/.test(String(current.startingNonconformanceNumber || "").trim()),
     save: async (current) => {
       await onSavePreferences({
         nonconformancePrefix: String(current.nonconformancePrefix || "").trim(),
@@ -11191,7 +11427,7 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
     value: kanbanNumberSettings,
     resetKey: `kanban-number-settings:${workspace.dataFolder}:${workspace.preferences?.kanbanInventoryPrefix || ""}:${workspace.preferences?.kanbanStartingInventoryNumber ?? ""}`,
     enabled: true,
-    isReady: (current) => Boolean(current),
+    isReady: (current) => Boolean(current) && /^\d+$/.test(String(current.kanbanStartingInventoryNumber || "").trim()),
     save: async (current) => {
       await onSavePreferences({
         kanbanInventoryPrefix: String(current.kanbanInventoryPrefix || "").trim(),
