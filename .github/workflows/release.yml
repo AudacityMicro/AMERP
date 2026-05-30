@@ -172,9 +172,9 @@ jobs:
 
       - name: Smoke test macOS packaged app
         run: |
-          artifact="$(find release -maxdepth 1 -name '*-mac-${{ matrix.arch }}.dmg' -print -quit)"
+          artifact="$(find release -maxdepth 1 -name '*-mac-${{ matrix.arch }}.zip' -print -quit)"
           if [ -z "$artifact" ]; then
-            artifact="$(find release -maxdepth 1 -name '*-mac-${{ matrix.arch }}.zip' -print -quit)"
+            artifact="$(find release -maxdepth 1 -name '*-mac-${{ matrix.arch }}.dmg' -print -quit)"
           fi
           if [ -z "$artifact" ]; then
             echo "No macOS ${{ matrix.arch }} DMG or ZIP artifact was produced under release/." >&2

@@ -46,10 +46,21 @@ mounted_dmg=""
 cleanup() {
   set +e
   if [[ -n "$mounted_dmg" ]]; then
-    hdiutil detach "$mounted_dmg" -quiet || hdiutil detach "$mounted_dmg" -force -quiet || true
+    for _ in 1 2 3; do
+      hdiutil detach "$mounted_dmg" -quiet && break
+      sleep 1
+    done
+    if mount | grep -F " on $mounted_dmg " >/dev/null 2>&1; then
+      hdiutil detach "$mounted_dmg" -force -quiet || true
+    fi
     mounted_dmg=""
   fi
-  rm -rf "$temp_root" || true
+  if mount | grep -F " on $mount_dir " >/dev/null 2>&1; then
+    rm -rf "$extract_dir" "$data_dir" "$user_data_dir" || true
+    rmdir "$temp_root" 2>/dev/null || true
+  else
+    rm -rf "$temp_root" || true
+  fi
 }
 trap cleanup EXIT
 

@@ -55,7 +55,7 @@ mac:
   category: public.app-category.business
   hardenedRuntime: false
   gatekeeperAssess: false
-  identity: null
+  identity: "-"
 
 dmg:
   sign: false

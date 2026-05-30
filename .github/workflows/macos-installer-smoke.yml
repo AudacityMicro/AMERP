@@ -77,21 +77,21 @@ jobs:
       - name: Run macOS packaged app smoke test
         run: |
           if [ "$(uname -m)" = "arm64" ]; then
-            artifact="$(find release -maxdepth 1 -name '*-mac-arm64.dmg' -print -quit)"
+            artifact="$(find release -maxdepth 1 -name '*-mac-arm64.zip' -print -quit)"
             if [ -z "$artifact" ]; then
-              artifact="$(find release -maxdepth 1 -name '*-mac-arm64.zip' -print -quit)"
+              artifact="$(find release -maxdepth 1 -name '*-mac-arm64.dmg' -print -quit)"
             fi
           else
-            artifact="$(find release -maxdepth 1 -name '*-mac-x64.dmg' -print -quit)"
+            artifact="$(find release -maxdepth 1 -name '*-mac-x64.zip' -print -quit)"
             if [ -z "$artifact" ]; then
-              artifact="$(find release -maxdepth 1 -name '*-mac-x64.zip' -print -quit)"
+              artifact="$(find release -maxdepth 1 -name '*-mac-x64.dmg' -print -quit)"
             fi
-          fi
-          if [ -z "$artifact" ]; then
-            artifact="$(find release -maxdepth 1 -name '*.dmg' -print -quit)"
           fi
           if [ -z "$artifact" ]; then
             artifact="$(find release -maxdepth 1 -name '*.zip' -print -quit)"
+          fi
+          if [ -z "$artifact" ]; then
+            artifact="$(find release -maxdepth 1 -name '*.dmg' -print -quit)"
           fi
           if [ -z "$artifact" ]; then
             echo "No macOS DMG or ZIP artifact was produced under release/." >&2
