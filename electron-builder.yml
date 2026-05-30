@@ -49,12 +49,8 @@ nsis:
 
 mac:
   target:
-    - target: dmg
-      arch:
-        - universal
-    - target: zip
-      arch:
-        - universal
+    - dmg
+    - zip
   artifactName: AMERP-${version}-${os}-${arch}.${ext}
   category: public.app-category.business
   hardenedRuntime: false

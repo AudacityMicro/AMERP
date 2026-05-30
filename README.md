@@ -33,7 +33,7 @@ Packaged beta builds parse Xometry/Subtract PDF imports in JavaScript. The sourc
 Packaged installers are produced by GitHub Actions from `.github/workflows/release.yml`.
 
 - Windows builds an unsigned NSIS one-click installer.
-- macOS builds unsigned DMG and ZIP artifacts.
+- macOS builds separate unsigned x64 and arm64 DMG and ZIP artifacts.
 - Linux builds unsigned AppImage, DEB, and tar.gz artifacts.
 - Release jobs attach artifacts and update metadata to a draft GitHub Release.
 - Draft releases must be reviewed and manually published.
@@ -216,7 +216,7 @@ npm run smoke:install:packaged:win -- -InstallerPath .\release\AMERP-...-Setup.e
 On macOS, after building macOS artifacts:
 
 ```bash
-npm run smoke:install:packaged:mac -- --artifact ./release/AMERP-...-mac-universal.dmg
+npm run smoke:install:packaged:mac -- --artifact ./release/AMERP-...-mac-arm64.dmg
 ```
 
 On Linux, after building Linux artifacts:

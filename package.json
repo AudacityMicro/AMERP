@@ -1,6 +1,6 @@
 {
   "name": "amerp",
-  "version": "0.0.2-beta",
+  "version": "0.0.3-beta",
   "description": "Local-first Electron ERP for ISO9001-oriented jobshops.",
   "private": true,
   "author": "Audacity Micro",
@@ -27,7 +27,9 @@
     "pack": "npm run build && node scripts/run-electron-builder.cjs --dir --publish never",
     "dist": "npm run build && node scripts/run-electron-builder.cjs --publish never",
     "dist:win": "npm run build && node scripts/run-electron-builder.cjs --win nsis --x64 --publish never",
-    "dist:mac": "npm run build && node scripts/run-electron-builder.cjs --mac dmg zip --universal --publish never",
+    "dist:mac": "npm run build && node scripts/run-electron-builder.cjs --mac dmg zip --publish never",
+    "dist:mac:x64": "npm run build && node scripts/run-electron-builder.cjs --mac dmg zip --x64 --publish never",
+    "dist:mac:arm64": "npm run build && node scripts/run-electron-builder.cjs --mac dmg zip --arm64 --publish never",
     "dist:linux": "npm run build && node scripts/run-electron-builder.cjs --linux AppImage deb tar.gz --x64 --publish never",
     "release:artifacts": "npm run build && node scripts/run-electron-builder.cjs --publish never"
   },

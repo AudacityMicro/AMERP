@@ -93,8 +93,16 @@ jobs:
             release/latest.yml
 
   build-macos:
-    name: macOS DMG and ZIP
-    runs-on: macos-latest
+    name: macOS DMG and ZIP (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: macos-15-intel
+          - arch: arm64
+            runner: macos-latest
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -160,16 +168,16 @@ jobs:
       - name: Build macOS artifacts
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: npm run dist:mac
+        run: npm run dist:mac:${{ matrix.arch }}
 
       - name: Smoke test macOS packaged app
         run: |
-          artifact="$(find release -maxdepth 1 -name '*.dmg' -print -quit)"
+          artifact="$(find release -maxdepth 1 -name '*-mac-${{ matrix.arch }}.dmg' -print -quit)"
           if [ -z "$artifact" ]; then
-            artifact="$(find release -maxdepth 1 -name '*.zip' -print -quit)"
+            artifact="$(find release -maxdepth 1 -name '*-mac-${{ matrix.arch }}.zip' -print -quit)"
           fi
           if [ -z "$artifact" ]; then
-            echo "No macOS DMG or ZIP artifact was produced under release/." >&2
+            echo "No macOS ${{ matrix.arch }} DMG or ZIP artifact was produced under release/." >&2
             exit 1
           fi
           npm run smoke:install:packaged:mac -- --artifact "$artifact"
@@ -177,12 +185,11 @@ jobs:
       - name: Upload macOS artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: macos-release
+          name: macos-release-${{ matrix.arch }}
           path: |
             release/*.dmg
             release/*.zip
             release/*.blockmap
-            release/latest-mac.yml
 
   build-linux:
     name: Linux AppImage, DEB, and tarball
@@ -308,7 +315,7 @@ jobs:
 
       - name: Generate release notes
         run: |
-          previous_tag="$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)"
+          previous_tag="$(git tag --sort=-version:refname --merged HEAD --list 'v*' | grep -v "^${RELEASE_TAG}$" | head -n 1 || true)"
           {
             echo "## AMERP ${RELEASE_TAG}"
             echo

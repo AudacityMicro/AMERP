@@ -67,11 +67,29 @@ jobs:
       - name: Build macOS artifacts
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: npm run dist:mac
+        run: |
+          if [ "$(uname -m)" = "arm64" ]; then
+            npm run dist:mac:arm64
+          else
+            npm run dist:mac:x64
+          fi
 
       - name: Run macOS packaged app smoke test
         run: |
-          artifact="$(find release -maxdepth 1 -name '*.dmg' -print -quit)"
+          if [ "$(uname -m)" = "arm64" ]; then
+            artifact="$(find release -maxdepth 1 -name '*-mac-arm64.dmg' -print -quit)"
+            if [ -z "$artifact" ]; then
+              artifact="$(find release -maxdepth 1 -name '*-mac-arm64.zip' -print -quit)"
+            fi
+          else
+            artifact="$(find release -maxdepth 1 -name '*-mac-x64.dmg' -print -quit)"
+            if [ -z "$artifact" ]; then
+              artifact="$(find release -maxdepth 1 -name '*-mac-x64.zip' -print -quit)"
+            fi
+          fi
+          if [ -z "$artifact" ]; then
+            artifact="$(find release -maxdepth 1 -name '*.dmg' -print -quit)"
+          fi
           if [ -z "$artifact" ]; then
             artifact="$(find release -maxdepth 1 -name '*.zip' -print -quit)"
           fi
