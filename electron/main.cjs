@@ -33,11 +33,6 @@ if (process.platform === "win32") {
   app.setAppUserModelId("com.audacitymicro.amerp");
 }
 
-if (process.platform === "linux") {
-  // Generic Linux tar/AppImage launches cannot rely on chrome-sandbox being root-owned 4755.
-  app.commandLine.appendSwitch("disable-setuid-sandbox");
-}
-
 function parseDeepLink(value) {
   if (!value || typeof value !== "string" || !value.toLowerCase().startsWith("amerp://")) {
     return null;

@@ -1,6 +1,6 @@
 {
   "name": "amerp",
-  "version": "0.0.8-beta",
+  "version": "0.0.9-beta",
   "description": "Local-first Electron ERP for ISO9001-oriented jobshops.",
   "private": true,
   "author": "Audacity Micro",

@@ -132,7 +132,7 @@ launch_app() {
     "APPIMAGE_EXTRACT_AND_RUN=1"
     "NO_AT_BRIDGE=1"
     "$executable"
-    "--disable-setuid-sandbox")
+    "--no-sandbox")
 
   if [[ -z "${DISPLAY:-}" ]] && command -v xvfb-run >/dev/null 2>&1; then
     run_with_timeout xvfb-run "$launch_timeout_sec" -a "${command[@]}"

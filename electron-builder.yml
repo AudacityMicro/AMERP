@@ -73,4 +73,4 @@ linux:
   maintainer: Audacity Micro
   synopsis: Local-first ERP for jobshops
   executableArgs:
-    - --disable-setuid-sandbox
+    - --no-sandbox
