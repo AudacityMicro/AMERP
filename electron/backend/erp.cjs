@@ -60,6 +60,10 @@ const {
 
 const CONFIG_FILE = "amerp-config.json";
 const AI_SETTINGS_FILE = "ai-settings.json";
+const BACKUP_FOLDER_NAME = "backups";
+const BACKUP_MANIFEST_FILE = "manifest.json";
+const BACKUP_DATA_FOLDER_NAME = "data";
+const BACKUP_EXCLUDED_ROOTS = new Set(["cache", "locks", BACKUP_FOLDER_NAME]);
 const LOCK_TTL_MS = 15 * 60 * 1000;
 const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"]);
 const KANBAN_DEEP_LINK_PREFIX = "amerp://open/kanban/";
@@ -145,6 +149,11 @@ const NONCONFORMANCE_EFFECTIVENESS_METHOD_OPTIONS = [
   "Supplier performance review",
   "Other"
 ];
+
+function isSameOrInsidePath(parentPath, targetPath) {
+  const relative = path.relative(path.resolve(parentPath), path.resolve(targetPath));
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
 const NONCONFORMANCE_EFFECTIVENESS_RESULT_OPTIONS = ["Effective", "Not Effective", "Pending", "Not Required"];
 const NONCONFORMANCE_ATTACHMENT_TYPE_OPTIONS = [
   "Photo",
@@ -503,6 +512,12 @@ class ERPBackend {
     const payPeriodLengthDays = Number.isInteger(Number(preferences?.payPeriodLengthDays)) && Number(preferences.payPeriodLengthDays) > 0 && Number(preferences.payPeriodLengthDays) <= 31
       ? Number(preferences.payPeriodLengthDays)
       : 7;
+    const backupIntervalHours = Number.isFinite(Number(preferences?.backupIntervalHours)) && Number(preferences.backupIntervalHours) > 0
+      ? Math.min(24 * 30, Math.max(1, Number(preferences.backupIntervalHours)))
+      : 24;
+    const backupRetentionCount = Number.isInteger(Number(preferences?.backupRetentionCount)) && Number(preferences.backupRetentionCount) > 0
+      ? Math.min(200, Math.max(1, Number(preferences.backupRetentionCount)))
+      : 10;
     return {
       appTitle: String(preferences?.appTitle || "AMERP").trim() || "AMERP",
       appTagline: String(preferences?.appTagline || "Operator ERP").trim() || "Operator ERP",
@@ -510,6 +525,11 @@ class ERPBackend {
       appIconPath: String(preferences?.appIconPath || "").trim(),
       iso9001ComplianceEnabled: preferences?.iso9001ComplianceEnabled === false ? false : true,
       enabledModules,
+      backupEnabled: preferences?.backupEnabled === true,
+      backupFolder: String(preferences?.backupFolder || "").trim(),
+      backupIntervalHours,
+      backupRetentionCount,
+      lastAutomaticBackupAt: String(preferences?.lastAutomaticBackupAt || "").trim(),
       dueSoonDays: Number.isFinite(Number(preferences?.dueSoonDays)) ? Number(preferences.dueSoonDays) : 14,
       jobPrefix: String(preferences?.jobPrefix || "J03C").trim(),
       startingJobNumber: Number.isFinite(Number(preferences?.startingJobNumber)) ? Number(preferences.startingJobNumber) : 600,
@@ -591,6 +611,249 @@ class ERPBackend {
       return null;
     }
     return path.resolve(result.filePaths[0]);
+  }
+
+  getDefaultBackupRoot(dataRoot) {
+    return path.join(dataRoot, BACKUP_FOLDER_NAME);
+  }
+
+  resolveBackupRoot(preferences, dataRoot, options = {}) {
+    const explicitFolder = String(options?.backupFolder || preferences?.backupFolder || "").trim();
+    return explicitFolder ? path.resolve(explicitFolder) : this.getDefaultBackupRoot(dataRoot);
+  }
+
+  buildBackupName(createdAt, kind) {
+    const stamp = String(createdAt || nowIso()).replace(/[.:]/g, "-");
+    const safeKind = safeFileName(kind || "manual").toLowerCase();
+    return `AMERP-backup-${stamp}-${safeKind}`;
+  }
+
+  async chooseBackupFolder(mainWindow = null) {
+    const result = await dialog.showOpenDialog(mainWindow || null, {
+      title: "Choose AMERP Backup Folder",
+      properties: ["openDirectory", "createDirectory"]
+    });
+    if (result.canceled || !result.filePaths?.[0]) {
+      return null;
+    }
+    return path.resolve(result.filePaths[0]);
+  }
+
+  async readBackupsInFolder(backupRoot) {
+    if (!(await pathExists(backupRoot))) {
+      return [];
+    }
+    const entries = await fs.readdir(backupRoot, { withFileTypes: true });
+    const backups = [];
+    for (const entry of entries) {
+      if (!entry.isDirectory()) {
+        continue;
+      }
+      const backupPath = path.join(backupRoot, entry.name);
+      const manifest = await readJson(path.join(backupPath, BACKUP_MANIFEST_FILE), null);
+      if (!manifest || manifest.app !== "AMERP" || manifest.format !== "folder-snapshot-v1") {
+        continue;
+      }
+      const dataPath = path.join(backupPath, BACKUP_DATA_FOLDER_NAME);
+      if (!(await pathExists(dataPath))) {
+        continue;
+      }
+      backups.push({
+        ...manifest,
+        id: entry.name,
+        name: manifest.name || entry.name,
+        path: backupPath
+      });
+    }
+    return backups.sort((a, b) => {
+      const right = Date.parse(b.createdAt || "") || 0;
+      const left = Date.parse(a.createdAt || "") || 0;
+      return right - left || String(b.name || "").localeCompare(String(a.name || ""));
+    });
+  }
+
+  async listBackups(options = {}) {
+    const dataRoot = await this.requireDataFolder();
+    const preferences = await this.loadPreferences(dataRoot);
+    const backupRoot = this.resolveBackupRoot(preferences, dataRoot, options);
+    await ensureDir(backupRoot);
+    const backups = await this.readBackupsInFolder(backupRoot);
+    return {
+      backupRoot,
+      defaultBackupRoot: this.getDefaultBackupRoot(dataRoot),
+      backups
+    };
+  }
+
+  async copyDataFolderForBackup(dataRoot, destinationDataRoot, backupRoot) {
+    const sourceRoot = path.resolve(dataRoot);
+    const resolvedBackupRoot = path.resolve(backupRoot);
+    const backupRootInsideDataRoot = isSameOrInsidePath(sourceRoot, resolvedBackupRoot);
+    await fs.cp(sourceRoot, destinationDataRoot, {
+      recursive: true,
+      filter: (sourcePath) => {
+        const resolvedSource = path.resolve(sourcePath);
+        const relative = path.relative(sourceRoot, resolvedSource);
+        if (!relative) {
+          return true;
+        }
+        const [rootName] = relative.split(/[\\/]+/);
+        if (BACKUP_EXCLUDED_ROOTS.has(String(rootName || "").toLowerCase())) {
+          return false;
+        }
+        if (backupRootInsideDataRoot && isSameOrInsidePath(resolvedBackupRoot, resolvedSource)) {
+          return false;
+        }
+        return true;
+      }
+    });
+  }
+
+  async createBackup(options = {}) {
+    const dataRoot = await this.requireDataFolder();
+    const preferences = await this.loadPreferences(dataRoot);
+    const kind = ["automatic", "manual", "pre-restore"].includes(String(options?.kind || "").trim())
+      ? String(options.kind).trim()
+      : "manual";
+    const backupRoot = this.resolveBackupRoot(preferences, dataRoot, options);
+    if (path.resolve(backupRoot) === path.resolve(dataRoot)) {
+      throw new Error("Backup folder cannot be the data folder itself. Choose a subfolder or an external folder.");
+    }
+    await ensureDir(backupRoot);
+
+    const createdAt = nowIso();
+    const baseName = this.buildBackupName(createdAt, kind);
+    let name = baseName;
+    let backupPath = path.join(backupRoot, name);
+    let suffix = 2;
+    while (await pathExists(backupPath)) {
+      name = `${baseName}-${suffix}`;
+      backupPath = path.join(backupRoot, name);
+      suffix += 1;
+    }
+
+    const tempPath = path.join(backupRoot, `.${name}.tmp-${randomId("backup")}`);
+    try {
+      await fs.rm(tempPath, { recursive: true, force: true });
+      await ensureDir(tempPath);
+      await this.copyDataFolderForBackup(dataRoot, path.join(tempPath, BACKUP_DATA_FOLDER_NAME), backupRoot);
+      const manifest = {
+        app: "AMERP",
+        manifestVersion: 1,
+        format: "folder-snapshot-v1",
+        name,
+        kind,
+        createdAt,
+        sourceDataFolder: dataRoot,
+        dataFolderName: path.basename(dataRoot),
+        excludedRoots: Array.from(BACKUP_EXCLUDED_ROOTS)
+      };
+      await writeJson(path.join(tempPath, BACKUP_MANIFEST_FILE), manifest);
+      await fs.rename(tempPath, backupPath);
+      const backup = { ...manifest, id: name, path: backupPath };
+      await this.appendAudit(
+        kind === "automatic" ? "backup_automatic_created" : kind === "pre-restore" ? "backup_safety_created" : "backup_manual_created",
+        "backup",
+        `Created ${kind} backup ${name}.`,
+        { backupPath }
+      );
+      await this.applyBackupRetention(backupRoot, preferences.backupRetentionCount);
+      return backup;
+    } catch (error) {
+      await fs.rm(tempPath, { recursive: true, force: true }).catch(() => {});
+      throw error;
+    }
+  }
+
+  async applyBackupRetention(backupRoot, retentionCount) {
+    const limit = Number.isInteger(Number(retentionCount)) && Number(retentionCount) > 0 ? Number(retentionCount) : 10;
+    const automaticBackups = (await this.readBackupsInFolder(backupRoot)).filter((backup) => backup.kind === "automatic");
+    for (const backup of automaticBackups.slice(limit)) {
+      await fs.rm(backup.path, { recursive: true, force: true });
+    }
+  }
+
+  async validateBackupPath(backupPath) {
+    const rawPath = String(backupPath || "").trim();
+    if (!rawPath) {
+      throw new Error("Choose a backup to restore.");
+    }
+    const root = path.resolve(rawPath);
+    const manifest = await readJson(path.join(root, BACKUP_MANIFEST_FILE), null);
+    if (!manifest || manifest.app !== "AMERP" || manifest.format !== "folder-snapshot-v1") {
+      throw new Error("The selected folder is not an AMERP backup.");
+    }
+    const dataPath = path.join(root, BACKUP_DATA_FOLDER_NAME);
+    if (!(await pathExists(path.join(dataPath, "config", "preferences.json")))) {
+      throw new Error("The selected AMERP backup is missing its data snapshot.");
+    }
+    return {
+      manifest: {
+        ...manifest,
+        id: manifest.name || path.basename(root),
+        name: manifest.name || path.basename(root),
+        path: root
+      },
+      dataPath
+    };
+  }
+
+  async restoreBackup(backupPath) {
+    const dataRoot = await this.requireDataFolder();
+    const { manifest, dataPath } = await this.validateBackupPath(backupPath);
+    const currentPreferences = await this.loadPreferences(dataRoot);
+    const currentBackupRoot = this.resolveBackupRoot(currentPreferences, dataRoot);
+    const selectedBackupRoot = path.resolve(manifest.path);
+    const safetyBackup = await this.createBackup({ kind: "pre-restore" });
+
+    await this.releaseAllLocksForCurrentOwner();
+    const entries = await fs.readdir(dataRoot, { withFileTypes: true });
+    for (const entry of entries) {
+      const targetPath = path.join(dataRoot, entry.name);
+      if (isSameOrInsidePath(targetPath, currentBackupRoot) || isSameOrInsidePath(targetPath, selectedBackupRoot)) {
+        continue;
+      }
+      await fs.rm(targetPath, { recursive: true, force: true });
+    }
+
+    await fs.cp(dataPath, dataRoot, { recursive: true });
+    await this.initializeDataFolder(dataRoot);
+    await this.appendAudit(
+      "backup_restored",
+      "backup",
+      `Restored AMERP data from backup ${manifest.name}.`,
+      { backupPath: manifest.path, safetyBackupPath: safetyBackup.path }
+    );
+    return {
+      restoredFrom: manifest,
+      safetyBackup,
+      dataFolder: dataRoot
+    };
+  }
+
+  async runAutomaticBackupIfDue(options = {}) {
+    const dataRoot = await this.requireDataFolder();
+    const preferences = await this.loadPreferences(dataRoot);
+    if (!preferences.backupEnabled) {
+      return { skipped: true, reason: "disabled", preferences };
+    }
+    const intervalMs = Math.max(1, Number(preferences.backupIntervalHours || 24)) * 60 * 60 * 1000;
+    const lastBackupTime = Date.parse(preferences.lastAutomaticBackupAt || "");
+    if (Number.isFinite(lastBackupTime) && Date.now() - lastBackupTime < intervalMs) {
+      return {
+        skipped: true,
+        reason: "not_due",
+        nextBackupAt: new Date(lastBackupTime + intervalMs).toISOString(),
+        preferences
+      };
+    }
+    const backup = await this.createBackup({ ...options, kind: "automatic" });
+    const savedPreferences = await this.savePreferences({ lastAutomaticBackupAt: backup.createdAt });
+    return {
+      skipped: false,
+      backup,
+      preferences: savedPreferences
+    };
   }
 
   async syncDesktopShortcut(preferences = {}) {
@@ -2453,6 +2716,8 @@ class ERPBackend {
       payPeriodStartDate: String(session.payPeriodStartDate || existing?.payPeriodStartDate || "").trim(),
       corrected: Boolean(session.corrected ?? existing?.corrected),
       corrections: Array.isArray(session.corrections) ? session.corrections : (Array.isArray(existing?.corrections) ? existing.corrections : []),
+      deletedAt: String(session.deletedAt || existing?.deletedAt || "").trim(),
+      deleteReason: String(session.deleteReason || existing?.deleteReason || "").trim(),
       createdAt,
       updatedAt: String(session.updatedAt || existing?.updatedAt || nowIso()).trim() || nowIso()
     };
@@ -2508,6 +2773,9 @@ class ERPBackend {
       }
       try {
         const normalized = this.normalizeTimeClockSession(record, record);
+        if (normalized.deletedAt && !filters.includeDeleted) {
+          continue;
+        }
         const employee = employeeMap.get(normalized.employeeId);
         sessions.push({
           ...normalized,
@@ -2615,6 +2883,9 @@ class ERPBackend {
     if (!existing) {
       throw new Error("Time clock session not found.");
     }
+    if (existing.deletedAt) {
+      throw new Error("Deleted time clock sessions cannot be corrected.");
+    }
     const correctionReason = String(reason || "").trim();
     if (!correctionReason) {
       throw new Error("A correction reason is required.");
@@ -2664,6 +2935,9 @@ class ERPBackend {
       if (!existing) {
         continue;
       }
+      if (existing.deletedAt) {
+        continue;
+      }
       const updated = this.normalizeTimeClockSession({
         ...existing,
         paid: Boolean(paid),
@@ -2675,6 +2949,34 @@ class ERPBackend {
     }
     await this.appendAudit(paid ? "time_clock_sessions_paid" : "time_clock_sessions_unpaid", "time-clock", `${paid ? "Marked" : "Unmarked"} ${sessions.length} time clock session${sessions.length === 1 ? "" : "s"} as paid.`);
     return sessions;
+  }
+
+  async deleteTimeClockSession(sessionId, reason = "") {
+    const existing = await this.loadTimeClockSession(sessionId);
+    if (!existing) {
+      throw new Error("Time clock session not found.");
+    }
+    if (existing.deletedAt) {
+      return existing;
+    }
+    const deleteReason = String(reason || "").trim();
+    if (!deleteReason) {
+      throw new Error("A delete reason is required.");
+    }
+    const deletedAt = nowIso();
+    const before = this.sessionCorrectionSnapshot(existing);
+    const deleted = this.normalizeTimeClockSession({
+      ...existing,
+      deletedAt,
+      deleteReason
+    }, existing);
+    await this.writeTimeClockSession(deleted);
+    await this.appendTimeClockEvent("session_deleted", deleted, { reason: deleteReason, before, deletedAt });
+    await this.appendAudit("time_clock_session_deleted", deleted.id, `Deleted time clock session for ${deleted.employeeName || deleted.employeeId}.`, {
+      employeeId: deleted.employeeId,
+      reason: deleteReason
+    });
+    return deleted;
   }
 
   async getTimeClockDashboard(filters = {}) {

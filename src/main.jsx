@@ -18,6 +18,7 @@ import {
   Package,
   Plus,
   RotateCcw,
+  Save,
   Settings,
   ShieldAlert,
   SearchCheck,
@@ -843,6 +844,86 @@ function defaultKanbanPrintSizeId(preferences) {
     : (sizes[0]?.id || "");
 }
 
+function buildSettingsPreferenceSnapshot(preferences = {}) {
+  return {
+    materialFamilies: cloneSnapshot(Array.isArray(preferences?.materialFamilies) ? preferences.materialFamilies : []),
+    brandingSettings: {
+      appTitle: preferences?.appTitle || "AMERP",
+      appTagline: preferences?.appTagline || "Operator ERP",
+      windowTitle: preferences?.windowTitle || "AMERP",
+      appIconPath: preferences?.appIconPath || ""
+    },
+    complianceSettings: {
+      iso9001ComplianceEnabled: iso9001ComplianceEnabled(preferences)
+    },
+    moduleSettings: normalizeEnabledModules(preferences?.enabledModules),
+    backupSettings: {
+      backupEnabled: preferences?.backupEnabled === true,
+      backupFolder: preferences?.backupFolder || "",
+      backupIntervalHours: String(preferences?.backupIntervalHours ?? 24),
+      backupRetentionCount: String(preferences?.backupRetentionCount ?? 10)
+    },
+    jobSettings: {
+      jobPrefix: preferences?.jobPrefix || "J03C",
+      startingJobNumber: String(preferences?.startingJobNumber ?? 600)
+    },
+    inspectionReportNumberSettings: {
+      inspectionReportPrefix: preferences?.inspectionReportPrefix || "IR",
+      startingInspectionReportNumber: String(preferences?.startingInspectionReportNumber ?? 1)
+    },
+    inspectionReportExportSettings: defaultInspectionReportExportOptions(preferences?.inspectionReportExportOptions),
+    nonconformanceNumberSettings: {
+      nonconformancePrefix: preferences?.nonconformancePrefix || "NCR",
+      startingNonconformanceNumber: String(preferences?.startingNonconformanceNumber ?? 1)
+    },
+    kanbanNumberSettings: {
+      kanbanInventoryPrefix: preferences?.kanbanInventoryPrefix || "J03C",
+      kanbanStartingInventoryNumber: String(preferences?.kanbanStartingInventoryNumber ?? 600)
+    },
+    timeClockSettings: {
+      payPeriodStartDay: preferences?.payPeriodStartDay || "thursday",
+      payPeriodLengthDays: String(preferences?.payPeriodLengthDays ?? 7)
+    },
+    metrologyOptions: {
+      metrologyToolTypes: cloneSnapshot(preferences?.metrologyToolTypes || []),
+      metrologyManufacturers: cloneSnapshot(preferences?.metrologyManufacturers || []),
+      metrologyResolutions: cloneSnapshot(preferences?.metrologyResolutions || []),
+      metrologyLocations: cloneSnapshot(preferences?.metrologyLocations || []),
+      metrologyDepartments: cloneSnapshot(preferences?.metrologyDepartments || []),
+      metrologyStatuses: cloneSnapshot(preferences?.metrologyStatuses || [])
+    },
+    aiSettings: {
+      openaiApiKey: preferences?.openaiApiKey || ""
+    },
+    kanbanDepartments: cloneSnapshot(preferences?.kanbanDepartments || []),
+    kanbanOptions: {
+      kanbanVendors: cloneSnapshot(preferences?.kanbanVendors || []),
+      kanbanCategories: cloneSnapshot(preferences?.kanbanCategories || [])
+    },
+    nonconformanceOptions: {
+      nonconformanceDispositions: cloneSnapshot(preferences?.nonconformanceDispositions || [])
+    },
+    kanbanPrintSettings: {
+      defaultKanbanPrintSizeId: preferences?.defaultKanbanPrintSizeId || defaultKanbanPrintSizeId(preferences),
+      kanbanPrintSizes: (preferences?.kanbanPrintSizes || []).map((item) => ({
+        ...item,
+        widthIn: String(item.widthIn ?? ""),
+        heightIn: String(item.heightIn ?? "")
+      }))
+    }
+  };
+}
+
+function diffPreferencePatch(current, baseline) {
+  const patch = {};
+  for (const [key, value] of Object.entries(current || {})) {
+    if (snapshotValue(value) !== snapshotValue(baseline?.[key])) {
+      patch[key] = value;
+    }
+  }
+  return patch;
+}
+
 function inferMaterialClassification(materialType, preferences) {
   const normalized = String(materialType || "").trim().toLowerCase();
   if (!normalized) {
@@ -934,6 +1015,14 @@ function isMaterialReadyToSave(current) {
 
 function isInstrumentReadyToSave(current) {
   return Boolean(current?.instrument?.tool_name);
+}
+
+function snapshotValue(value) {
+  return JSON.stringify(value ?? null);
+}
+
+function cloneSnapshot(value) {
+  return value == null ? value : JSON.parse(JSON.stringify(value));
 }
 
 function materialLabelPhotoSrc(material) {
@@ -1707,130 +1796,6 @@ function dedupeImportedOperations(operations) {
   return deduped;
 }
 
-function useAutoSave({
-  value,
-  resetKey,
-  enabled = true,
-  delay = 1000,
-  isReady = () => true,
-  save,
-  onSaved,
-  onError,
-  onStateChange
-}) {
-  const timerRef = useRef(null);
-  const lastSavedRef = useRef(JSON.stringify(value ?? null));
-  const latestValueRef = useRef(value);
-  const inFlightRef = useRef(false);
-  const generationRef = useRef(0);
-  const saveRef = useRef(save);
-  const onSavedRef = useRef(onSaved);
-  const onErrorRef = useRef(onError);
-  const onStateChangeRef = useRef(onStateChange);
-  const isReadyRef = useRef(isReady);
-  const enabledRef = useRef(enabled);
-  const delayRef = useRef(delay);
-
-  latestValueRef.current = value;
-  saveRef.current = save;
-  onSavedRef.current = onSaved;
-  onErrorRef.current = onError;
-  onStateChangeRef.current = onStateChange;
-  isReadyRef.current = isReady;
-  enabledRef.current = enabled;
-  delayRef.current = delay;
-
-  const clearTimer = () => {
-    if (timerRef.current) {
-      window.clearTimeout(timerRef.current);
-      timerRef.current = null;
-    }
-  };
-
-  const serialize = (input) => JSON.stringify(input ?? null);
-
-  const runSave = async () => {
-    clearTimer();
-    const currentValue = latestValueRef.current;
-    if (!enabledRef.current || !currentValue || !isReadyRef.current(currentValue)) {
-      return;
-    }
-    const currentHash = serialize(currentValue);
-    if (currentHash === lastSavedRef.current || inFlightRef.current) {
-      return;
-    }
-    inFlightRef.current = true;
-    onStateChangeRef.current?.("saving");
-    const generation = generationRef.current;
-    try {
-      const savedValue = await saveRef.current(currentValue);
-      if (generation !== generationRef.current) {
-        return;
-      }
-      const savedPayload = savedValue ?? currentValue;
-      const savedHash = serialize(savedPayload);
-      lastSavedRef.current = savedHash;
-      // Do not let an older save response clobber newer local edits made while it was in flight.
-      if (serialize(latestValueRef.current) !== currentHash) {
-        onStateChangeRef.current?.("saving");
-        return;
-      }
-      latestValueRef.current = savedPayload;
-      await onSavedRef.current?.(savedPayload);
-      onStateChangeRef.current?.("saved");
-    } catch (error) {
-      if (generation === generationRef.current) {
-        onStateChangeRef.current?.("error");
-        onErrorRef.current?.(error);
-      }
-    } finally {
-      inFlightRef.current = false;
-      const latestValue = latestValueRef.current;
-      if (!enabledRef.current || generation !== generationRef.current || !latestValue || !isReadyRef.current(latestValue)) {
-        return;
-      }
-      if (serialize(latestValue) !== lastSavedRef.current) {
-        timerRef.current = window.setTimeout(() => {
-          void runSave();
-        }, delayRef.current);
-      }
-    }
-  };
-
-  useEffect(() => {
-    generationRef.current += 1;
-    clearTimer();
-    latestValueRef.current = value;
-    lastSavedRef.current = serialize(value ?? null);
-  }, [resetKey]);
-
-  useEffect(() => {
-    latestValueRef.current = value;
-    if (!enabled || !value || !isReady(value)) {
-      clearTimer();
-      return;
-    }
-    const currentHash = serialize(value);
-    if (currentHash === lastSavedRef.current) {
-      clearTimer();
-      return;
-    }
-    clearTimer();
-    onStateChangeRef.current?.("saving");
-    timerRef.current = window.setTimeout(() => {
-      void runSave();
-    }, delay);
-    return clearTimer;
-  }, [delay, enabled, resetKey, value]);
-
-  useEffect(() => () => {
-    if (timerRef.current && enabledRef.current && latestValueRef.current && isReadyRef.current(latestValueRef.current) && serialize(latestValueRef.current) !== lastSavedRef.current) {
-      void runSave();
-    }
-    clearTimer();
-  }, []);
-}
-
 function App() {
   const route = window.location.hash.replace(/^#/, "") || "/";
   if (!api) {
@@ -1925,11 +1890,21 @@ function Workspace() {
   const openKanbanCardRef = useRef(null);
   const jobRef = useRef(null);
   const nonconformanceRef = useRef(null);
+  const lastSavedJobRef = useRef(snapshotValue(null));
+  const lastSavedNonconformanceRef = useRef(snapshotValue(null));
+  const lastSavedKanbanRef = useRef(snapshotValue(null));
+  const lastSavedMaterialRef = useRef(snapshotValue(null));
+  const lastSavedInstrumentRef = useRef(snapshotValue(null));
   const kanbanCardIdRef = useRef(null);
   const kanbanCardRef = useRef(null);
   const openMaterialRef = useRef(null);
   const materialRef = useRef(null);
   const instrumentRef = useRef(null);
+  const pendingNavigationActionRef = useRef(null);
+  const settingsDirtyRef = useRef(false);
+  const settingsSaveActionRef = useRef(null);
+  const settingsDiscardActionRef = useRef(null);
+  const lastAutomaticBackupCheckRef = useRef("");
 
   const [selectedJobId, setSelectedJobId] = useState(null);
   const [job, setJob] = useState(null);
@@ -1962,6 +1937,7 @@ function Workspace() {
   const [metrologyScreen, setMetrologyScreen] = useState("list");
   const [inspectionExportDialogOpen, setInspectionExportDialogOpen] = useState(false);
   const [inspectionExportOptions, setInspectionExportOptions] = useState(defaultInspectionReportExportOptions());
+  const [unsavedChangesDialog, setUnsavedChangesDialog] = useState(null);
 
   const [selectedTemplateId, setSelectedTemplateId] = useState(null);
   const [lastIndexMaintenance, setLastIndexMaintenance] = useState(0);
@@ -1985,25 +1961,69 @@ function Workspace() {
     showStatus.timer = window.setTimeout(() => setStatus(""), 5000);
   };
 
+  const patchWorkspaceRecord = (collectionKey, saved, matcher = "id") => {
+    if (!saved) {
+      return;
+    }
+    setWorkspace((current) => {
+      if (!current) {
+        return current;
+      }
+      const list = Array.isArray(current[collectionKey]) ? current[collectionKey] : [];
+      const matchFn = typeof matcher === "function"
+        ? matcher
+        : (item) => String(item?.[matcher] || "") === String(saved?.[matcher] || "");
+      const index = list.findIndex((item) => matchFn(item, saved));
+      const nextList = index >= 0
+        ? list.map((item, itemIndex) => itemIndex === index ? { ...item, ...saved } : item)
+        : [saved, ...list];
+      return { ...current, [collectionKey]: nextList };
+    });
+  };
+
+  const setMainSaveError = () => setSaveState("error");
+  const setMainSaving = () => setSaveState("saving");
+  const clearMainSaveState = () => setSaveState("saved");
+
+  const currentMainEditorIsDirty = () => {
+    if (view === "jobs" && jobScreen !== "list" && jobScreen !== "nonconformance") {
+      return snapshotValue(jobRef.current) !== lastSavedJobRef.current;
+    }
+    if ((view === "nonconformance" && nonconformanceScreen === "detail") || (view === "jobs" && jobScreen === "nonconformance")) {
+      return snapshotValue(nonconformanceRef.current) !== lastSavedNonconformanceRef.current;
+    }
+    if (view === "kanban" && kanbanScreen === "detail") {
+      return snapshotValue(kanbanCardRef.current) !== lastSavedKanbanRef.current;
+    }
+    if (view === "materials" && materialScreen === "detail") {
+      return snapshotValue(materialRef.current) !== lastSavedMaterialRef.current;
+    }
+    if (view === "metrology" && metrologyScreen === "detail") {
+      return snapshotValue(instrumentRef.current) !== lastSavedInstrumentRef.current;
+    }
+    if (view === "settings") {
+      return settingsDirtyRef.current;
+    }
+    return false;
+  };
+
   const persistCurrentKanbanCard = async () => {
     const current = kanbanCardRef.current;
     if (!current || !isKanbanCardReadyToSave(current)) {
       return true;
     }
-    setBusy(true);
+    setMainSaving();
     try {
       const saved = await api.saveKanbanCard(current);
       if (kanbanCardIdRef.current === saved?.id) {
         await applySavedKanbanCard(saved);
-      } else {
-        await refreshWorkspace();
       }
+      clearMainSaveState();
       return true;
     } catch (error) {
       showStatus(error.message || String(error));
+      setMainSaveError();
       return false;
-    } finally {
-      setBusy(false);
     }
   };
 
@@ -2012,16 +2032,16 @@ function Workspace() {
     if (!current || !isJobReadyToSave(current)) {
       return true;
     }
-    setBusy(true);
+    setMainSaving();
     try {
       const saved = await api.saveJob(current);
       await applySavedJob(saved);
+      clearMainSaveState();
       return true;
     } catch (error) {
       showStatus(error.message || String(error));
+      setMainSaveError();
       return false;
-    } finally {
-      setBusy(false);
     }
   };
 
@@ -2030,16 +2050,16 @@ function Workspace() {
     if (!current || !isNonconformanceReadyToSave(current)) {
       return true;
     }
-    setBusy(true);
+    setMainSaving();
     try {
       const saved = await api.saveNonconformance(current);
       await applySavedNonconformance(saved);
+      clearMainSaveState();
       return true;
     } catch (error) {
       showStatus(error.message || String(error));
+      setMainSaveError();
       return false;
-    } finally {
-      setBusy(false);
     }
   };
 
@@ -2048,16 +2068,16 @@ function Workspace() {
     if (!current || !isMaterialReadyToSave(current)) {
       return true;
     }
-    setBusy(true);
+    setMainSaving();
     try {
       const saved = await api.saveMaterial(current);
       await applySavedMaterial(saved);
+      clearMainSaveState();
       return true;
     } catch (error) {
       showStatus(error.message || String(error));
+      setMainSaveError();
       return false;
-    } finally {
-      setBusy(false);
     }
   };
 
@@ -2066,51 +2086,111 @@ function Workspace() {
     if (!current || !isInstrumentReadyToSave(current)) {
       return true;
     }
-    setBusy(true);
+    setMainSaving();
     try {
       const saved = await api.saveInstrument(current);
       await applySavedInstrument(saved);
+      clearMainSaveState();
       return true;
     } catch (error) {
       showStatus(error.message || String(error));
+      setMainSaveError();
       return false;
-    } finally {
-      setBusy(false);
     }
   };
 
-  const persistPendingEditorsBeforeNavigation = async () => {
+  const revertCurrentMainEditor = () => {
     if (view === "jobs" && jobScreen !== "list" && jobScreen !== "nonconformance") {
-      const didSave = await persistCurrentJob();
-      if (!didSave) {
-        return false;
-      }
+      setJob(cloneSnapshot(JSON.parse(lastSavedJobRef.current)));
+      clearMainSaveState();
+      return;
     }
     if ((view === "nonconformance" && nonconformanceScreen === "detail") || (view === "jobs" && jobScreen === "nonconformance")) {
-      const didSave = await persistCurrentNonconformance();
-      if (!didSave) {
-        return false;
-      }
+      setNonconformanceRecord(cloneSnapshot(JSON.parse(lastSavedNonconformanceRef.current)));
+      clearMainSaveState();
+      return;
     }
     if (view === "kanban" && kanbanScreen === "detail") {
-      const didSave = await persistCurrentKanbanCard();
-      if (!didSave) {
-        return false;
-      }
+      setKanbanCard(cloneSnapshot(JSON.parse(lastSavedKanbanRef.current)));
+      clearMainSaveState();
+      return;
     }
     if (view === "materials" && materialScreen === "detail") {
-      const didSave = await persistCurrentMaterial();
-      if (!didSave) {
-        return false;
-      }
+      setMaterial(cloneSnapshot(JSON.parse(lastSavedMaterialRef.current)));
+      clearMainSaveState();
+      return;
     }
     if (view === "metrology" && metrologyScreen === "detail") {
-      const didSave = await persistCurrentInstrument();
-      if (!didSave) {
-        return false;
-      }
+      setInstrumentPayload(cloneSnapshot(JSON.parse(lastSavedInstrumentRef.current)));
+      clearMainSaveState();
+      return;
+    }
+    if (view === "settings" && settingsDiscardActionRef.current) {
+      settingsDiscardActionRef.current();
+      clearMainSaveState();
+    }
+  };
+
+  const saveCurrentMainEditor = async () => {
+    if (view === "jobs" && jobScreen !== "list" && jobScreen !== "nonconformance") {
+      return persistCurrentJob();
+    }
+    if ((view === "nonconformance" && nonconformanceScreen === "detail") || (view === "jobs" && jobScreen === "nonconformance")) {
+      return persistCurrentNonconformance();
+    }
+    if (view === "kanban" && kanbanScreen === "detail") {
+      return persistCurrentKanbanCard();
+    }
+    if (view === "materials" && materialScreen === "detail") {
+      return persistCurrentMaterial();
+    }
+    if (view === "metrology" && metrologyScreen === "detail") {
+      return persistCurrentInstrument();
+    }
+    if (view === "settings" && settingsSaveActionRef.current) {
+      return settingsSaveActionRef.current();
     }
     return true;
+  };
+
+  const confirmLeaveIfDirty = async (action) => {
+    if (!currentMainEditorIsDirty()) {
+      return action();
+    }
+    return new Promise((resolve) => {
+      pendingNavigationActionRef.current = async (choice) => {
+        if (choice === "save") {
+          const didSave = await saveCurrentMainEditor();
+          if (!didSave) {
+            resolve(false);
+            return;
+          }
+        }
+        if (choice === "discard") {
+          revertCurrentMainEditor();
+        }
+        if (choice !== "cancel") {
+          await action();
+          resolve(true);
+          return;
+        }
+        resolve(false);
+      };
+      setUnsavedChangesDialog({
+        title: "Unsaved Changes",
+        message: "You have unsaved changes. Save before leaving this screen?"
+      });
+    });
+  };
+
+  const mainEditorHasExplicitSave = () => {
+    if (view === "jobs" && jobScreen !== "list") return true;
+    if (view === "nonconformance" && nonconformanceScreen === "detail") return true;
+    if (view === "kanban" && kanbanScreen === "detail") return true;
+    if (view === "materials" && materialScreen === "detail") return true;
+    if (view === "metrology" && metrologyScreen === "detail") return true;
+    if (view === "settings") return true;
+    return false;
   };
 
   const refreshWorkspace = async (preserveSelection = true) => {
@@ -2143,7 +2223,15 @@ function Workspace() {
         setInstrumentPayload(null);
         setMetrologyScreen("list");
       }
-      setMaterial((current) => current ? syncMaterialClassification(current, next.preferences) : current);
+      setMaterial((current) => {
+        if (!current) {
+          return current;
+        }
+        if (view === "materials" && materialScreen === "detail" && snapshotValue(current) !== lastSavedMaterialRef.current) {
+          return current;
+        }
+        return syncMaterialClassification(current, next.preferences);
+      });
       if (!selectedTemplateId && next.templates?.[0]) {
         setSelectedTemplateId(next.templates[0].id);
       }
@@ -2162,14 +2250,23 @@ function Workspace() {
     const release = () => {
       api.releaseAllLocks().catch(() => {});
     };
+    const handleBeforeUnload = (event) => {
+      if (currentMainEditorIsDirty()) {
+        event.preventDefault();
+        event.returnValue = "";
+        return "";
+      }
+      release();
+      return undefined;
+    };
     const handleFocus = () => {
       refreshWorkspaceRef.current?.();
     };
-    window.addEventListener("beforeunload", release);
+    window.addEventListener("beforeunload", handleBeforeUnload);
     window.addEventListener("focus", handleFocus);
     return () => {
       release();
-      window.removeEventListener("beforeunload", release);
+      window.removeEventListener("beforeunload", handleBeforeUnload);
       window.removeEventListener("focus", handleFocus);
     };
   }, []);
@@ -2201,6 +2298,49 @@ useEffect(() => api.onDeepLink?.((payload) => {
   }, [workspace?.dataFolder]);
 
   useEffect(() => {
+    if (!workspace?.dataFolder || !workspace.preferences?.backupEnabled || !api.runAutomaticBackupIfDue) {
+      return;
+    }
+    const key = [
+      workspace.dataFolder,
+      workspace.preferences.backupFolder || "",
+      workspace.preferences.backupIntervalHours || "",
+      workspace.preferences.lastAutomaticBackupAt || ""
+    ].join("|");
+    if (lastAutomaticBackupCheckRef.current === key) {
+      return;
+    }
+    lastAutomaticBackupCheckRef.current = key;
+    let cancelled = false;
+    api.runAutomaticBackupIfDue()
+      .then((result) => {
+        if (cancelled || !result) {
+          return;
+        }
+        if (result.preferences) {
+          setWorkspace((current) => current ? { ...current, preferences: result.preferences } : current);
+        }
+        if (result.backup) {
+          showStatus(`Automatic backup created: ${result.backup.name}.`);
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          showStatus(`Automatic backup failed: ${error.message || String(error)}`);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    workspace?.dataFolder,
+    workspace?.preferences?.backupEnabled,
+    workspace?.preferences?.backupFolder,
+    workspace?.preferences?.backupIntervalHours,
+    workspace?.preferences?.lastAutomaticBackupAt
+  ]);
+
+  useEffect(() => {
     document.title = String(workspace?.preferences?.windowTitle || workspace?.preferences?.appTitle || "AMERP");
   }, [workspace?.preferences?.windowTitle, workspace?.preferences?.appTitle]);
 
@@ -2221,18 +2361,26 @@ useEffect(() => api.onDeepLink?.((payload) => {
   }, [complianceEnabled, view, jobScreen, selectedPartId, selectedJobId]);
 
   useEffect(() => {
-    if ((view === "jobs" && jobScreen === "list")
-      || view === "inspections"
-      || (view === "nonconformance" && nonconformanceScreen === "list")
-      || (view === "kanban" && kanbanScreen === "list")
-      || (view === "materials" && materialScreen === "list")
-      || (view === "metrology" && metrologyScreen === "list")
-      || view === "timeclock"
-      || view === "timeclockAdmin"
-      || view === "settings") {
-      setSaveState("saved");
+    if (saveState === "saving" || saveState === "error") {
+      return;
     }
-  }, [view, jobScreen, nonconformanceScreen, kanbanScreen, materialScreen, metrologyScreen]);
+    setSaveState(currentMainEditorIsDirty() ? "dirty" : "saved");
+  }, [view, jobScreen, nonconformanceScreen, kanbanScreen, materialScreen, metrologyScreen, job, nonconformanceRecord, kanbanCard, material, instrumentPayload]);
+
+  useEffect(() => {
+    const handleKeydown = (event) => {
+      if (!(event.ctrlKey || event.metaKey) || event.shiftKey || event.altKey || String(event.key || "").toLowerCase() !== "s") {
+        return;
+      }
+      if (!mainEditorHasExplicitSave()) {
+        return;
+      }
+      event.preventDefault();
+      void saveCurrentMainEditor();
+    };
+    window.addEventListener("keydown", handleKeydown);
+    return () => window.removeEventListener("keydown", handleKeydown);
+  }, [view, jobScreen, nonconformanceScreen, kanbanScreen, materialScreen, metrologyScreen, saveCurrentMainEditor]);
 
   useEffect(() => {
     const activeLocks = [];
@@ -2267,16 +2415,15 @@ useEffect(() => api.onDeepLink?.((payload) => {
   const openJob = async (jobId) => {
     setBusy(true);
     try {
-      const didSave = await persistPendingEditorsBeforeNavigation();
-      if (!didSave) {
-        return;
-      }
+      const confirmed = await confirmLeaveIfDirty(async () => {});
+      if (!confirmed) return;
       if (selectedJobId && selectedJobId !== jobId) {
         await api.releaseLock("job", selectedJobId);
       }
       const loaded = await api.loadJob(jobId, { acquireLock: true });
       setSelectedJobId(jobId);
       setJob(loaded);
+      lastSavedJobRef.current = snapshotValue(loaded);
       setSelectedPartId(null);
       setSelectedOperationId(null);
       setJobScreen("job");
@@ -2292,19 +2439,18 @@ useEffect(() => api.onDeepLink?.((payload) => {
   const openKanbanCard = async (cardId) => {
     setBusy(true);
     try {
-      const didSave = await persistPendingEditorsBeforeNavigation();
-      if (!didSave) {
-        return;
-      }
+      const confirmed = await confirmLeaveIfDirty(async () => {});
+      if (!confirmed) return;
       if (selectedKanbanId && selectedKanbanId !== cardId) {
         await api.releaseLock("kanban", selectedKanbanId);
       }
       const loaded = await api.loadKanbanCard(cardId, { acquireLock: true });
       setSelectedKanbanId(cardId);
-    setKanbanCard(loaded);
-    setKanbanScreen("detail");
-    setKanbanAiState("idle");
-    setView("kanban");
+      setKanbanCard(loaded);
+      lastSavedKanbanRef.current = snapshotValue(loaded);
+      setKanbanScreen("detail");
+      setKanbanAiState("idle");
+      setView("kanban");
       setSaveState("saved");
     } catch (error) {
       showStatus(error.message || String(error));
@@ -2317,16 +2463,15 @@ useEffect(() => api.onDeepLink?.((payload) => {
   const openNonconformance = async (ncrId, { sourceView = "nonconformance", partId = null } = {}) => {
     setBusy(true);
     try {
-      const didSave = await persistPendingEditorsBeforeNavigation();
-      if (!didSave) {
-        return;
-      }
+      const confirmed = await confirmLeaveIfDirty(async () => {});
+      if (!confirmed) return;
       if (selectedNonconformanceId && selectedNonconformanceId !== ncrId) {
         await api.releaseLock("nonconformance", selectedNonconformanceId);
       }
       const loaded = await api.loadNonconformance(ncrId, { acquireLock: true });
       setSelectedNonconformanceId(ncrId);
       setNonconformanceRecord(loaded);
+      lastSavedNonconformanceRef.current = snapshotValue(loaded);
       setNonconformanceScreen("detail");
       if (sourceView === "jobs") {
         if (partId) {
@@ -2348,16 +2493,16 @@ useEffect(() => api.onDeepLink?.((payload) => {
   const openMaterial = async (materialId) => {
     setBusy(true);
     try {
-      const didSave = await persistPendingEditorsBeforeNavigation();
-      if (!didSave) {
-        return;
-      }
+      const confirmed = await confirmLeaveIfDirty(async () => {});
+      if (!confirmed) return;
       if (selectedMaterialId && selectedMaterialId !== materialId) {
         await api.releaseLock("material", selectedMaterialId);
       }
       const loaded = await api.loadMaterial(materialId, { acquireLock: true });
       setSelectedMaterialId(materialId);
-      setMaterial(syncMaterialClassification(loaded, workspace?.preferences));
+      const synced = syncMaterialClassification(loaded, workspace?.preferences);
+      setMaterial(synced);
+      lastSavedMaterialRef.current = snapshotValue(synced);
       setMaterialScreen("detail");
       setView("materials");
       setSaveState("saved");
@@ -2372,16 +2517,15 @@ useEffect(() => api.onDeepLink?.((payload) => {
   const openInstrument = async (instrumentId) => {
     setBusy(true);
     try {
-      const didSave = await persistPendingEditorsBeforeNavigation();
-      if (!didSave) {
-        return;
-      }
+      const confirmed = await confirmLeaveIfDirty(async () => {});
+      if (!confirmed) return;
       if (selectedInstrumentId && selectedInstrumentId !== instrumentId) {
         await api.releaseLock("instrument", selectedInstrumentId);
       }
       const loaded = await api.loadInstrument(instrumentId, { acquireLock: true });
       setSelectedInstrumentId(instrumentId);
       setInstrumentPayload(loaded);
+      lastSavedInstrumentRef.current = snapshotValue(loaded);
       setMetrologyScreen("detail");
       setView("metrology");
       setSaveState("saved");
@@ -2393,14 +2537,14 @@ useEffect(() => api.onDeepLink?.((payload) => {
   };
 
   const createNewJob = async () => {
-    const didSave = await persistPendingEditorsBeforeNavigation();
-    if (!didSave) {
-      return;
-    }
+    const confirmed = await confirmLeaveIfDirty(async () => {});
+    if (!confirmed) return;
     if (selectedNonconformanceId) api.releaseLock("nonconformance", selectedNonconformanceId).catch(() => {});
     if (selectedJobId) api.releaseLock("job", selectedJobId).catch(() => {});
     setSelectedJobId(null);
-    setJob(blankJob());
+    const draft = blankJob();
+    setJob(draft);
+    lastSavedJobRef.current = snapshotValue(draft);
     setSelectedPartId(null);
     setSelectedOperationId(null);
     setSelectedNonconformanceId(null);
@@ -2411,14 +2555,14 @@ useEffect(() => api.onDeepLink?.((payload) => {
   };
 
   const createNewKanbanCard = async (draft = null) => {
-    const didSave = await persistPendingEditorsBeforeNavigation();
-    if (!didSave) {
-      return;
-    }
+    const confirmed = await confirmLeaveIfDirty(async () => {});
+    if (!confirmed) return;
     if (selectedNonconformanceId) api.releaseLock("nonconformance", selectedNonconformanceId).catch(() => {});
     if (selectedKanbanId) api.releaseLock("kanban", selectedKanbanId).catch(() => {});
     setSelectedKanbanId(null);
-    setKanbanCard(draft || blankKanbanCard());
+    const nextDraft = draft || blankKanbanCard();
+    setKanbanCard(nextDraft);
+    lastSavedKanbanRef.current = snapshotValue(nextDraft);
     setKanbanScreen("detail");
     setKanbanAiState("idle");
     setView("kanban");
@@ -2430,10 +2574,8 @@ useEffect(() => api.onDeepLink?.((payload) => {
       return;
     }
     try {
-      const didSave = await persistPendingEditorsBeforeNavigation();
-      if (!didSave) {
-        return;
-      }
+      const confirmed = await confirmLeaveIfDirty(async () => {});
+      if (!confirmed) return;
       const nextNumber = await api.generateNextNonconformanceNumber().catch(() => "");
       const linkedMaterialIds = Array.from(new Set(part.requiredMaterialLots || []));
       const linkedMaterials = (await Promise.all(
@@ -2460,6 +2602,7 @@ useEffect(() => api.onDeepLink?.((payload) => {
       };
       setSelectedNonconformanceId(null);
       setNonconformanceRecord(draft);
+      lastSavedNonconformanceRef.current = snapshotValue(draft);
       setNonconformanceScreen("detail");
       setSelectedPartId(part.id);
       setJobScreen("nonconformance");
@@ -2474,10 +2617,8 @@ useEffect(() => api.onDeepLink?.((payload) => {
   };
 
   const showJobList = async () => {
-    const didSave = await persistPendingEditorsBeforeNavigation();
-    if (!didSave) {
-      return;
-    }
+    const confirmed = await confirmLeaveIfDirty(async () => {});
+    if (!confirmed) return;
     if (selectedJobId) {
       api.releaseLock("job", selectedJobId).catch(() => {});
     }
@@ -2496,10 +2637,8 @@ useEffect(() => api.onDeepLink?.((payload) => {
   };
 
   const showKanbanList = async () => {
-    const didSave = await persistPendingEditorsBeforeNavigation();
-    if (!didSave) {
-      return;
-    }
+    const confirmed = await confirmLeaveIfDirty(async () => {});
+    if (!confirmed) return;
     if (selectedNonconformanceId) {
       api.releaseLock("nonconformance", selectedNonconformanceId).catch(() => {});
       setSelectedNonconformanceId(null);
@@ -2517,10 +2656,8 @@ useEffect(() => api.onDeepLink?.((payload) => {
   };
 
   const showNonconformanceList = async () => {
-    const didSave = await persistPendingEditorsBeforeNavigation();
-    if (!didSave) {
-      return;
-    }
+    const confirmed = await confirmLeaveIfDirty(async () => {});
+    if (!confirmed) return;
     if (selectedNonconformanceId) {
       api.releaseLock("nonconformance", selectedNonconformanceId).catch(() => {});
     }
@@ -2532,10 +2669,8 @@ useEffect(() => api.onDeepLink?.((payload) => {
   };
 
   const showInspectionList = async () => {
-    const didSave = await persistPendingEditorsBeforeNavigation();
-    if (!didSave) {
-      return;
-    }
+    const confirmed = await confirmLeaveIfDirty(async () => {});
+    if (!confirmed) return;
     if (selectedNonconformanceId) {
       api.releaseLock("nonconformance", selectedNonconformanceId).catch(() => {});
       setSelectedNonconformanceId(null);
@@ -2546,10 +2681,8 @@ useEffect(() => api.onDeepLink?.((payload) => {
   };
 
   const showTimeClock = async () => {
-    const didSave = await persistPendingEditorsBeforeNavigation();
-    if (!didSave) {
-      return;
-    }
+    const confirmed = await confirmLeaveIfDirty(async () => {});
+    if (!confirmed) return;
     if (selectedNonconformanceId) {
       api.releaseLock("nonconformance", selectedNonconformanceId).catch(() => {});
       setSelectedNonconformanceId(null);
@@ -2560,16 +2693,21 @@ useEffect(() => api.onDeepLink?.((payload) => {
   };
 
   const showTimeClockAdmin = async () => {
-    const didSave = await persistPendingEditorsBeforeNavigation();
-    if (!didSave) {
-      return;
-    }
+    const confirmed = await confirmLeaveIfDirty(async () => {});
+    if (!confirmed) return;
     if (selectedNonconformanceId) {
       api.releaseLock("nonconformance", selectedNonconformanceId).catch(() => {});
       setSelectedNonconformanceId(null);
       setNonconformanceRecord(null);
     }
     setView("timeclockAdmin");
+    setSaveState("saved");
+  };
+
+  const showSettingsView = async () => {
+    const confirmed = await confirmLeaveIfDirty(async () => {});
+    if (!confirmed) return;
+    setView("settings");
     setSaveState("saved");
   };
 
@@ -2639,10 +2777,8 @@ useEffect(() => api.onDeepLink?.((payload) => {
   };
 
   const backToJob = async () => {
-    const didSave = await persistPendingEditorsBeforeNavigation();
-    if (!didSave) {
-      return;
-    }
+    const confirmed = await confirmLeaveIfDirty(async () => {});
+    if (!confirmed) return;
     if (selectedNonconformanceId && jobScreen === "nonconformance") {
       api.releaseLock("nonconformance", selectedNonconformanceId).catch(() => {});
       setSelectedNonconformanceId(null);
@@ -2655,10 +2791,8 @@ useEffect(() => api.onDeepLink?.((payload) => {
   };
 
   const backToPart = async () => {
-    const didSave = await persistPendingEditorsBeforeNavigation();
-    if (!didSave) {
-      return;
-    }
+    const confirmed = await confirmLeaveIfDirty(async () => {});
+    if (!confirmed) return;
     if (selectedNonconformanceId && jobScreen === "nonconformance") {
       api.releaseLock("nonconformance", selectedNonconformanceId).catch(() => {});
       setSelectedNonconformanceId(null);
@@ -3150,19 +3284,22 @@ useEffect(() => api.onDeepLink?.((payload) => {
     setSelectedJobId(saved.id);
     setSelectedPartId((current) => saved.parts.some((part) => part.id === current) ? current : null);
     setSelectedOperationId((current) => saved.parts.some((part) => part.operations.some((operation) => operation.id === current)) ? current : null);
-    await refreshWorkspace();
+    lastSavedJobRef.current = snapshotValue(saved);
+    patchWorkspaceRecord("jobs", saved);
   };
 
   const applySavedKanbanCard = async (saved) => {
     setKanbanCard(saved);
     setSelectedKanbanId(saved.id);
-    await refreshWorkspace();
+    lastSavedKanbanRef.current = snapshotValue(saved);
+    patchWorkspaceRecord("kanbanCards", saved);
   };
 
   const applySavedNonconformance = async (saved) => {
     setNonconformanceRecord(saved);
     setSelectedNonconformanceId(saved.id);
-    await refreshWorkspace();
+    lastSavedNonconformanceRef.current = snapshotValue(saved);
+    patchWorkspaceRecord("nonconformances", saved);
   };
 
   const exportCurrentNonconformancePdf = async () => {
@@ -3586,18 +3723,18 @@ useEffect(() => api.onDeepLink?.((payload) => {
   };
 
   const createNewMaterial = async () => {
-    const didSave = await persistPendingEditorsBeforeNavigation();
-    if (!didSave) {
-      return;
-    }
+    const confirmed = await confirmLeaveIfDirty(async () => {});
+    if (!confirmed) return;
     if (selectedNonconformanceId) api.releaseLock("nonconformance", selectedNonconformanceId).catch(() => {});
     if (selectedMaterialId) api.releaseLock("material", selectedMaterialId).catch(() => {});
     const serial = await api.generateMaterialSerial().catch(() => "");
     setSelectedMaterialId(null);
-    setMaterial(syncMaterialClassification(
+    const draft = syncMaterialClassification(
       updateMaterialWithShape({ ...blankMaterial(), serialCode: serial }, { form: workspace?.constants?.material?.forms?.[0] || "" }),
       workspace?.preferences
-    ));
+    );
+    setMaterial(draft);
+    lastSavedMaterialRef.current = snapshotValue(draft);
     setMaterialScreen("detail");
     setView("materials");
     setSaveState("saved");
@@ -3606,7 +3743,8 @@ useEffect(() => api.onDeepLink?.((payload) => {
   const applySavedMaterial = async (saved) => {
     setMaterial(syncMaterialClassification(saved, workspace?.preferences));
     setSelectedMaterialId(saved.id);
-    await refreshWorkspace();
+    lastSavedMaterialRef.current = snapshotValue(saved);
+    patchWorkspaceRecord("materials", syncMaterialClassification(saved, workspace?.preferences));
   };
 
   const addMaterialAttachments = async () => {
@@ -3720,10 +3858,8 @@ useEffect(() => api.onDeepLink?.((payload) => {
   };
 
   const createNewInstrument = async () => {
-    const didSave = await persistPendingEditorsBeforeNavigation();
-    if (!didSave) {
-      return;
-    }
+    const confirmed = await confirmLeaveIfDirty(async () => {});
+    if (!confirmed) return;
     if (selectedNonconformanceId) api.releaseLock("nonconformance", selectedNonconformanceId).catch(() => {});
     if (selectedInstrumentId) api.releaseLock("instrument", selectedInstrumentId).catch(() => {});
     setSelectedInstrumentId(null);
@@ -3735,6 +3871,7 @@ useEffect(() => api.onDeepLink?.((payload) => {
     draft.instrument.owner_department = workspace?.preferences?.metrologyDepartments?.[0] || "";
     draft.instrument.status = workspace?.preferences?.metrologyStatuses?.[0] || draft.instrument.status;
     setInstrumentPayload(draft);
+    lastSavedInstrumentRef.current = snapshotValue(draft);
     setMetrologyScreen("detail");
     setView("metrology");
     setSaveState("saved");
@@ -3743,7 +3880,8 @@ useEffect(() => api.onDeepLink?.((payload) => {
   const applySavedInstrument = async (saved) => {
     setInstrumentPayload(saved);
     setSelectedInstrumentId(saved.instrument.instrument_id);
-    await refreshWorkspace();
+    lastSavedInstrumentRef.current = snapshotValue(saved);
+    patchWorkspaceRecord("instruments", saved, (item, incoming) => String(item?.instrument_id || item?.instrument?.instrument_id || "") === String(incoming?.instrument?.instrument_id || ""));
   };
 
   const archiveCurrentInstrument = async () => {
@@ -3783,15 +3921,13 @@ useEffect(() => api.onDeepLink?.((payload) => {
 
   const createInlineMaterial = async (draft) => {
     const saved = await api.saveMaterial(draft);
-    await refreshWorkspace();
+    patchWorkspaceRecord("materials", syncMaterialClassification(saved, workspace?.preferences));
     return saved;
   };
 
   const showMaterialsList = async () => {
-    const didSave = await persistPendingEditorsBeforeNavigation();
-    if (!didSave) {
-      return;
-    }
+    const confirmed = await confirmLeaveIfDirty(async () => {});
+    if (!confirmed) return;
     if (selectedNonconformanceId) {
       api.releaseLock("nonconformance", selectedNonconformanceId).catch(() => {});
       setSelectedNonconformanceId(null);
@@ -3808,10 +3944,8 @@ useEffect(() => api.onDeepLink?.((payload) => {
   };
 
   const showMetrologyList = async () => {
-    const didSave = await persistPendingEditorsBeforeNavigation();
-    if (!didSave) {
-      return;
-    }
+    const confirmed = await confirmLeaveIfDirty(async () => {});
+    if (!confirmed) return;
     if (selectedNonconformanceId) {
       api.releaseLock("nonconformance", selectedNonconformanceId).catch(() => {});
       setSelectedNonconformanceId(null);
@@ -4082,18 +4216,19 @@ useEffect(() => api.onDeepLink?.((payload) => {
 
   const saveCustomer = async (customer) => {
     const saved = await api.saveCustomer(customer);
-    await refreshWorkspace();
+    patchWorkspaceRecord("customers", saved);
     return saved;
   };
 
   const savePreferences = async (preferences, { silent = false } = {}) => {
     setBusy(true);
     try {
-      await api.savePreferences(preferences);
-      await refreshWorkspace();
+      const saved = await api.savePreferences(preferences);
+      setWorkspace((current) => current ? { ...current, preferences: saved } : current);
       if (!silent) {
         showStatus("Settings saved.");
       }
+      return saved;
     } catch (error) {
       showStatus(error.message || String(error));
       throw error;
@@ -4196,81 +4331,6 @@ useEffect(() => api.onDeepLink?.((payload) => {
     await savePreferences({ kanbanDepartments: next }, { silent: true });
     return trimmed;
   };
-
-  useAutoSave({
-    value: job,
-    resetKey: `job:${job?.id || "none"}`,
-    enabled: Boolean(job),
-    isReady: isJobReadyToSave,
-    save: (current) => api.saveJob(current),
-    onSaved: applySavedJob,
-    onError: (error) => showStatus(error.message || String(error)),
-    onStateChange: (next) => {
-      if (view === "jobs" && jobScreen !== "list") {
-        setSaveState(next);
-      }
-    }
-  });
-
-  useAutoSave({
-    value: nonconformanceRecord,
-    resetKey: `nonconformance:${nonconformanceRecord?.id || "none"}`,
-    enabled: Boolean(nonconformanceRecord),
-    isReady: isNonconformanceReadyToSave,
-    save: (current) => api.saveNonconformance(current),
-    onSaved: applySavedNonconformance,
-    onError: (error) => showStatus(error.message || String(error)),
-    onStateChange: (next) => {
-      if ((view === "nonconformance" && nonconformanceScreen === "detail") || (view === "jobs" && jobScreen === "nonconformance")) {
-        setSaveState(next);
-      }
-    }
-  });
-
-  useAutoSave({
-    value: kanbanCard,
-    resetKey: `kanban:${kanbanCard?.id || "none"}`,
-    enabled: Boolean(kanbanCard),
-    isReady: isKanbanCardReadyToSave,
-    save: (current) => api.saveKanbanCard(current),
-    onSaved: applySavedKanbanCard,
-    onError: (error) => showStatus(error.message || String(error)),
-    onStateChange: (next) => {
-      if (view === "kanban" && kanbanScreen === "detail") {
-        setSaveState(next);
-      }
-    }
-  });
-
-  useAutoSave({
-    value: material,
-    resetKey: `material:${material?.id || "none"}`,
-    enabled: Boolean(material),
-    isReady: isMaterialReadyToSave,
-    save: (current) => api.saveMaterial(current),
-    onSaved: applySavedMaterial,
-    onError: (error) => showStatus(error.message || String(error)),
-    onStateChange: (next) => {
-      if (view === "materials" && materialScreen === "detail") {
-        setSaveState(next);
-      }
-    }
-  });
-
-  useAutoSave({
-    value: instrumentPayload,
-    resetKey: `instrument:${instrumentPayload?.instrument?.instrument_id || "none"}`,
-    enabled: Boolean(instrumentPayload),
-    isReady: isInstrumentReadyToSave,
-    save: (current) => api.saveInstrument(current),
-    onSaved: applySavedInstrument,
-    onError: (error) => showStatus(error.message || String(error)),
-    onStateChange: (next) => {
-      if (view === "metrology" && metrologyScreen === "detail") {
-        setSaveState(next);
-      }
-    }
-  });
 
   if (!workspace) {
     if (startupError) {
@@ -4520,7 +4580,7 @@ useEffect(() => api.onDeepLink?.((payload) => {
               />
             );
           })}
-          <NavButton icon={Settings} active={view === "settings"} label="Settings" onClick={() => setView("settings")} />
+          <NavButton icon={Settings} active={view === "settings"} label="Settings" onClick={showSettingsView} />
         </nav>
       </aside>
 
@@ -4542,6 +4602,16 @@ useEffect(() => api.onDeepLink?.((payload) => {
           <div className="topbar-actions">
             <SaveStatePill state={saveState} />
             <div className="toolbar topbar-actions-main">
+              {mainEditorHasExplicitSave() ? (
+                <>
+                  <button onClick={() => void saveCurrentMainEditor()} disabled={saveState === "saving" || !currentMainEditorIsDirty()}>
+                    <Save size={15} /> Save
+                  </button>
+                  <button className="subtle" onClick={revertCurrentMainEditor} disabled={!currentMainEditorIsDirty() || saveState === "saving"}>
+                    <RotateCcw size={15} /> Discard
+                  </button>
+                </>
+              ) : null}
               {topbarMeta.primaryActions}
             </div>
             <div className="toolbar topbar-actions-danger">
@@ -4725,6 +4795,16 @@ useEffect(() => api.onDeepLink?.((payload) => {
             setSelectedTemplateId={setSelectedTemplateId}
             onStatus={showStatus}
             onRefresh={refreshWorkspace}
+            onDirtyStateChange={(dirty) => {
+              settingsDirtyRef.current = dirty;
+              if (view === "settings" && saveState !== "saving" && saveState !== "error") {
+                setSaveState(dirty ? "dirty" : "saved");
+              }
+            }}
+            onRegisterActions={(actions) => {
+              settingsSaveActionRef.current = actions?.save || null;
+              settingsDiscardActionRef.current = actions?.discard || null;
+            }}
           />
         )}
       </main>
@@ -4762,6 +4842,36 @@ useEffect(() => api.onDeepLink?.((payload) => {
         onConfirm={async () => {
           setConfirmDeleteNonconformanceOpen(false);
           await deleteCurrentNonconformance();
+        }}
+      />
+      <UnsavedChangesDialog
+        open={Boolean(unsavedChangesDialog)}
+        title={unsavedChangesDialog?.title}
+        message={unsavedChangesDialog?.message}
+        saving={saveState === "saving"}
+        onCancel={async () => {
+          const action = pendingNavigationActionRef.current;
+          pendingNavigationActionRef.current = null;
+          setUnsavedChangesDialog(null);
+          if (action) {
+            await action("cancel");
+          }
+        }}
+        onDiscard={async () => {
+          const action = pendingNavigationActionRef.current;
+          pendingNavigationActionRef.current = null;
+          setUnsavedChangesDialog(null);
+          if (action) {
+            await action("discard");
+          }
+        }}
+        onSave={async () => {
+          const action = pendingNavigationActionRef.current;
+          pendingNavigationActionRef.current = null;
+          setUnsavedChangesDialog(null);
+          if (action) {
+            await action("save");
+          }
         }}
       />
 
@@ -4957,6 +5067,7 @@ function TimeClockAdminView({ workspace, onRefresh, onStatus }) {
   const [includeArchived, setIncludeArchived] = useState(false);
   const [loading, setLoading] = useState(false);
   const [correction, setCorrection] = useState(null);
+  const [deletePrompt, setDeletePrompt] = useState(null);
   const [bulkConfirm, setBulkConfirm] = useState(null);
 
   const loadDashboard = async (nextPeriodStartDate = periodStartDate, nextEmployeeFilter = employeeFilter) => {
@@ -5083,6 +5194,26 @@ function TimeClockAdminView({ workspace, onRefresh, onStatus }) {
     }, `Corrected ${sessionLabel} time clock session.`);
   };
 
+  const openDeletePrompt = (session) => {
+    setDeletePrompt({ session, reason: "" });
+  };
+
+  const deleteTimeClockSession = async () => {
+    if (!deletePrompt?.session?.id) {
+      return;
+    }
+    const reason = String(deletePrompt.reason || "").trim();
+    if (!reason) {
+      onStatus("A delete reason is required.");
+      return;
+    }
+    const sessionLabel = deletePrompt.session.employeeName || "time clock punch";
+    await runMutation(async () => {
+      await api.deleteTimeClockSession(deletePrompt.session.id, reason);
+      setDeletePrompt(null);
+    }, `Deleted ${sessionLabel} time clock punch.`);
+  };
+
   return (
     <div className="workflow-stack timeclock-stack">
       <div className="dashboard-grid">
@@ -5163,6 +5294,9 @@ function TimeClockAdminView({ workspace, onRefresh, onStatus }) {
                             ) : (
                               <span className="status-pill warning">Open Session</span>
                             )}
+                            <button className="danger subtle" onClick={() => openDeletePrompt(session)} disabled={loading}>
+                              <Trash2 size={14} /> Delete
+                            </button>
                           </div>
                         </td>
                       </tr>
@@ -5211,6 +5345,13 @@ function TimeClockAdminView({ workspace, onRefresh, onStatus }) {
         onChange={setCorrection}
         onCancel={() => setCorrection(null)}
         onConfirm={saveCorrection}
+        disabled={loading}
+      />
+      <SessionDeleteDialog
+        prompt={deletePrompt}
+        onChange={setDeletePrompt}
+        onCancel={() => setDeletePrompt(null)}
+        onConfirm={deleteTimeClockSession}
         disabled={loading}
       />
       <ConfirmDialog
@@ -5291,6 +5432,38 @@ function SessionCorrectionDialog({ correction, onChange, onCancel, onConfirm, di
         <div className="dialog-actions">
           <button className="subtle" onClick={onCancel} disabled={disabled}>Cancel</button>
           <button onClick={onConfirm} disabled={disabled || !correction.reason.trim()}>Save Correction</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SessionDeleteDialog({ prompt, onChange, onCancel, onConfirm, disabled }) {
+  if (!prompt) {
+    return null;
+  }
+  const session = prompt.session || {};
+  return (
+    <div className="dialog-backdrop">
+      <div className="dialog-panel narrow timeclock-correction-dialog">
+        <h3>Delete Time Clock Punch</h3>
+        <p>
+          {session.employeeName || "Employee"} / {formatTimeClockDateTime(session.clockInAt)}
+        </p>
+        <div className="empty-inline">
+          This hides the punch from time totals, but keeps the readable record and audit trail in the data folder.
+        </div>
+        <TextArea
+          label="Delete Reason"
+          value={prompt.reason}
+          onChange={(value) => onChange((current) => ({ ...current, reason: value }))}
+          rows={3}
+        />
+        <div className="dialog-actions">
+          <button className="subtle" onClick={onCancel} disabled={disabled}>Cancel</button>
+          <button className="danger" onClick={onConfirm} disabled={disabled || !String(prompt.reason || "").trim()}>
+            <Trash2 size={14} /> Delete Punch
+          </button>
         </div>
       </div>
     </div>
@@ -5705,23 +5878,42 @@ function DocumentsPanel({
   );
 }
 function CustomerDialog({ open, customer, onChange, onClose, onSaveCustomer, onLinked }) {
-  useAutoSave({
-    value: open ? customer : null,
-    resetKey: `customer-dialog:${open ? customer?.id || "new" : "closed"}`,
-    enabled: Boolean(open && customer),
-    isReady: (current) => Boolean(current?.name),
-    save: onSaveCustomer,
-    onSaved: (saved) => {
-      if (saved) {
-        onChange(saved);
-        onLinked(saved);
-      }
-    }
-  });
+  const savedCustomerSnapshotRef = useRef(snapshotValue(open ? customer : null));
+  const [unsavedPromptOpen, setUnsavedPromptOpen] = useState(false);
+  useEffect(() => {
+    savedCustomerSnapshotRef.current = snapshotValue(open ? customer : null);
+  }, [open, customer?.id]);
+  const dirty = open ? snapshotValue(customer) !== savedCustomerSnapshotRef.current : false;
 
   if (!open || !customer) {
     return null;
   }
+
+  const saveCustomerNow = async () => {
+    if (!customer?.name) {
+      return;
+    }
+    const saved = await onSaveCustomer(customer);
+    if (saved) {
+      savedCustomerSnapshotRef.current = snapshotValue(saved);
+      onChange(saved);
+      onLinked(saved);
+    }
+  };
+
+  const discardAndClose = () => {
+    onChange(cloneSnapshot(JSON.parse(savedCustomerSnapshotRef.current)));
+    setUnsavedPromptOpen(false);
+    onClose();
+  };
+
+  const closeDialog = () => {
+    if (!dirty) {
+      onClose();
+      return;
+    }
+    setUnsavedPromptOpen(true);
+  };
 
   return (
     <div className="dialog-backdrop">
@@ -5731,7 +5923,10 @@ function CustomerDialog({ open, customer, onChange, onClose, onSaveCustomer, onL
             <h3>{customer.name || "New Customer"}</h3>
             <span>{customer.jobRefs?.length || 0} linked jobs</span>
           </div>
-          <button onClick={onClose}><X size={14} /> Done</button>
+          <div className="toolbar">
+            <button onClick={saveCustomerNow} disabled={!customer?.name || !dirty}><Save size={14} /> Save</button>
+            <button onClick={closeDialog}><X size={14} /> Done</button>
+          </div>
         </div>
         <div className="form-grid">
           <TextField label="Customer Name" value={customer.name || ""} onChange={(value) => onChange({ ...customer, name: value })} />
@@ -5763,6 +5958,17 @@ function CustomerDialog({ open, customer, onChange, onClose, onSaveCustomer, onL
             {!customer.jobRefs?.length && <div className="empty-inline">No linked jobs yet.</div>}
           </div>
         </div>
+        <UnsavedChangesDialog
+          open={unsavedPromptOpen}
+          message="Save customer changes before closing?"
+          onCancel={() => setUnsavedPromptOpen(false)}
+          onDiscard={discardAndClose}
+          onSave={async () => {
+            await saveCustomerNow();
+            setUnsavedPromptOpen(false);
+            onClose();
+          }}
+        />
       </div>
     </div>
   );
@@ -9360,6 +9566,8 @@ function MaterialPickerDialog({
   const [otherText, setOtherText] = useState(customMaterialText);
   const [creating, setCreating] = useState(false);
   const [draftMaterial, setDraftMaterial] = useState(null);
+  const [savedDraftSnapshot, setSavedDraftSnapshot] = useState(snapshotValue(null));
+  const [unsavedPromptOpen, setUnsavedPromptOpen] = useState(false);
 
   useEffect(() => {
     if (!open) {
@@ -9376,6 +9584,7 @@ function MaterialPickerDialog({
     setOtherText(customMaterialText);
     setCreating(false);
     setDraftMaterial(null);
+    setSavedDraftSnapshot(snapshotValue(null));
   }, [open, selectedIds, customMaterialText]);
 
   const toggleSelection = (materialId) => {
@@ -9389,10 +9598,12 @@ function MaterialPickerDialog({
 
   const startCreateMaterial = async () => {
     const serial = await api.generateMaterialSerial().catch(() => "");
-    setDraftMaterial(syncMaterialClassification(
+    const nextDraft = syncMaterialClassification(
       updateMaterialWithShape({ ...blankMaterial(), serialCode: serial }, { form: constants.material.forms[0] || "" }),
       preferences
-    ));
+    );
+    setDraftMaterial(nextDraft);
+    setSavedDraftSnapshot(snapshotValue(nextDraft));
     setCreating(true);
   };
 
@@ -9408,24 +9619,23 @@ function MaterialPickerDialog({
       return current.includes(saved.id) ? current : [...current, saved.id];
     });
     setDraftMaterial(syncMaterialClassification(saved, preferences));
+    setSavedDraftSnapshot(snapshotValue(syncMaterialClassification(saved, preferences)));
   };
-
-  useAutoSave({
-    value: creating ? draftMaterial : null,
-    resetKey: creating ? `inline-material:${draftMaterial?.id || "new"}` : "inline-material:closed",
-    enabled: Boolean(creating && draftMaterial),
-    isReady: (current) => Boolean(current?.supplier && materialDisplayType(current)),
-    save: saveInlineMaterial,
-    onSaved: (saved) => {
-      if (saved) {
-        setDraftMaterial(syncMaterialClassification(saved, preferences));
-      }
-    }
-  });
 
   if (!open) {
     return null;
   }
+
+  const inlineMaterialDirty = creating && snapshotValue(draftMaterial) !== savedDraftSnapshot;
+  const cancelInlineMaterial = () => {
+    if (!inlineMaterialDirty) {
+      setCreating(false);
+      setDraftMaterial(null);
+      setSavedDraftSnapshot(snapshotValue(null));
+      return;
+    }
+    setUnsavedPromptOpen(true);
+  };
 
   const filteredMaterials = materials.filter((material) => materialMatchesFilters(material, {
     query,
@@ -9548,7 +9758,7 @@ function MaterialPickerDialog({
                 <h3>New Material</h3>
                 <span>Create a record without leaving this operation.</span>
               </div>
-              <button className="danger subtle" onClick={() => setCreating(false)}><X size={14} /> Cancel</button>
+              <button className="danger subtle" onClick={cancelInlineMaterial}><X size={14} /> Cancel</button>
             </div>
             <div className="form-grid">
               <TextField label="Serial Code" value={draftMaterial?.serialCode || ""} onChange={(value) => setDraftMaterial((current) => updateMaterialWithShape(current, { serialCode: value }))} />
@@ -9570,9 +9780,26 @@ function MaterialPickerDialog({
             </div>
             <TextArea label="Notes" value={draftMaterial?.notes || ""} onChange={(value) => setDraftMaterial((current) => updateMaterialWithShape(current, { notes: value }))} rows={3} />
             <div className="dialog-actions">
-              <button onClick={() => { setCreating(false); setDraftMaterial(null); }}>Cancel</button>
-              <button onClick={() => setCreating(false)} disabled={!draftMaterial?.updatedAt}>Done</button>
+              <button onClick={cancelInlineMaterial}>Cancel</button>
+              <button onClick={saveInlineMaterial} disabled={!draftMaterial?.supplier || !materialDisplayType(draftMaterial)}>Save</button>
+              <button onClick={() => setCreating(false)} disabled={inlineMaterialDirty}>Done</button>
             </div>
+            <UnsavedChangesDialog
+              open={unsavedPromptOpen}
+              message="Save the new material before closing this dialog?"
+              onCancel={() => setUnsavedPromptOpen(false)}
+              onDiscard={() => {
+                setUnsavedPromptOpen(false);
+                setCreating(false);
+                setDraftMaterial(null);
+                setSavedDraftSnapshot(snapshotValue(null));
+              }}
+              onSave={async () => {
+                await saveInlineMaterial();
+                setUnsavedPromptOpen(false);
+                setCreating(false);
+              }}
+            />
           </>
         )}
       </div>
@@ -10751,10 +10978,20 @@ function MetrologyView({ workspace, screen, payload, setPayload, onOpenInstrumen
   );
 }
 
-function TemplateSettingsSection({ workspace, selectedTemplate, setSelectedTemplateId, onStatus, onRefresh }) {
+function TemplateSettingsSection({
+  workspace,
+  selectedTemplate,
+  setSelectedTemplateId,
+  onStatus,
+  onRefresh,
+  onDirtyChange,
+  onRegisterActions
+}) {
   const [template, setTemplate] = useState(selectedTemplate || blankTemplate());
+  const [pendingTemplateAction, setPendingTemplateAction] = useState(null);
   const libraries = libraryList(workspace.libraries);
   const assignedMissingLibraries = (template.libraryNames || []).filter((name) => !(workspace.libraries || {})[name]);
+  const templateDirty = snapshotValue(template) !== snapshotValue(selectedTemplate || blankTemplate());
 
   useEffect(() => {
     setTemplate(selectedTemplate || blankTemplate());
@@ -10802,26 +11039,55 @@ function TemplateSettingsSection({ workspace, selectedTemplate, setSelectedTempl
     defaultSteps: (current.defaultSteps || []).filter((_step, stepIndex) => stepIndex !== index)
   }));
 
-  useAutoSave({
-    value: template,
-    resetKey: `template:${template?.id || "none"}`,
-    enabled: Boolean(template),
-    isReady: (current) => Boolean(current),
-    save: (current) => api.saveTemplate(current),
-    onSaved: async (saved) => {
+  const saveTemplateNow = async () => {
+    try {
+      const saved = await api.saveTemplate(template);
       setTemplate(saved);
       setSelectedTemplateId(saved.id);
       await onRefresh();
-    },
-    onError: (error) => onStatus(error.message || String(error))
-  });
+      onStatus("Template saved.");
+    } catch (error) {
+      onStatus(error.message || String(error));
+    }
+  };
+
+  const discardTemplateChanges = () => {
+    setTemplate(cloneSnapshot(selectedTemplate || blankTemplate()));
+  };
+
+  const promptForTemplateAction = (action) => {
+    if (!templateDirty) {
+      action();
+      return;
+    }
+    setPendingTemplateAction(() => action);
+  };
+
+  useEffect(() => {
+    onDirtyChange?.(templateDirty);
+  }, [onDirtyChange, templateDirty]);
+
+  useEffect(() => {
+    onRegisterActions?.({
+      save: templateDirty ? saveTemplateNow : async () => true,
+      discard: discardTemplateChanges
+    });
+    return () => onRegisterActions?.(null);
+  }, [onRegisterActions, templateDirty, template, selectedTemplate]);
 
   return (
     <div className="catalog-layout settings-template-layout">
       <div className="catalog-list">
-        <button className="sidebar-action" onClick={() => setTemplate(blankTemplate())}><Plus size={14} /> New Template</button>
+        <button className="sidebar-action" onClick={() => promptForTemplateAction(() => {
+          setTemplate(blankTemplate());
+          setSelectedTemplateId(null);
+        })}><Plus size={14} /> New Template</button>
         {workspace.templates.map((item) => (
-          <button key={item.id} className={`record-list-item ${template.id === item.id ? "selected" : ""}`} onClick={() => setSelectedTemplateId(item.id)}>
+          <button
+            key={item.id}
+            className={`record-list-item ${template.id === item.id ? "selected" : ""}`}
+            onClick={() => promptForTemplateAction(() => setSelectedTemplateId(item.id))}
+          >
             <strong>{item.name}</strong>
             <span>{item.category}</span>
           </button>
@@ -10836,6 +11102,8 @@ function TemplateSettingsSection({ workspace, selectedTemplate, setSelectedTempl
             <span>{template.category || "General"}</span>
           </div>
           <div className="toolbar">
+            <button onClick={saveTemplateNow} disabled={!templateDirty}><Save size={14} /> Save</button>
+            <button className="subtle" onClick={discardTemplateChanges} disabled={!templateDirty}><RotateCcw size={14} /> Discard</button>
             {template.id && <button className="danger subtle" onClick={deleteTemplate}><X size={14} /> Delete</button>}
           </div>
         </div>
@@ -10899,14 +11167,32 @@ function TemplateSettingsSection({ workspace, selectedTemplate, setSelectedTempl
           </div>
         </div>
       </div>
+      <UnsavedChangesDialog
+        open={Boolean(pendingTemplateAction)}
+        message="Save template changes before switching templates?"
+        onCancel={() => setPendingTemplateAction(null)}
+        onDiscard={() => {
+          discardTemplateChanges();
+          const action = pendingTemplateAction;
+          setPendingTemplateAction(null);
+          action?.();
+        }}
+        onSave={async () => {
+          await saveTemplateNow();
+          const action = pendingTemplateAction;
+          setPendingTemplateAction(null);
+          action?.();
+        }}
+      />
     </div>
   );
 }
 
-function LibrarySettingsSection({ workspace, onStatus, onRefresh }) {
+function LibrarySettingsSection({ workspace, onStatus, onRefresh, onDirtyChange, onRegisterActions }) {
   const [libraries, setLibraries] = useState(libraryList(workspace.libraries));
   const [selectedLibraryName, setSelectedLibraryName] = useState(libraryList(workspace.libraries)[0]?.name || null);
   const [deletingLibraryName, setDeletingLibraryName] = useState("");
+  const [pendingLibraryAction, setPendingLibraryAction] = useState(null);
 
   useEffect(() => {
     const nextLibraries = libraryList(workspace.libraries);
@@ -10915,6 +11201,8 @@ function LibrarySettingsSection({ workspace, onStatus, onRefresh }) {
   }, [workspace.libraries]);
 
   const selectedLibrary = libraries.find((library) => library.name === selectedLibraryName) || null;
+  const selectedLibrarySource = libraryList(workspace.libraries).find((library) => library.name === selectedLibraryName) || null;
+  const selectedLibraryDirty = snapshotValue(selectedLibrary) !== snapshotValue(selectedLibrarySource);
   const updateLibrary = (libraryName, updater) => {
     setLibraries((current) => current.map((library) => {
       if (library.name !== libraryName) {
@@ -10977,28 +11265,65 @@ function LibrarySettingsSection({ workspace, onStatus, onRefresh }) {
     }
   };
 
-  useAutoSave({
-    value: selectedLibrary,
-    resetKey: `library:${selectedLibrary?.name || "none"}`,
-    enabled: Boolean(selectedLibrary) && selectedLibrary.name !== deletingLibraryName,
-    isReady: (current) => Boolean(current),
-    save: (current) => api.saveLibrary(current),
-    onSaved: async (saved) => {
+  const saveLibraryNow = async () => {
+    if (!selectedLibrary) {
+      return;
+    }
+    try {
+      const saved = await api.saveLibrary(selectedLibrary);
       setLibraries((current) => current.some((library) => library.name === saved.name)
         ? current.map((library) => library.name === saved.name ? saved : library)
         : [...current, saved]);
       setSelectedLibraryName(saved.name);
       await onRefresh();
-    },
-    onError: (error) => onStatus(error.message || String(error))
-  });
+      onStatus("Library saved.");
+    } catch (error) {
+      onStatus(error.message || String(error));
+    }
+  };
+
+  const discardLibraryChanges = () => {
+    if (!selectedLibraryName) {
+      return;
+    }
+    if (selectedLibrarySource) {
+      updateLibrary(selectedLibraryName, cloneSnapshot(selectedLibrarySource));
+      return;
+    }
+    setLibraries((current) => current.filter((library) => library.name !== selectedLibraryName));
+    setSelectedLibraryName(libraryList(workspace.libraries)[0]?.name || null);
+  };
+
+  const promptForLibraryAction = (action) => {
+    if (!selectedLibraryDirty) {
+      action();
+      return;
+    }
+    setPendingLibraryAction(() => action);
+  };
+
+  useEffect(() => {
+    onDirtyChange?.(selectedLibraryDirty);
+  }, [onDirtyChange, selectedLibraryDirty]);
+
+  useEffect(() => {
+    onRegisterActions?.({
+      save: selectedLibraryDirty ? saveLibraryNow : async () => true,
+      discard: discardLibraryChanges
+    });
+    return () => onRegisterActions?.(null);
+  }, [onRegisterActions, selectedLibraryDirty, selectedLibraryName, libraries, selectedLibrarySource]);
 
   return (
     <div className="catalog-layout settings-template-layout">
       <div className="catalog-list">
-        <button className="sidebar-action" onClick={addLibrary}><Plus size={14} /> New Library</button>
+        <button className="sidebar-action" onClick={() => promptForLibraryAction(addLibrary)}><Plus size={14} /> New Library</button>
         {libraries.map((library) => (
-          <button key={library.name} className={`record-list-item ${selectedLibraryName === library.name ? "selected" : ""}`} onClick={() => setSelectedLibraryName(library.name)}>
+          <button
+            key={library.name}
+            className={`record-list-item ${selectedLibraryName === library.name ? "selected" : ""}`}
+            onClick={() => promptForLibraryAction(() => setSelectedLibraryName(library.name))}
+          >
             <strong>{library.label || "New Library"}</strong>
             <span>{library.records?.length || 0} saved records</span>
           </button>
@@ -11018,6 +11343,8 @@ function LibrarySettingsSection({ workspace, onStatus, onRefresh }) {
               <span>{selectedLibrary.records?.length || 0} saved records</span>
             </div>
             <div className="toolbar">
+              <button onClick={saveLibraryNow} disabled={!selectedLibraryDirty}><Save size={14} /> Save</button>
+              <button className="subtle" onClick={discardLibraryChanges} disabled={!selectedLibraryDirty}><RotateCcw size={14} /> Discard</button>
               <button className="danger subtle" onClick={deleteLibrary}><X size={14} /> Delete Library</button>
               <button onClick={addLibraryRecord}><Plus size={14} /> Add</button>
             </div>
@@ -11048,139 +11375,247 @@ function LibrarySettingsSection({ workspace, onStatus, onRefresh }) {
           </div>
         </div>
       )}
+      <UnsavedChangesDialog
+        open={Boolean(pendingLibraryAction)}
+        message="Save library changes before switching libraries?"
+        onCancel={() => setPendingLibraryAction(null)}
+        onDiscard={() => {
+          discardLibraryChanges();
+          const action = pendingLibraryAction;
+          setPendingLibraryAction(null);
+          action?.();
+        }}
+        onSave={async () => {
+          await saveLibraryNow();
+          const action = pendingLibraryAction;
+          setPendingLibraryAction(null);
+          action?.();
+        }}
+      />
     </div>
   );
 }
 
-function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, selectedTemplate, setSelectedTemplateId, onStatus, onRefresh }) {
+function SettingsView({
+  onChooseDataFolder,
+  onSavePreferences,
+  workspace,
+  selectedTemplate,
+  setSelectedTemplateId,
+  onStatus,
+  onRefresh,
+  onDirtyStateChange,
+  onRegisterActions
+}) {
+  const initialSettingsSnapshot = buildSettingsPreferenceSnapshot(workspace.preferences);
   const [activeSettingsTab, setActiveSettingsTab] = useState("system");
-  const [materialFamilies, setMaterialFamilies] = useState(workspace.preferences?.materialFamilies || []);
-  const [selectedFamilyId, setSelectedFamilyId] = useState(workspace.preferences?.materialFamilies?.[0]?.id || null);
-  const [brandingSettings, setBrandingSettings] = useState({
-    appTitle: workspace.preferences?.appTitle || "AMERP",
-    appTagline: workspace.preferences?.appTagline || "Operator ERP",
-    windowTitle: workspace.preferences?.windowTitle || "AMERP",
-    appIconPath: workspace.preferences?.appIconPath || ""
-  });
-  const [complianceSettings, setComplianceSettings] = useState({
-    iso9001ComplianceEnabled: iso9001ComplianceEnabled(workspace.preferences)
-  });
-  const [moduleSettings, setModuleSettings] = useState(normalizeEnabledModules(workspace.preferences?.enabledModules));
-  const [jobSettings, setJobSettings] = useState({
-    jobPrefix: workspace.preferences?.jobPrefix || "J03C",
-    startingJobNumber: String(workspace.preferences?.startingJobNumber ?? 600)
-  });
-  const [inspectionReportNumberSettings, setInspectionReportNumberSettings] = useState({
-    inspectionReportPrefix: workspace.preferences?.inspectionReportPrefix || "IR",
-    startingInspectionReportNumber: String(workspace.preferences?.startingInspectionReportNumber ?? 1)
-  });
-  const [inspectionReportExportSettings, setInspectionReportExportSettings] = useState(defaultInspectionReportExportOptions(workspace.preferences?.inspectionReportExportOptions));
-  const [nonconformanceNumberSettings, setNonconformanceNumberSettings] = useState({
-    nonconformancePrefix: workspace.preferences?.nonconformancePrefix || "NCR",
-    startingNonconformanceNumber: String(workspace.preferences?.startingNonconformanceNumber ?? 1)
-  });
-  const [kanbanNumberSettings, setKanbanNumberSettings] = useState({
-    kanbanInventoryPrefix: workspace.preferences?.kanbanInventoryPrefix || "J03C",
-    kanbanStartingInventoryNumber: String(workspace.preferences?.kanbanStartingInventoryNumber ?? 600)
-  });
-  const [timeClockSettings, setTimeClockSettings] = useState({
-    payPeriodStartDay: workspace.preferences?.payPeriodStartDay || "thursday",
-    payPeriodLengthDays: String(workspace.preferences?.payPeriodLengthDays ?? 7)
-  });
-  const [metrologyOptions, setMetrologyOptions] = useState({
-    metrologyToolTypes: workspace.preferences?.metrologyToolTypes || [],
-    metrologyManufacturers: workspace.preferences?.metrologyManufacturers || [],
-    metrologyResolutions: workspace.preferences?.metrologyResolutions || [],
-    metrologyLocations: workspace.preferences?.metrologyLocations || [],
-    metrologyDepartments: workspace.preferences?.metrologyDepartments || [],
-    metrologyStatuses: workspace.preferences?.metrologyStatuses || []
-  });
-  const [aiSettings, setAiSettings] = useState({
-    openaiApiKey: workspace.preferences?.openaiApiKey || ""
-  });
-  const [kanbanDepartments, setKanbanDepartments] = useState(workspace.preferences?.kanbanDepartments || []);
-  const [selectedKanbanDepartmentId, setSelectedKanbanDepartmentId] = useState(workspace.preferences?.kanbanDepartments?.[0]?.id || null);
-  const [kanbanOptions, setKanbanOptions] = useState({
-    kanbanVendors: workspace.preferences?.kanbanVendors || [],
-    kanbanCategories: workspace.preferences?.kanbanCategories || []
-  });
-  const [nonconformanceOptions, setNonconformanceOptions] = useState({
-    nonconformanceDispositions: workspace.preferences?.nonconformanceDispositions || []
-  });
-  const [kanbanPrintSettings, setKanbanPrintSettings] = useState({
-    defaultKanbanPrintSizeId: workspace.preferences?.defaultKanbanPrintSizeId || defaultKanbanPrintSizeId(workspace.preferences),
-    kanbanPrintSizes: (workspace.preferences?.kanbanPrintSizes || []).map((item) => ({
-      ...item,
-      widthIn: String(item.widthIn ?? ""),
-      heightIn: String(item.heightIn ?? "")
-    }))
-  });
+  const [pendingSettingsTab, setPendingSettingsTab] = useState("");
+  const [templateDirty, setTemplateDirty] = useState(false);
+  const [libraryDirty, setLibraryDirty] = useState(false);
+  const templateActionsRef = useRef({ save: async () => true, discard: () => {} });
+  const libraryActionsRef = useRef({ save: async () => true, discard: () => {} });
+  const lastSettingsDataFolderRef = useRef(workspace.dataFolder || "");
+  const [settingsBaseline, setSettingsBaseline] = useState(initialSettingsSnapshot);
+  const [materialFamilies, setMaterialFamilies] = useState(initialSettingsSnapshot.materialFamilies);
+  const [selectedFamilyId, setSelectedFamilyId] = useState(initialSettingsSnapshot.materialFamilies[0]?.id || null);
+  const [brandingSettings, setBrandingSettings] = useState(initialSettingsSnapshot.brandingSettings);
+  const [complianceSettings, setComplianceSettings] = useState(initialSettingsSnapshot.complianceSettings);
+  const [moduleSettings, setModuleSettings] = useState(initialSettingsSnapshot.moduleSettings);
+  const [backupSettings, setBackupSettings] = useState(initialSettingsSnapshot.backupSettings);
+  const [backupListState, setBackupListState] = useState({ backupRoot: "", defaultBackupRoot: "", backups: [] });
+  const [backupBusy, setBackupBusy] = useState(false);
+  const [restoreBackupTarget, setRestoreBackupTarget] = useState(null);
+  const [jobSettings, setJobSettings] = useState(initialSettingsSnapshot.jobSettings);
+  const [inspectionReportNumberSettings, setInspectionReportNumberSettings] = useState(initialSettingsSnapshot.inspectionReportNumberSettings);
+  const [inspectionReportExportSettings, setInspectionReportExportSettings] = useState(initialSettingsSnapshot.inspectionReportExportSettings);
+  const [nonconformanceNumberSettings, setNonconformanceNumberSettings] = useState(initialSettingsSnapshot.nonconformanceNumberSettings);
+  const [kanbanNumberSettings, setKanbanNumberSettings] = useState(initialSettingsSnapshot.kanbanNumberSettings);
+  const [timeClockSettings, setTimeClockSettings] = useState(initialSettingsSnapshot.timeClockSettings);
+  const [metrologyOptions, setMetrologyOptions] = useState(initialSettingsSnapshot.metrologyOptions);
+  const [aiSettings, setAiSettings] = useState(initialSettingsSnapshot.aiSettings);
+  const [kanbanDepartments, setKanbanDepartments] = useState(initialSettingsSnapshot.kanbanDepartments);
+  const [selectedKanbanDepartmentId, setSelectedKanbanDepartmentId] = useState(initialSettingsSnapshot.kanbanDepartments[0]?.id || null);
+  const [kanbanOptions, setKanbanOptions] = useState(initialSettingsSnapshot.kanbanOptions);
+  const [nonconformanceOptions, setNonconformanceOptions] = useState(initialSettingsSnapshot.nonconformanceOptions);
+  const [kanbanPrintSettings, setKanbanPrintSettings] = useState(initialSettingsSnapshot.kanbanPrintSettings);
 
-  useEffect(() => {
-    const families = workspace.preferences?.materialFamilies || [];
-    setMaterialFamilies(families);
-    setSelectedFamilyId((current) => families.some((family) => family.id === current) ? current : families[0]?.id || null);
-    setBrandingSettings({
-      appTitle: workspace.preferences?.appTitle || "AMERP",
-      appTagline: workspace.preferences?.appTagline || "Operator ERP",
-      windowTitle: workspace.preferences?.windowTitle || "AMERP",
-      appIconPath: workspace.preferences?.appIconPath || ""
-    });
-    setComplianceSettings({
-      iso9001ComplianceEnabled: iso9001ComplianceEnabled(workspace.preferences)
-    });
-    setModuleSettings(normalizeEnabledModules(workspace.preferences?.enabledModules));
-    setJobSettings({
-      jobPrefix: workspace.preferences?.jobPrefix || "J03C",
-      startingJobNumber: String(workspace.preferences?.startingJobNumber ?? 600)
-    });
-    setInspectionReportNumberSettings({
-      inspectionReportPrefix: workspace.preferences?.inspectionReportPrefix || "IR",
-      startingInspectionReportNumber: String(workspace.preferences?.startingInspectionReportNumber ?? 1)
-    });
-    setInspectionReportExportSettings(defaultInspectionReportExportOptions(workspace.preferences?.inspectionReportExportOptions));
-    setNonconformanceNumberSettings({
-      nonconformancePrefix: workspace.preferences?.nonconformancePrefix || "NCR",
-      startingNonconformanceNumber: String(workspace.preferences?.startingNonconformanceNumber ?? 1)
-    });
-    setKanbanNumberSettings({
-      kanbanInventoryPrefix: workspace.preferences?.kanbanInventoryPrefix || "J03C",
-      kanbanStartingInventoryNumber: String(workspace.preferences?.kanbanStartingInventoryNumber ?? 600)
-    });
-    setTimeClockSettings({
-      payPeriodStartDay: workspace.preferences?.payPeriodStartDay || "thursday",
-      payPeriodLengthDays: String(workspace.preferences?.payPeriodLengthDays ?? 7)
-    });
-    setMetrologyOptions({
-      metrologyToolTypes: workspace.preferences?.metrologyToolTypes || [],
-      metrologyManufacturers: workspace.preferences?.metrologyManufacturers || [],
-      metrologyResolutions: workspace.preferences?.metrologyResolutions || [],
-      metrologyLocations: workspace.preferences?.metrologyLocations || [],
-      metrologyDepartments: workspace.preferences?.metrologyDepartments || [],
-      metrologyStatuses: workspace.preferences?.metrologyStatuses || []
-    });
-    setAiSettings({
-      openaiApiKey: workspace.preferences?.openaiApiKey || ""
-    });
-    const nextDepartments = workspace.preferences?.kanbanDepartments || [];
-    setKanbanDepartments(nextDepartments);
-    setSelectedKanbanDepartmentId((current) => nextDepartments.some((department) => department.id === current) ? current : nextDepartments[0]?.id || null);
-    setKanbanOptions({
-      kanbanVendors: workspace.preferences?.kanbanVendors || [],
-      kanbanCategories: workspace.preferences?.kanbanCategories || []
-    });
-    setNonconformanceOptions({
-      nonconformanceDispositions: workspace.preferences?.nonconformanceDispositions || []
-    });
-    setKanbanPrintSettings({
-      defaultKanbanPrintSizeId: workspace.preferences?.defaultKanbanPrintSizeId || defaultKanbanPrintSizeId(workspace.preferences),
-      kanbanPrintSizes: (workspace.preferences?.kanbanPrintSizes || []).map((item) => ({
-        ...item,
-        widthIn: String(item.widthIn ?? ""),
-        heightIn: String(item.heightIn ?? "")
+  const sourceBrandingSettings = settingsBaseline.brandingSettings;
+  const sourceComplianceSettings = settingsBaseline.complianceSettings;
+  const sourceModuleSettings = settingsBaseline.moduleSettings;
+  const sourceBackupSettings = settingsBaseline.backupSettings;
+  const sourceJobSettings = settingsBaseline.jobSettings;
+  const sourceInspectionReportNumberSettings = settingsBaseline.inspectionReportNumberSettings;
+  const sourceInspectionReportExportSettings = settingsBaseline.inspectionReportExportSettings;
+  const sourceNonconformanceNumberSettings = settingsBaseline.nonconformanceNumberSettings;
+  const sourceKanbanNumberSettings = settingsBaseline.kanbanNumberSettings;
+  const sourceTimeClockSettings = settingsBaseline.timeClockSettings;
+  const sourceMetrologyOptions = settingsBaseline.metrologyOptions;
+  const sourceAiSettings = settingsBaseline.aiSettings;
+  const sourceKanbanDepartments = settingsBaseline.kanbanDepartments;
+  const sourceKanbanOptions = settingsBaseline.kanbanOptions;
+  const sourceNonconformanceOptions = settingsBaseline.nonconformanceOptions;
+  const sourceKanbanPrintSettings = settingsBaseline.kanbanPrintSettings;
+
+  const normalizedSystemPayload = {
+    appTitle: String(brandingSettings.appTitle || "").trim() || "AMERP",
+    appTagline: String(brandingSettings.appTagline || "").trim() || "Operator ERP",
+    windowTitle: String(brandingSettings.windowTitle || "").trim() || "AMERP",
+    appIconPath: String(brandingSettings.appIconPath || "").trim(),
+    iso9001ComplianceEnabled: complianceSettings.iso9001ComplianceEnabled !== false,
+    enabledModules: normalizeEnabledModules(moduleSettings),
+    backupEnabled: backupSettings.backupEnabled === true,
+    backupFolder: String(backupSettings.backupFolder || "").trim(),
+    backupIntervalHours: Math.max(1, Number(backupSettings.backupIntervalHours || 24) || 24),
+    backupRetentionCount: Math.max(1, Number(backupSettings.backupRetentionCount || 10) || 10),
+    openaiApiKey: String(aiSettings.openaiApiKey || "").trim()
+  };
+  const sourceSystemPayload = {
+    appTitle: String(sourceBrandingSettings.appTitle || "").trim() || "AMERP",
+    appTagline: String(sourceBrandingSettings.appTagline || "").trim() || "Operator ERP",
+    windowTitle: String(sourceBrandingSettings.windowTitle || "").trim() || "AMERP",
+    appIconPath: String(sourceBrandingSettings.appIconPath || "").trim(),
+    iso9001ComplianceEnabled: sourceComplianceSettings.iso9001ComplianceEnabled !== false,
+    enabledModules: normalizeEnabledModules(sourceModuleSettings),
+    backupEnabled: sourceBackupSettings.backupEnabled === true,
+    backupFolder: String(sourceBackupSettings.backupFolder || "").trim(),
+    backupIntervalHours: Math.max(1, Number(sourceBackupSettings.backupIntervalHours || 24) || 24),
+    backupRetentionCount: Math.max(1, Number(sourceBackupSettings.backupRetentionCount || 10) || 10),
+    openaiApiKey: String(sourceAiSettings.openaiApiKey || "").trim()
+  };
+  const normalizedJobsPayload = {
+    jobPrefix: String(jobSettings.jobPrefix || "").trim(),
+    startingJobNumber: Number(jobSettings.startingJobNumber || 0) || 1
+  };
+  const sourceJobsPayload = {
+    jobPrefix: String(sourceJobSettings.jobPrefix || "").trim(),
+    startingJobNumber: Number(sourceJobSettings.startingJobNumber || 0) || 1
+  };
+  const normalizedInspectionPayload = {
+    inspectionReportPrefix: String(inspectionReportNumberSettings.inspectionReportPrefix || "").trim(),
+    startingInspectionReportNumber: Number(inspectionReportNumberSettings.startingInspectionReportNumber || 0) || 1,
+    inspectionReportExportOptions: defaultInspectionReportExportOptions(inspectionReportExportSettings)
+  };
+  const sourceInspectionPayload = {
+    inspectionReportPrefix: String(sourceInspectionReportNumberSettings.inspectionReportPrefix || "").trim(),
+    startingInspectionReportNumber: Number(sourceInspectionReportNumberSettings.startingInspectionReportNumber || 0) || 1,
+    inspectionReportExportOptions: defaultInspectionReportExportOptions(sourceInspectionReportExportSettings)
+  };
+  const normalizedNonconformancePayload = {
+    nonconformancePrefix: String(nonconformanceNumberSettings.nonconformancePrefix || "").trim(),
+    startingNonconformanceNumber: Number(nonconformanceNumberSettings.startingNonconformanceNumber || 0) || 1,
+    nonconformanceDispositions: (nonconformanceOptions.nonconformanceDispositions || []).map((value) => String(value || "").trim()).filter(Boolean)
+  };
+  const sourceNonconformancePayload = {
+    nonconformancePrefix: String(sourceNonconformanceNumberSettings.nonconformancePrefix || "").trim(),
+    startingNonconformanceNumber: Number(sourceNonconformanceNumberSettings.startingNonconformanceNumber || 0) || 1,
+    nonconformanceDispositions: (sourceNonconformanceOptions.nonconformanceDispositions || []).map((value) => String(value || "").trim()).filter(Boolean)
+  };
+  const normalizedKanbanPrintSizes = (kanbanPrintSettings.kanbanPrintSizes || [])
+    .map((item) => ({
+      id: item.id,
+      name: String(item.name || "").trim(),
+      widthIn: Number(item.widthIn || 0),
+      heightIn: Number(item.heightIn || 0)
+    }))
+    .filter((item) => item.name && Number.isFinite(item.widthIn) && item.widthIn > 0 && Number.isFinite(item.heightIn) && item.heightIn > 0);
+  const normalizedKanbanDefaultSizeId = normalizedKanbanPrintSizes.some((item) => item.id === kanbanPrintSettings.defaultKanbanPrintSizeId)
+    ? kanbanPrintSettings.defaultKanbanPrintSizeId
+    : (normalizedKanbanPrintSizes[0]?.id || "");
+  const sourceNormalizedKanbanPrintSizes = (sourceKanbanPrintSettings.kanbanPrintSizes || [])
+    .map((item) => ({
+      id: item.id,
+      name: String(item.name || "").trim(),
+      widthIn: Number(item.widthIn || 0),
+      heightIn: Number(item.heightIn || 0)
+    }))
+    .filter((item) => item.name && Number.isFinite(item.widthIn) && item.widthIn > 0 && Number.isFinite(item.heightIn) && item.heightIn > 0);
+  const sourceNormalizedKanbanDefaultSizeId = sourceNormalizedKanbanPrintSizes.some((item) => item.id === sourceKanbanPrintSettings.defaultKanbanPrintSizeId)
+    ? sourceKanbanPrintSettings.defaultKanbanPrintSizeId
+    : (sourceNormalizedKanbanPrintSizes[0]?.id || "");
+  const normalizedKanbanPayload = {
+    kanbanInventoryPrefix: String(kanbanNumberSettings.kanbanInventoryPrefix || "").trim(),
+    kanbanStartingInventoryNumber: Number(kanbanNumberSettings.kanbanStartingInventoryNumber || 0) || 1,
+    kanbanDepartments: (kanbanDepartments || [])
+      .map((item) => ({
+        id: item.id,
+        name: String(item.name || "").trim(),
+        color: String(item.color || "#2563eb").trim() || "#2563eb",
+        locations: (item.locations || []).map((location) => String(location || "").trim()).filter(Boolean)
       }))
-    });
-  }, [workspace.dataFolder]);
+      .filter((item) => item.name),
+    kanbanStorageLocations: [],
+    kanbanVendors: (kanbanOptions.kanbanVendors || []).map((value) => String(value || "").trim()).filter(Boolean),
+    kanbanCategories: (kanbanOptions.kanbanCategories || []).map((value) => String(value || "").trim()).filter(Boolean),
+    kanbanPrintSizes: normalizedKanbanPrintSizes,
+    defaultKanbanPrintSizeId: normalizedKanbanDefaultSizeId
+  };
+  const sourceKanbanPayload = {
+    kanbanInventoryPrefix: String(sourceKanbanNumberSettings.kanbanInventoryPrefix || "").trim(),
+    kanbanStartingInventoryNumber: Number(sourceKanbanNumberSettings.kanbanStartingInventoryNumber || 0) || 1,
+    kanbanDepartments: (sourceKanbanDepartments || [])
+      .map((item) => ({
+        id: item.id,
+        name: String(item.name || "").trim(),
+        color: String(item.color || "#2563eb").trim() || "#2563eb",
+        locations: (item.locations || []).map((location) => String(location || "").trim()).filter(Boolean)
+      }))
+      .filter((item) => item.name),
+    kanbanStorageLocations: [],
+    kanbanVendors: (sourceKanbanOptions.kanbanVendors || []).map((value) => String(value || "").trim()).filter(Boolean),
+    kanbanCategories: (sourceKanbanOptions.kanbanCategories || []).map((value) => String(value || "").trim()).filter(Boolean),
+    kanbanPrintSizes: sourceNormalizedKanbanPrintSizes,
+    defaultKanbanPrintSizeId: sourceNormalizedKanbanDefaultSizeId
+  };
+  const normalizedTimeClockPayload = {
+    payPeriodStartDay: WEEKDAY_OPTIONS.includes(timeClockSettings.payPeriodStartDay) ? timeClockSettings.payPeriodStartDay : "thursday",
+    payPeriodLengthDays: Number(timeClockSettings.payPeriodLengthDays || 0) || 7
+  };
+  const sourceTimeClockPayload = {
+    payPeriodStartDay: WEEKDAY_OPTIONS.includes(sourceTimeClockSettings.payPeriodStartDay) ? sourceTimeClockSettings.payPeriodStartDay : "thursday",
+    payPeriodLengthDays: Number(sourceTimeClockSettings.payPeriodLengthDays || 0) || 7
+  };
+  const normalizedMaterialsPayload = {
+    materialFamilies: (materialFamilies || []).map((family) => ({
+      id: family.id,
+      name: String(family.name || "").trim(),
+      alloys: (family.alloys || []).map((alloy) => String(alloy || "").trim()).filter(Boolean)
+    }))
+  };
+  const sourceMaterialsPayload = {
+    materialFamilies: (settingsBaseline.materialFamilies || []).map((family) => ({
+      id: family.id,
+      name: String(family.name || "").trim(),
+      alloys: (family.alloys || []).map((alloy) => String(alloy || "").trim()).filter(Boolean)
+    }))
+  };
+  const normalizedGagesPayload = Object.fromEntries(
+    Object.entries(metrologyOptions).map(([key, values]) => [key, (values || []).map((value) => String(value || "").trim()).filter(Boolean)])
+  );
+  const sourceGagesPayload = Object.fromEntries(
+    Object.entries(sourceMetrologyOptions).map(([key, values]) => [key, (values || []).map((value) => String(value || "").trim()).filter(Boolean)])
+  );
+
+  const applySettingsSnapshot = (snapshot) => {
+    setMaterialFamilies(snapshot.materialFamilies);
+    setSelectedFamilyId((current) => snapshot.materialFamilies.some((family) => family.id === current) ? current : snapshot.materialFamilies[0]?.id || null);
+    setBrandingSettings(snapshot.brandingSettings);
+    setComplianceSettings(snapshot.complianceSettings);
+    setModuleSettings(snapshot.moduleSettings);
+    setBackupSettings(snapshot.backupSettings);
+    setJobSettings(snapshot.jobSettings);
+    setInspectionReportNumberSettings(snapshot.inspectionReportNumberSettings);
+    setInspectionReportExportSettings(snapshot.inspectionReportExportSettings);
+    setNonconformanceNumberSettings(snapshot.nonconformanceNumberSettings);
+    setKanbanNumberSettings(snapshot.kanbanNumberSettings);
+    setTimeClockSettings(snapshot.timeClockSettings);
+    setMetrologyOptions(snapshot.metrologyOptions);
+    setAiSettings(snapshot.aiSettings);
+    setKanbanDepartments(snapshot.kanbanDepartments);
+    setSelectedKanbanDepartmentId((current) => snapshot.kanbanDepartments.some((department) => department.id === current) ? current : snapshot.kanbanDepartments[0]?.id || null);
+    setKanbanOptions(snapshot.kanbanOptions);
+    setNonconformanceOptions(snapshot.nonconformanceOptions);
+    setKanbanPrintSettings(snapshot.kanbanPrintSettings);
+  };
 
   const selectedFamily = materialFamilies.find((family) => family.id === selectedFamilyId) || null;
   const updateFamily = (familyId, patch) => {
@@ -11301,6 +11736,68 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
       onStatus(error.message || String(error));
     }
   };
+  const backupOptions = () => ({
+    backupFolder: String(backupSettings.backupFolder || "").trim()
+  });
+  const loadBackupList = async () => {
+    if (!api.listBackups) {
+      return;
+    }
+    setBackupBusy(true);
+    try {
+      const result = await api.listBackups(backupOptions());
+      setBackupListState(result || { backupRoot: "", defaultBackupRoot: "", backups: [] });
+    } catch (error) {
+      onStatus(error.message || String(error));
+    } finally {
+      setBackupBusy(false);
+    }
+  };
+  const chooseBackupFolder = async () => {
+    try {
+      const selectedPath = await api.chooseBackupFolder?.();
+      if (!selectedPath) {
+        return;
+      }
+      setBackupSettings((current) => ({ ...current, backupFolder: selectedPath }));
+    } catch (error) {
+      onStatus(error.message || String(error));
+    }
+  };
+  const createManualBackup = async () => {
+    if (!api.createBackup) {
+      return;
+    }
+    setBackupBusy(true);
+    try {
+      const backup = await api.createBackup({ ...backupOptions(), kind: "manual" });
+      onStatus(`Backup created: ${backup.name}.`);
+      const result = await api.listBackups(backupOptions());
+      setBackupListState(result || { backupRoot: "", defaultBackupRoot: "", backups: [] });
+    } catch (error) {
+      onStatus(error.message || String(error));
+    } finally {
+      setBackupBusy(false);
+    }
+  };
+  const restoreSelectedBackup = async () => {
+    if (!restoreBackupTarget || !api.restoreBackup) {
+      return;
+    }
+    setBackupBusy(true);
+    try {
+      const result = await api.restoreBackup(restoreBackupTarget.path);
+      setRestoreBackupTarget(null);
+      onStatus(`Restored backup ${result.restoredFrom?.name || restoreBackupTarget.name}. Safety backup created: ${result.safetyBackup?.name || "pre-restore backup"}.`);
+      await onRefresh(false);
+      const backups = await api.listBackups(backupOptions());
+      setBackupListState(backups || { backupRoot: "", defaultBackupRoot: "", backups: [] });
+    } catch (error) {
+      onStatus(error.message || String(error));
+    } finally {
+      setBackupBusy(false);
+    }
+  };
 
   useEffect(() => {
     if (complianceSettings.iso9001ComplianceEnabled || !["inspections", "nonconformance"].includes(activeSettingsTab)) {
@@ -11309,263 +11806,222 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
     setActiveSettingsTab("system");
   }, [activeSettingsTab, complianceSettings.iso9001ComplianceEnabled]);
 
-  useAutoSave({
-    value: brandingSettings,
-    resetKey: `branding-settings:${workspace.dataFolder}:${workspace.preferences?.appTitle || ""}:${workspace.preferences?.appTagline || ""}:${workspace.preferences?.windowTitle || ""}:${workspace.preferences?.appIconPath || ""}`,
-    enabled: true,
-    isReady: (current) => Boolean(current),
-    save: async (current) => {
-      await onSavePreferences({
-        appTitle: String(current.appTitle || "").trim() || "AMERP",
-        appTagline: String(current.appTagline || "").trim() || "Operator ERP",
-        windowTitle: String(current.windowTitle || "").trim() || "AMERP",
-        appIconPath: String(current.appIconPath || "").trim()
-      }, { silent: true });
-      return current;
+  useEffect(() => {
+    if (activeSettingsTab !== "system") {
+      return;
     }
-  });
+    void loadBackupList();
+  }, [activeSettingsTab, workspace.dataFolder, workspace.preferences?.backupFolder, backupSettings.backupFolder]);
 
-  useAutoSave({
-    value: complianceSettings,
-    resetKey: `compliance-settings:${workspace.dataFolder}:${workspace.preferences?.iso9001ComplianceEnabled !== false}`,
-    enabled: true,
-    isReady: (current) => Boolean(current),
-    save: async (current) => {
-      await onSavePreferences({
-        iso9001ComplianceEnabled: current.iso9001ComplianceEnabled !== false
-      }, { silent: true });
-      return current;
-    }
-  });
+  const systemDirty = snapshotValue(normalizedSystemPayload) !== snapshotValue(sourceSystemPayload);
+  const jobsDirty = snapshotValue(normalizedJobsPayload) !== snapshotValue(sourceJobsPayload);
+  const inspectionsDirty = snapshotValue(normalizedInspectionPayload) !== snapshotValue(sourceInspectionPayload);
+  const nonconformanceDirty = snapshotValue(normalizedNonconformancePayload) !== snapshotValue(sourceNonconformancePayload);
+  const kanbanDirty = snapshotValue(normalizedKanbanPayload) !== snapshotValue(sourceKanbanPayload);
+  const timeClockDirty = snapshotValue(normalizedTimeClockPayload) !== snapshotValue(sourceTimeClockPayload);
+  const materialsDirty = snapshotValue(normalizedMaterialsPayload) !== snapshotValue(sourceMaterialsPayload);
+  const gagesDirty = snapshotValue(normalizedGagesPayload) !== snapshotValue(sourceGagesPayload);
+  const preferencesDraftDirty = systemDirty
+    || jobsDirty
+    || inspectionsDirty
+    || nonconformanceDirty
+    || kanbanDirty
+    || timeClockDirty
+    || materialsDirty
+    || gagesDirty;
+  const activeSettingsDirty = activeSettingsTab === "system"
+    ? systemDirty
+    : activeSettingsTab === "jobs"
+      ? jobsDirty
+      : activeSettingsTab === "inspections"
+        ? inspectionsDirty
+        : activeSettingsTab === "nonconformance"
+          ? nonconformanceDirty
+          : activeSettingsTab === "kanban"
+            ? kanbanDirty
+            : activeSettingsTab === "timeclock"
+              ? timeClockDirty
+              : activeSettingsTab === "materials"
+                ? materialsDirty
+                : activeSettingsTab === "gages"
+                  ? gagesDirty
+                  : activeSettingsTab === "templates"
+                    ? templateDirty || libraryDirty
+                    : false;
 
-  useAutoSave({
-    value: moduleSettings,
-    resetKey: `module-settings:${workspace.dataFolder}:${JSON.stringify(workspace.preferences?.enabledModules || {})}`,
-    enabled: true,
-    isReady: (current) => Boolean(current),
-    save: async (current) => {
-      await onSavePreferences({
-        enabledModules: normalizeEnabledModules(current)
-      }, { silent: true });
-      return current;
+  useEffect(() => {
+    const nextSnapshot = buildSettingsPreferenceSnapshot(workspace.preferences);
+    const nextSnapshotValue = snapshotValue(nextSnapshot);
+    const currentSnapshotValue = snapshotValue(settingsBaseline);
+    const forceSync = lastSettingsDataFolderRef.current !== (workspace.dataFolder || "");
+    if (!forceSync && (preferencesDraftDirty || nextSnapshotValue === currentSnapshotValue)) {
+      return;
     }
-  });
+    applySettingsSnapshot(nextSnapshot);
+    setSettingsBaseline(nextSnapshot);
+    lastSettingsDataFolderRef.current = workspace.dataFolder || "";
+  }, [workspace.dataFolder, workspace.preferences, settingsBaseline, preferencesDraftDirty]);
 
-  useAutoSave({
-    value: materialFamilies,
-    resetKey: `settings:${workspace.dataFolder}:${JSON.stringify(workspace.preferences?.materialFamilies || [])}`,
-    enabled: true,
-    isReady: (current) => Array.isArray(current),
-    save: async (current) => {
-      await onSavePreferences({
-        materialFamilies: current.map((family) => ({
-          id: family.id,
-          name: String(family.name || "").trim(),
-          alloys: (family.alloys || []).map((alloy) => String(alloy || "").trim()).filter(Boolean)
-        }))
-      }, { silent: true });
-      return current;
+  const discardActiveSettingsTab = () => {
+    if (activeSettingsTab === "system") {
+      setBrandingSettings(sourceBrandingSettings);
+      setComplianceSettings(sourceComplianceSettings);
+      setModuleSettings(sourceModuleSettings);
+      setBackupSettings(sourceBackupSettings);
+      setAiSettings(sourceAiSettings);
+      return;
     }
-  });
+    if (activeSettingsTab === "jobs") {
+      setJobSettings(sourceJobSettings);
+      return;
+    }
+    if (activeSettingsTab === "inspections") {
+      setInspectionReportNumberSettings(sourceInspectionReportNumberSettings);
+      setInspectionReportExportSettings(sourceInspectionReportExportSettings);
+      return;
+    }
+    if (activeSettingsTab === "nonconformance") {
+      setNonconformanceNumberSettings(sourceNonconformanceNumberSettings);
+      setNonconformanceOptions(sourceNonconformanceOptions);
+      return;
+    }
+    if (activeSettingsTab === "kanban") {
+      setKanbanNumberSettings(sourceKanbanNumberSettings);
+      setKanbanDepartments(sourceKanbanDepartments);
+      setSelectedKanbanDepartmentId((current) => sourceKanbanDepartments.some((department) => department.id === current) ? current : sourceKanbanDepartments[0]?.id || null);
+      setKanbanOptions(sourceKanbanOptions);
+      setKanbanPrintSettings(sourceKanbanPrintSettings);
+      return;
+    }
+    if (activeSettingsTab === "timeclock") {
+      setTimeClockSettings(sourceTimeClockSettings);
+      return;
+    }
+    if (activeSettingsTab === "materials") {
+      const nextFamilies = sourceMaterialsPayload.materialFamilies;
+      setMaterialFamilies(nextFamilies);
+      setSelectedFamilyId((current) => nextFamilies.some((family) => family.id === current) ? current : nextFamilies[0]?.id || null);
+      return;
+    }
+    if (activeSettingsTab === "gages") {
+      setMetrologyOptions(sourceMetrologyOptions);
+      return;
+    }
+    if (activeSettingsTab === "templates") {
+      libraryActionsRef.current?.discard?.();
+      templateActionsRef.current?.discard?.();
+    }
+  };
 
-  useAutoSave({
-    value: jobSettings,
-    resetKey: `job-settings:${workspace.dataFolder}:${workspace.preferences?.jobPrefix || ""}:${workspace.preferences?.startingJobNumber ?? ""}`,
-    enabled: true,
-    isReady: (current) => Boolean(current) && /^\d+$/.test(String(current.startingJobNumber || "").trim()),
-    save: async (current) => {
-      await onSavePreferences({
-        jobPrefix: String(current.jobPrefix || "").trim(),
-        startingJobNumber: Number(current.startingJobNumber || 0) || 1
-      }, { silent: true });
-      return current;
+  const saveActiveSettingsTab = async () => {
+    try {
+      if (activeSettingsTab === "system") {
+        const patch = diffPreferencePatch(normalizedSystemPayload, sourceSystemPayload);
+        if (Object.keys(patch).length) {
+          const savedPreferences = await onSavePreferences(patch, { silent: true });
+          if (savedPreferences) {
+            const nextSnapshot = buildSettingsPreferenceSnapshot(savedPreferences);
+            applySettingsSnapshot(nextSnapshot);
+            setSettingsBaseline(nextSnapshot);
+          }
+        }
+      } else if (activeSettingsTab === "jobs") {
+        const patch = diffPreferencePatch(normalizedJobsPayload, sourceJobsPayload);
+        if (Object.keys(patch).length) {
+          const savedPreferences = await onSavePreferences(patch, { silent: true });
+          if (savedPreferences) {
+            const nextSnapshot = buildSettingsPreferenceSnapshot(savedPreferences);
+            applySettingsSnapshot(nextSnapshot);
+            setSettingsBaseline(nextSnapshot);
+          }
+        }
+      } else if (activeSettingsTab === "inspections") {
+        const patch = diffPreferencePatch(normalizedInspectionPayload, sourceInspectionPayload);
+        if (Object.keys(patch).length) {
+          const savedPreferences = await onSavePreferences(patch, { silent: true });
+          if (savedPreferences) {
+            const nextSnapshot = buildSettingsPreferenceSnapshot(savedPreferences);
+            applySettingsSnapshot(nextSnapshot);
+            setSettingsBaseline(nextSnapshot);
+          }
+        }
+      } else if (activeSettingsTab === "nonconformance") {
+        const patch = diffPreferencePatch(normalizedNonconformancePayload, sourceNonconformancePayload);
+        if (Object.keys(patch).length) {
+          const savedPreferences = await onSavePreferences(patch, { silent: true });
+          if (savedPreferences) {
+            const nextSnapshot = buildSettingsPreferenceSnapshot(savedPreferences);
+            applySettingsSnapshot(nextSnapshot);
+            setSettingsBaseline(nextSnapshot);
+          }
+        }
+      } else if (activeSettingsTab === "kanban") {
+        const patch = diffPreferencePatch(normalizedKanbanPayload, sourceKanbanPayload);
+        if (Object.keys(patch).length) {
+          const savedPreferences = await onSavePreferences(patch, { silent: true });
+          if (savedPreferences) {
+            const nextSnapshot = buildSettingsPreferenceSnapshot(savedPreferences);
+            applySettingsSnapshot(nextSnapshot);
+            setSettingsBaseline(nextSnapshot);
+          }
+        }
+      } else if (activeSettingsTab === "timeclock") {
+        const patch = diffPreferencePatch(normalizedTimeClockPayload, sourceTimeClockPayload);
+        if (Object.keys(patch).length) {
+          const savedPreferences = await onSavePreferences(patch, { silent: true });
+          if (savedPreferences) {
+            const nextSnapshot = buildSettingsPreferenceSnapshot(savedPreferences);
+            applySettingsSnapshot(nextSnapshot);
+            setSettingsBaseline(nextSnapshot);
+          }
+        }
+      } else if (activeSettingsTab === "materials") {
+        const patch = diffPreferencePatch(normalizedMaterialsPayload, sourceMaterialsPayload);
+        if (Object.keys(patch).length) {
+          const savedPreferences = await onSavePreferences(patch, { silent: true });
+          if (savedPreferences) {
+            const nextSnapshot = buildSettingsPreferenceSnapshot(savedPreferences);
+            applySettingsSnapshot(nextSnapshot);
+            setSettingsBaseline(nextSnapshot);
+          }
+        }
+      } else if (activeSettingsTab === "gages") {
+        const patch = diffPreferencePatch(normalizedGagesPayload, sourceGagesPayload);
+        if (Object.keys(patch).length) {
+          const savedPreferences = await onSavePreferences(patch, { silent: true });
+          if (savedPreferences) {
+            const nextSnapshot = buildSettingsPreferenceSnapshot(savedPreferences);
+            applySettingsSnapshot(nextSnapshot);
+            setSettingsBaseline(nextSnapshot);
+          }
+        }
+      } else if (activeSettingsTab === "templates") {
+        if (libraryDirty) {
+          await libraryActionsRef.current?.save?.();
+        }
+        if (templateDirty) {
+          await templateActionsRef.current?.save?.();
+        }
+      }
+      onStatus("Settings saved.");
+      return true;
+    } catch (error) {
+      onStatus(error.message || String(error));
+      return false;
     }
-  });
+  };
 
-  useAutoSave({
-    value: inspectionReportNumberSettings,
-    resetKey: `inspection-report-number-settings:${workspace.dataFolder}:${workspace.preferences?.inspectionReportPrefix || ""}:${workspace.preferences?.startingInspectionReportNumber ?? ""}`,
-    enabled: true,
-    isReady: (current) => Boolean(current) && /^\d+$/.test(String(current.startingInspectionReportNumber || "").trim()),
-    save: async (current) => {
-      await onSavePreferences({
-        inspectionReportPrefix: String(current.inspectionReportPrefix || "").trim(),
-        startingInspectionReportNumber: Number(current.startingInspectionReportNumber || 0) || 1
-      }, { silent: true });
-      return current;
-    }
-  });
+  useEffect(() => {
+    onDirtyStateChange?.(activeSettingsDirty);
+  }, [activeSettingsDirty, onDirtyStateChange]);
 
-  useAutoSave({
-    value: inspectionReportExportSettings,
-    resetKey: `inspection-report-export-settings:${workspace.dataFolder}:${JSON.stringify(workspace.preferences?.inspectionReportExportOptions || {})}`,
-    enabled: true,
-    isReady: (current) => Boolean(current),
-    save: async (current) => {
-      await onSavePreferences({
-        inspectionReportExportOptions: defaultInspectionReportExportOptions(current)
-      }, { silent: true });
-      return current;
-    }
-  });
-
-  useAutoSave({
-    value: nonconformanceNumberSettings,
-    resetKey: `ncr-number-settings:${workspace.dataFolder}:${workspace.preferences?.nonconformancePrefix || ""}:${workspace.preferences?.startingNonconformanceNumber ?? ""}`,
-    enabled: true,
-    isReady: (current) => Boolean(current) && /^\d+$/.test(String(current.startingNonconformanceNumber || "").trim()),
-    save: async (current) => {
-      await onSavePreferences({
-        nonconformancePrefix: String(current.nonconformancePrefix || "").trim(),
-        startingNonconformanceNumber: Number(current.startingNonconformanceNumber || 0) || 1
-      }, { silent: true });
-      return current;
-    }
-  });
-
-  useAutoSave({
-    value: kanbanNumberSettings,
-    resetKey: `kanban-number-settings:${workspace.dataFolder}:${workspace.preferences?.kanbanInventoryPrefix || ""}:${workspace.preferences?.kanbanStartingInventoryNumber ?? ""}`,
-    enabled: true,
-    isReady: (current) => Boolean(current) && /^\d+$/.test(String(current.kanbanStartingInventoryNumber || "").trim()),
-    save: async (current) => {
-      await onSavePreferences({
-        kanbanInventoryPrefix: String(current.kanbanInventoryPrefix || "").trim(),
-        kanbanStartingInventoryNumber: Number(current.kanbanStartingInventoryNumber || 0) || 1
-      }, { silent: true });
-      return current;
-    }
-  });
-
-  useAutoSave({
-    value: timeClockSettings,
-    resetKey: `time-clock-settings:${workspace.dataFolder}:${workspace.preferences?.payPeriodStartDay || ""}:${workspace.preferences?.payPeriodLengthDays ?? ""}`,
-    enabled: true,
-    isReady: (current) => Boolean(current),
-    save: async (current) => {
-      await onSavePreferences({
-        payPeriodStartDay: WEEKDAY_OPTIONS.includes(current.payPeriodStartDay) ? current.payPeriodStartDay : "thursday",
-        payPeriodLengthDays: Number(current.payPeriodLengthDays || 0) || 7
-      }, { silent: true });
-      return current;
-    }
-  });
-
-  useAutoSave({
-    value: metrologyOptions,
-    resetKey: `metrology-settings:${workspace.dataFolder}:${JSON.stringify({
-      metrologyToolTypes: workspace.preferences?.metrologyToolTypes || [],
-      metrologyManufacturers: workspace.preferences?.metrologyManufacturers || [],
-      metrologyResolutions: workspace.preferences?.metrologyResolutions || [],
-      metrologyLocations: workspace.preferences?.metrologyLocations || [],
-      metrologyDepartments: workspace.preferences?.metrologyDepartments || [],
-      metrologyStatuses: workspace.preferences?.metrologyStatuses || []
-    })}`,
-    enabled: true,
-    isReady: (current) => Boolean(current),
-    save: async (current) => {
-      await onSavePreferences(Object.fromEntries(
-        Object.entries(current).map(([key, values]) => [key, (values || []).map((value) => String(value || "").trim()).filter(Boolean)])
-      ), { silent: true });
-      return current;
-    }
-  });
-
-  useAutoSave({
-    value: aiSettings,
-    resetKey: `ai-settings:${workspace.dataFolder}:${workspace.preferences?.openaiApiKey || ""}`,
-    enabled: true,
-    isReady: (current) => Boolean(current),
-    save: async (current) => {
-      await onSavePreferences({
-        openaiApiKey: String(current.openaiApiKey || "").trim()
-      }, { silent: true });
-      return current;
-    }
-  });
-
-  useAutoSave({
-    value: kanbanDepartments,
-    resetKey: `kanban-departments:${workspace.dataFolder}:${JSON.stringify(workspace.preferences?.kanbanDepartments || [])}`,
-    enabled: true,
-    isReady: (current) => Boolean(current),
-    save: async (current) => {
-      await onSavePreferences({
-        kanbanDepartments: (current || [])
-          .map((item) => ({
-            id: item.id,
-            name: String(item.name || "").trim(),
-            color: String(item.color || "#2563eb").trim() || "#2563eb",
-            locations: (item.locations || []).map((location) => String(location || "").trim()).filter(Boolean)
-          }))
-          .filter((item) => item.name),
-        kanbanStorageLocations: []
-      }, { silent: true });
-      return current;
-    }
-  });
-
-  useAutoSave({
-    value: kanbanOptions,
-    resetKey: `kanban-settings:${workspace.dataFolder}:${JSON.stringify({
-      kanbanVendors: workspace.preferences?.kanbanVendors || [],
-      kanbanCategories: workspace.preferences?.kanbanCategories || []
-    })}`,
-    enabled: true,
-    isReady: (current) => Boolean(current),
-    save: async (current) => {
-      await onSavePreferences(Object.fromEntries(
-        Object.entries(current).map(([key, values]) => [key, (values || []).map((value) => String(value || "").trim()).filter(Boolean)])
-      ), { silent: true });
-      return current;
-    }
-  });
-
-  useAutoSave({
-    value: nonconformanceOptions,
-    resetKey: `ncr-options:${workspace.dataFolder}:${JSON.stringify({
-      nonconformanceDispositions: workspace.preferences?.nonconformanceDispositions || []
-    })}`,
-    enabled: true,
-    isReady: (current) => Boolean(current),
-    save: async (current) => {
-      await onSavePreferences({
-        nonconformanceDispositions: (current.nonconformanceDispositions || []).map((value) => String(value || "").trim()).filter(Boolean)
-      }, { silent: true });
-      return current;
-    }
-  });
-
-  useAutoSave({
-    value: kanbanPrintSettings,
-    resetKey: `kanban-print-settings:${workspace.dataFolder}:${JSON.stringify({
-      kanbanPrintSizes: workspace.preferences?.kanbanPrintSizes || [],
-      defaultKanbanPrintSizeId: workspace.preferences?.defaultKanbanPrintSizeId || ""
-    })}`,
-    enabled: true,
-    isReady: (current) => Boolean(current),
-    save: async (current) => {
-      const sizes = (current.kanbanPrintSizes || [])
-        .map((item) => ({
-          id: item.id,
-          name: String(item.name || "").trim(),
-          widthIn: Number(item.widthIn || 0),
-          heightIn: Number(item.heightIn || 0)
-        }))
-        .filter((item) => item.name && Number.isFinite(item.widthIn) && item.widthIn > 0 && Number.isFinite(item.heightIn) && item.heightIn > 0);
-      const defaultId = sizes.some((item) => item.id === current.defaultKanbanPrintSizeId)
-        ? current.defaultKanbanPrintSizeId
-        : (sizes[0]?.id || "");
-      await onSavePreferences({
-        kanbanPrintSizes: sizes,
-        defaultKanbanPrintSizeId: defaultId
-      }, { silent: true });
-      return {
-        ...current,
-        defaultKanbanPrintSizeId: defaultId
-      };
-    }
-  });
+  useEffect(() => {
+    onRegisterActions?.({
+      save: saveActiveSettingsTab,
+      discard: discardActiveSettingsTab
+    });
+    return () => onRegisterActions?.(null);
+  }, [onRegisterActions, activeSettingsTab, activeSettingsDirty, templateDirty, libraryDirty]);
 
   const metrologySections = [
     ["metrologyToolTypes", "Tool Types"],
@@ -11604,11 +12060,22 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
     return label.endsWith("s") ? label.slice(0, -1) : label;
   };
 
+  const requestSettingsTabChange = (nextTab) => {
+    if (nextTab === activeSettingsTab) {
+      return;
+    }
+    if (!activeSettingsDirty) {
+      setActiveSettingsTab(nextTab);
+      return;
+    }
+    setPendingSettingsTab(nextTab);
+  };
+
   return (
     <div className="workflow-stack settings-stack">
       <div className="settings-tab-row">
         {settingsTabs.map(([id, label]) => (
-          <button key={id} className={activeSettingsTab === id ? "active" : ""} onClick={() => setActiveSettingsTab(id)}>{label}</button>
+          <button key={id} className={activeSettingsTab === id ? "active" : ""} onClick={() => requestSettingsTabChange(id)}>{label}</button>
         ))}
       </div>
 
@@ -11625,6 +12092,77 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
             <strong>Change Data Folder</strong>
             <span>{workspace.dataFolder}</span>
           </button>
+          <div className={`subpanel ${activeSettingsTab === "system" ? "" : "settings-section-hidden"}`}>
+            <div className="subpanel-header">
+              <div>
+                <h4>Backups</h4>
+                <span>Manual restore points and optional automatic snapshots of the data folder.</span>
+              </div>
+              <div className="toolbar">
+                <button onClick={() => void loadBackupList()} disabled={backupBusy}><RotateCcw size={14} /> Refresh</button>
+                <button onClick={() => void createManualBackup()} disabled={backupBusy}><FileDown size={14} /> Backup Now</button>
+              </div>
+            </div>
+            <div className="module-toggle-list">
+              <label className="module-toggle-row">
+                <input
+                  type="checkbox"
+                  checked={backupSettings.backupEnabled === true}
+                  onChange={(event) => setBackupSettings((current) => ({ ...current, backupEnabled: event.target.checked }))}
+                />
+                <span>
+                  <strong>Automatic backups</strong>
+                  <small>When enabled, AMERP creates a background snapshot after the configured interval when the app is open.</small>
+                </span>
+              </label>
+            </div>
+            <div className="form-grid compact-2 top-gap">
+              <TextField
+                label="Backup Folder"
+                value={backupSettings.backupFolder || backupListState.defaultBackupRoot || `${workspace.dataFolder}\\backups`}
+                readOnly
+                onChange={() => {}}
+              />
+              <TextField
+                label="Auto Backup Interval Hours"
+                type="number"
+                value={backupSettings.backupIntervalHours}
+                onChange={(value) => setBackupSettings((current) => ({ ...current, backupIntervalHours: value }))}
+              />
+              <TextField
+                label="Automatic Backups To Keep"
+                type="number"
+                value={backupSettings.backupRetentionCount}
+                onChange={(value) => setBackupSettings((current) => ({ ...current, backupRetentionCount: value }))}
+              />
+            </div>
+            <div className="toolbar top-gap">
+              <button onClick={() => void chooseBackupFolder()}><FolderOpen size={14} /> Choose Folder</button>
+              <button className="subtle" onClick={() => setBackupSettings((current) => ({ ...current, backupFolder: "" }))}>Use Data Folder Default</button>
+            </div>
+            <div className="empty-inline top-gap">
+              Active folder: {backupListState.backupRoot || backupListState.defaultBackupRoot || "Not loaded yet."}
+              {workspace.preferences?.lastAutomaticBackupAt ? ` Last automatic backup: ${formatDateTime(workspace.preferences.lastAutomaticBackupAt)}.` : ""}
+            </div>
+            <div className="document-list top-gap">
+              {(backupListState.backups || []).map((backup) => (
+                <div className="document-card" key={backup.path}>
+                  <div className="document-card-header">
+                    <div>
+                      <strong>{backup.name}</strong>
+                      <span>{backup.kind || "manual"} backup | {formatDateTime(backup.createdAt)}</span>
+                      <small>{backup.path}</small>
+                    </div>
+                    <div className="toolbar">
+                      <button className="danger subtle" onClick={() => setRestoreBackupTarget(backup)} disabled={backupBusy}><ArchiveRestore size={14} /> Restore</button>
+                    </div>
+                  </div>
+                </div>
+              ))}
+              {backupBusy && <div className="empty-inline">Working with backups...</div>}
+              {!backupBusy && !(backupListState.backups || []).length && <div className="empty-inline">No backups found in this folder yet.</div>}
+            </div>
+          </div>
           <div className={`subpanel ${activeSettingsTab === "system" ? "" : "settings-section-hidden"}`}>
             <div className="subpanel-header">
               <div>
@@ -11827,6 +12365,10 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
           workspace={workspace}
           onStatus={onStatus}
           onRefresh={onRefresh}
+          onDirtyChange={setLibraryDirty}
+          onRegisterActions={(actions) => {
+            libraryActionsRef.current = actions || { save: async () => true, discard: () => {} };
+          }}
         />
       </section>
 
@@ -11843,6 +12385,10 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
           setSelectedTemplateId={setSelectedTemplateId}
           onStatus={onStatus}
           onRefresh={onRefresh}
+          onDirtyChange={setTemplateDirty}
+          onRegisterActions={(actions) => {
+            templateActionsRef.current = actions || { save: async () => true, discard: () => {} };
+          }}
         />
       </section>
 
@@ -12120,6 +12666,34 @@ function SettingsView({ onChooseDataFolder, onSavePreferences, workspace, select
           {!workspace.dashboard?.recentAudit?.length && <div className="empty-inline">No recent activity.</div>}
         </div>
       </section>
+      <ConfirmDialog
+        open={Boolean(restoreBackupTarget)}
+        title="Restore Backup"
+        message={`Restore ${restoreBackupTarget?.name || "this backup"}? AMERP will create a safety backup first, then replace the current data folder with the selected backup.`}
+        confirmLabel="Restore Backup"
+        onCancel={() => setRestoreBackupTarget(null)}
+        onConfirm={() => void restoreSelectedBackup()}
+      />
+      <UnsavedChangesDialog
+        open={Boolean(pendingSettingsTab)}
+        message="Save settings changes before switching tabs?"
+        onCancel={() => setPendingSettingsTab("")}
+        onDiscard={() => {
+          discardActiveSettingsTab();
+          const nextTab = pendingSettingsTab;
+          setPendingSettingsTab("");
+          setActiveSettingsTab(nextTab);
+        }}
+        onSave={async () => {
+          const didSave = await saveActiveSettingsTab();
+          if (!didSave) {
+            return;
+          }
+          const nextTab = pendingSettingsTab;
+          setPendingSettingsTab("");
+          setActiveSettingsTab(nextTab);
+        }}
+      />
     </div>
   );
 }
@@ -13710,6 +14284,25 @@ function ConfirmDialog({ open, title, message, confirmLabel = "Confirm", onCance
   );
 }
 
+function UnsavedChangesDialog({ open, title = "Unsaved Changes", message, onSave, onDiscard, onCancel, saving = false }) {
+  if (!open) return null;
+  return (
+    <div className="dialog-backdrop">
+      <div className="dialog-panel narrow">
+        <div className="panel-heading">
+          <h3>{title}</h3>
+        </div>
+        <p>{message}</p>
+        <div className="dialog-actions">
+          <button onClick={onCancel} disabled={saving}>Keep Editing</button>
+          <button className="subtle" onClick={onDiscard} disabled={saving}>Discard Changes</button>
+          <button onClick={onSave} disabled={saving}><Save size={14} /> Save</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function KanbanPrintDialog({
   open,
   title = "Kanban Card Size",
@@ -13782,6 +14375,7 @@ function InspectionExportDialog({ open, options, onChange, onCancel, onConfirm }
 
 function SaveStatePill({ state }) {
   const labels = {
+    dirty: "Unsaved",
     saving: "Saving...",
     saved: "Saved",
     error: "Save error"

@@ -7,6 +7,11 @@ contextBridge.exposeInMainWorld("amerp", {
   getDataFolder: () => invoke("get-data-folder"),
   loadWorkspace: () => invoke("load-workspace"),
   chooseBrandIcon: () => invoke("choose-brand-icon"),
+  chooseBackupFolder: () => invoke("choose-backup-folder"),
+  listBackups: (options) => invoke("list-backups", options),
+  createBackup: (options) => invoke("create-backup", options),
+  restoreBackup: (backupPath) => invoke("restore-backup", backupPath),
+  runAutomaticBackupIfDue: (options) => invoke("run-automatic-backup-if-due", options),
   savePreferences: (preferences) => invoke("save-preferences", preferences),
   onDeepLink: (handler) => {
     if (typeof handler !== "function") {
@@ -28,6 +33,7 @@ contextBridge.exposeInMainWorld("amerp", {
   listTimeClockSessions: (filters) => invoke("list-time-clock-sessions", filters),
   correctTimeClockSession: (sessionId, patch, reason) => invoke("correct-time-clock-session", sessionId, patch, reason),
   markTimeClockSessionsPaid: (sessionIds, paid) => invoke("mark-time-clock-sessions-paid", sessionIds, paid),
+  deleteTimeClockSession: (sessionId, reason) => invoke("delete-time-clock-session", sessionId, reason),
   getTimeClockDashboard: (filters) => invoke("get-time-clock-dashboard", filters),
   listNonconformances: (filters) => invoke("list-nonconformances", filters),
   loadNonconformance: (id, options) => invoke("load-nonconformance", id, options),

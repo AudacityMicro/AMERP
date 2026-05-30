@@ -251,6 +251,10 @@ function requireBoolean(value, label = "value") {
 
 const IPC_ARG_RULES = {
   "save-preferences": [requireRecord],
+  "create-backup": [requireOptionalObject],
+  "list-backups": [requireOptionalObject],
+  "restore-backup": [requireOptionalPath],
+  "run-automatic-backup-if-due": [requireOptionalObject],
   "list-employees": [requireOptionalObject],
   "load-employee": [requireId],
   "save-employee": [requireRecord],
@@ -261,6 +265,7 @@ const IPC_ARG_RULES = {
   "list-time-clock-sessions": [requireOptionalObject],
   "correct-time-clock-session": [requireId, requireRecord, (value) => requireText(value, "correction reason", { maxLength: 1000 })],
   "mark-time-clock-sessions-paid": [requireIdArray, requireBoolean],
+  "delete-time-clock-session": [requireId, (value) => requireText(value, "delete reason", { maxLength: 1000 })],
   "get-time-clock-dashboard": [requireOptionalObject],
   "list-nonconformances": [requireOptionalObject],
   "load-nonconformance": [requireId, requireOptionalObject],
@@ -711,6 +716,11 @@ app.whenReady().then(async () => {
   registerIpc("get-data-folder", () => backend.getDataFolder());
   registerIpc("load-workspace", () => backend.loadWorkspace());
   registerIpc("choose-brand-icon", () => backend.chooseBrandIcon(mainWindow));
+  registerIpc("choose-backup-folder", () => backend.chooseBackupFolder(mainWindow));
+  registerIpc("list-backups", (_event, options) => backend.listBackups(options || {}));
+  registerIpc("create-backup", (_event, options) => backend.createBackup(options || {}));
+  registerIpc("restore-backup", (_event, backupPath) => backend.restoreBackup(backupPath));
+  registerIpc("run-automatic-backup-if-due", (_event, options) => backend.runAutomaticBackupIfDue(options || {}));
   registerIpc("save-preferences", async (_event, preferences) => {
     const saved = await backend.savePreferences(preferences);
     if (mainWindow && !mainWindow.isDestroyed()) {
@@ -738,6 +748,7 @@ app.whenReady().then(async () => {
   registerIpc("list-time-clock-sessions", (_event, filters) => backend.listTimeClockSessions(filters || {}));
   registerIpc("correct-time-clock-session", (_event, sessionId, patch, reason) => backend.correctTimeClockSession(sessionId, patch || {}, reason));
   registerIpc("mark-time-clock-sessions-paid", (_event, sessionIds, paid) => backend.markTimeClockSessionsPaid(sessionIds, paid));
+  registerIpc("delete-time-clock-session", (_event, sessionId, reason) => backend.deleteTimeClockSession(sessionId, reason));
   registerIpc("get-time-clock-dashboard", (_event, filters) => backend.getTimeClockDashboard(filters || {}));
   registerIpc("list-nonconformances", (_event, filters) => backend.listNonconformances(filters || {}));
   registerIpc("load-nonconformance", (_event, id, options) => backend.loadNonconformance(id, options || {}));

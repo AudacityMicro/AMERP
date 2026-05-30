@@ -173,3 +173,34 @@ test("paid marking supports bulk changes and archived employees stay visible in 
     assert.equal(dashboard.groups[0].totalMinutes, 60);
   });
 });
+
+test("deleting a time clock punch hides it from totals while preserving an audited record", async () => {
+  await withBackend(async ({ backend, dataRoot }) => {
+    const employee = await backend.saveEmployee({ name: "Taylor" });
+    const open = await backend.clockInEmployee(employee.id, { clockInAt: "2026-05-21T12:00:00.000Z" });
+    await backend.clockOutEmployee(employee.id, { clockOutAt: "2026-05-21T13:00:00.000Z" });
+
+    await assert.rejects(
+      () => backend.deleteTimeClockSession(open.id, " "),
+      /delete reason is required/i
+    );
+
+    const deleted = await backend.deleteTimeClockSession(open.id, "Duplicate accidental punch.");
+    assert.ok(deleted.deletedAt);
+    assert.equal(deleted.deleteReason, "Duplicate accidental punch.");
+
+    const visibleSessions = await backend.listTimeClockSessions();
+    assert.equal(visibleSessions.some((session) => session.id === open.id), false);
+
+    const allSessions = await backend.listTimeClockSessions({ includeDeleted: true });
+    assert.equal(allSessions.find((session) => session.id === open.id)?.deletedAt, deleted.deletedAt);
+
+    const dashboard = await backend.getTimeClockDashboard({ periodStartDate: "2026-05-21" });
+    assert.equal(dashboard.totals.sessionCount, 0);
+    assert.equal(dashboard.totals.totalMinutes, 0);
+
+    const events = await readEvents(dataRoot);
+    assert.equal(events.at(-1).eventType, "session_deleted");
+    assert.equal(events.at(-1).reason, "Duplicate accidental punch.");
+  });
+});
