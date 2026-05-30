@@ -2155,7 +2155,8 @@ function Workspace() {
 
   const confirmLeaveIfDirty = async (action) => {
     if (!currentMainEditorIsDirty()) {
-      return action();
+      await action();
+      return true;
     }
     return new Promise((resolve) => {
       pendingNavigationActionRef.current = async (choice) => {
