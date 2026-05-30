@@ -192,7 +192,7 @@ jobs:
             release/*.blockmap
 
   build-linux:
-    name: Linux AppImage, DEB, and tarball
+    name: Linux AppImage and DEB
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
@@ -274,12 +274,12 @@ jobs:
 
       - name: Smoke test Linux packaged app
         run: |
-          artifact="$(find release -maxdepth 1 -name '*.tar.gz' -print -quit)"
+          artifact="$(find release -maxdepth 1 -name '*.AppImage' -print -quit)"
           if [ -z "$artifact" ]; then
-            artifact="$(find release -maxdepth 1 -name '*.AppImage' -print -quit)"
+            artifact="$(find release -maxdepth 1 -name '*.deb' -print -quit)"
           fi
           if [ -z "$artifact" ]; then
-            echo "No Linux tar.gz or AppImage artifact was produced under release/." >&2
+            echo "No Linux AppImage or DEB artifact was produced under release/." >&2
             exit 1
           fi
           npm run smoke:install:packaged:linux -- --artifact "$artifact"
@@ -291,7 +291,6 @@ jobs:
           path: |
             release/*.AppImage
             release/*.deb
-            release/*.tar.gz
             release/*.blockmap
             release/latest-linux.yml
 

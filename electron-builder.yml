@@ -68,10 +68,9 @@ linux:
     - target: deb
       arch:
         - x64
-    - target: tar.gz
-      arch:
-        - x64
   artifactName: AMERP-${version}-${os}-${arch}.${ext}
   category: Office
   maintainer: Audacity Micro
   synopsis: Local-first ERP for jobshops
+  executableArgs:
+    - --disable-setuid-sandbox

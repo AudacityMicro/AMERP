@@ -34,7 +34,7 @@ Packaged installers are produced by GitHub Actions from `.github/workflows/relea
 
 - Windows builds an unsigned NSIS one-click installer.
 - macOS builds separate ad-hoc-signed, unnotarized x64 and arm64 DMG and ZIP artifacts.
-- Linux builds unsigned AppImage, DEB, and tar.gz artifacts.
+- Linux builds unsigned AppImage and DEB artifacts.
 - Release jobs attach artifacts and update metadata to a draft GitHub Release.
 - Draft releases must be reviewed and manually published.
 - No app update check runs automatically on startup.
@@ -80,7 +80,7 @@ Preferred Windows entry points:
 - `Build-App.cmd` rebuilds the renderer bundle.
 - `scripts/windows-install-smoke.ps1` automates clean-Windows source and packaged installer smoke tests using isolated data/user-data folders.
 - `scripts/macos-install-smoke.sh` automates macOS DMG/ZIP packaged app smoke tests using isolated data/user-data folders.
-- `scripts/linux-install-smoke.sh` automates Linux AppImage/DEB/tar.gz packaged app smoke tests using isolated data/user-data folders.
+- `scripts/linux-install-smoke.sh` automates Linux AppImage/DEB packaged app smoke tests using isolated data/user-data folders.
 
 Package scripts are also available:
 
@@ -224,7 +224,7 @@ npm run smoke:install:packaged:mac -- --artifact ./release/AMERP-...-mac-x64.zip
 On Linux, after building Linux artifacts:
 
 ```bash
-npm run smoke:install:packaged:linux -- --artifact ./release/AMERP-...-linux-x64.tar.gz
+npm run smoke:install:packaged:linux -- --artifact ./release/AMERP-...-linux-x86_64.AppImage
 ```
 
 `node_modules/` and `dist/` are intentionally ignored by git. A receiving Windows computer should run `Install-AMERP.cmd` for a full source install or `Setup-AMERP.cmd` if the repository is already in its final folder. Linux and macOS users should install from packaged release artifacts, or run the cross-platform package scripts from a source checkout.

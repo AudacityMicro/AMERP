@@ -131,7 +131,8 @@ launch_app() {
     "AMERP_SMOKE_TEST_EXIT_AFTER_MS=$auto_exit_ms"
     "APPIMAGE_EXTRACT_AND_RUN=1"
     "NO_AT_BRIDGE=1"
-    "$executable")
+    "$executable"
+    "--disable-setuid-sandbox")
 
   if [[ -z "${DISPLAY:-}" ]] && command -v xvfb-run >/dev/null 2>&1; then
     run_with_timeout xvfb-run "$launch_timeout_sec" -a "${command[@]}"
