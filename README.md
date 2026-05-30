@@ -45,7 +45,7 @@ In an installed packaged build, use `Help -> Check for Updates...` to voluntaril
 
 Before sharing a public beta:
 
-1. Run `npm.cmd run release:check`.
+1. Run `npm run release:check`.
 2. Confirm Trivy completes with zero vulnerabilities for `pnpm-lock.yaml`.
 3. Confirm the production build completes and only the known Vite chunk-size warning remains.
 4. Install from a fresh GitHub ZIP with `Install-AMERP.cmd` on a clean Windows machine.
@@ -55,11 +55,17 @@ Before sharing a public beta:
 7. Reopen AMERP and confirm the data persists.
 8. Do not publish a GitHub release, tag, or package until the release audit says the branch is ready.
 
-For development:
+For development on any OS:
 
-1. Run `Setup-AMERP.cmd` once.
-2. Run `Start-Dev.cmd` for the Vite + Electron development app.
-3. Run `Build-App.cmd` before sending a build to another computer.
+1. Run `pnpm install --frozen-lockfile` or `npm install`.
+2. Run `npm run dev` for the Vite + Electron development app.
+3. Run `npm run build` before sending a source build to another computer.
+
+Windows convenience wrappers remain available:
+
+- `Setup-AMERP.cmd`
+- `Start-Dev.cmd`
+- `Build-App.cmd`
 
 The app prompts for an AMERP data folder on first use. Keep that folder backed up; it contains the real ERP records.
 
@@ -80,6 +86,9 @@ Package scripts are also available:
 
 - `npm start`
 - `npm run dev`
+- `npm run check:syntax`
+- `npm run check:python`
+- `npm test`
 - `npm run build`
 - `npm run pack`
 - `npm run dist:win`
@@ -179,24 +188,29 @@ Core ERP records do not depend on cloud services.
 
 Before sharing a build, run:
 
-```powershell
-npm.cmd run release:check
+```bash
+npm run release:check
 ```
 
 Before publishing a packaged beta, also confirm the GitHub Actions draft release completes on Windows, macOS, and Linux, then manually inspect the draft release assets before publishing.
 
 For faster local iteration, the release check is split into:
 
+```bash
+npm run check:syntax
+npm run check:python
+npm test
+npm run audit:deps
+npm run secret:scan
+npm run build
+```
+
+Windows-only installer smoke checks:
+
 ```powershell
-npm.cmd run check:syntax
-npm.cmd run check:python
-npm.cmd test
-npm.cmd run audit:deps
-npm.cmd run secret:scan
-npm.cmd run build
-npm.cmd run smoke:install:source:win
+npm run smoke:install:source:win
 # or after building a Windows installer:
-npm.cmd run smoke:install:packaged:win -- -InstallerPath .\release\AMERP-...-Setup.exe
+npm run smoke:install:packaged:win -- -InstallerPath .\release\AMERP-...-Setup.exe
 ```
 
 On macOS, after building macOS artifacts:
@@ -211,7 +225,7 @@ On Linux, after building Linux artifacts:
 npm run smoke:install:packaged:linux -- --artifact ./release/AMERP-...-linux-x64.tar.gz
 ```
 
-`node_modules/` and `dist/` are intentionally ignored by git. A receiving computer should run `Install-AMERP.cmd` for a full install or `Setup-AMERP.cmd` if the repository is already in its final folder.
+`node_modules/` and `dist/` are intentionally ignored by git. A receiving Windows computer should run `Install-AMERP.cmd` for a full source install or `Setup-AMERP.cmd` if the repository is already in its final folder. Linux and macOS users should install from packaged release artifacts, or run the cross-platform package scripts from a source checkout.
 
 ## Troubleshooting
 
