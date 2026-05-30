@@ -44,10 +44,12 @@ user_data_dir="$temp_root/user-data"
 mounted_dmg=""
 
 cleanup() {
+  set +e
   if [[ -n "$mounted_dmg" ]]; then
-    hdiutil detach "$mounted_dmg" -quiet || true
+    hdiutil detach "$mounted_dmg" -quiet || hdiutil detach "$mounted_dmg" -force -quiet || true
+    mounted_dmg=""
   fi
-  rm -rf "$temp_root"
+  rm -rf "$temp_root" || true
 }
 trap cleanup EXIT
 

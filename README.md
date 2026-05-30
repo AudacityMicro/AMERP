@@ -217,6 +217,8 @@ On macOS, after building macOS artifacts:
 
 ```bash
 npm run smoke:install:packaged:mac -- --artifact ./release/AMERP-...-mac-arm64.dmg
+# or for Intel Macs:
+npm run smoke:install:packaged:mac -- --artifact ./release/AMERP-...-mac-x64.dmg
 ```
 
 On Linux, after building Linux artifacts:
