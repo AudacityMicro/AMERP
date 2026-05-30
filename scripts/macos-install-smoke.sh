@@ -65,7 +65,7 @@ cleanup() {
 trap cleanup EXIT
 
 write_step() {
-  printf '\n==> %s\n' "$1"
+  printf '\n==> %s\n' "$1" >&2
 }
 
 assert_path_exists() {
