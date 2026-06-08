@@ -197,7 +197,7 @@ function parseSubtractHeader(lines) {
     return {};
   }
   const valueLine = normalizeText(lines[index + 1]);
-  const match = valueLine.match(/^(?<purchase_order>\S+)\s+(?<issue_date>[A-Za-z]+ \d{1,2}, \d{4})\s+(?<ship_date>[A-Za-z]+ \d{1,2}, \d{4})$/);
+  const match = valueLine.match(/^(?<purchase_order>\S+)\s+(?<issue_date>[A-Za-z]+ \d{1,2}, \d{4}|\d{1,2}\/\d{1,2}\/\d{4}|TBD)\s+(?<ship_date>.+)$/i);
   return match?.groups ? {
     purchase_order: normalizeText(match.groups.purchase_order),
     issue_date: normalizeText(match.groups.issue_date),
@@ -739,6 +739,41 @@ function parseSubtractPartRows(rowLines) {
   return { parts, warnings };
 }
 
+function collectSubtractPartRowLines(lines, partsIndex) {
+  const rowLines = [];
+  let skippingNote = false;
+  for (const line of lines.slice(partsIndex + 1)) {
+    if (line === "PART NAME QTY MATERIAL TOLERANCE FINISHING PRINT?") {
+      continue;
+    }
+    if (line.startsWith("TOTAL AMOUNT")) {
+      break;
+    }
+    if (line.startsWith("NOTES:")) {
+      skippingNote = true;
+      continue;
+    }
+    const isPartRow = parseSubtractPartRow(line) || parseSubtractPartCoreRow(line);
+    if (skippingNote && !isPartRow) {
+      continue;
+    }
+    skippingNote = false;
+    rowLines.push(line);
+  }
+  return rowLines;
+}
+
+function collectSubtractNotes(lines) {
+  const notes = [];
+  for (const line of lines) {
+    const match = normalizeText(line).match(/^NOTES:\s*(?<note>.+)$/i);
+    if (match?.groups?.note) {
+      notes.push(normalizeText(match.groups.note));
+    }
+  }
+  return Array.from(new Set(notes)).join(" ");
+}
+
 async function parseSubtractPurchaseOrder(filePath) {
   const result = {
     source_path: String(filePath),
@@ -805,7 +840,7 @@ async function parseSubtractPurchaseOrder(filePath) {
   }
 
   const notesMatch = rawText.match(/NOTES:\s*(?<notes>.*?)(?:TOTAL AMOUNT\s+\$?(?<amount>[\d,]+(?:\.\d{2})?))/is);
-  result.notes = normalizeText(notesMatch?.groups?.notes);
+  result.notes = collectSubtractNotes(lines) || normalizeText(notesMatch?.groups?.notes);
   result.total_amount = normalizeText(notesMatch?.groups?.amount);
   if (!result.total_amount) {
     const amountMatch = joined.match(/TOTAL AMOUNT\s+\$?(?<amount>[\d,]+(?:\.\d{2})?)/i);
@@ -817,16 +852,7 @@ async function parseSubtractPurchaseOrder(filePath) {
     result.error = "Unable to locate PARTS SPECIFICATION.";
     return result;
   }
-  const rowLines = [];
-  for (const line of lines.slice(partsIndex + 1)) {
-    if (line === "PART NAME QTY MATERIAL TOLERANCE FINISHING PRINT?") {
-      continue;
-    }
-    if (line.startsWith("NOTES:") || line.startsWith("TOTAL AMOUNT")) {
-      break;
-    }
-    rowLines.push(line);
-  }
+  const rowLines = collectSubtractPartRowLines(lines, partsIndex);
   const parsedRows = parseSubtractPartRows(rowLines);
   result.parts.push(...parsedRows.parts);
   result.warnings.push(...parsedRows.warnings);
@@ -854,5 +880,8 @@ module.exports = {
   parseXometryTravelers,
   parseXometryPurchaseOrders,
   parseSubtractPurchaseOrders,
+  parseSubtractHeader,
+  collectSubtractPartRowLines,
+  collectSubtractNotes,
   parseSubtractPartRows
 };

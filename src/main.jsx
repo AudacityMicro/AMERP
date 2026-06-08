@@ -6,6 +6,7 @@ import pdfWorkerUrl from "pdfjs-dist/legacy/build/pdf.worker.min.mjs?url";
 import {
   Archive,
   ArchiveRestore,
+  BookOpen,
   ClipboardList,
   Clock,
   Database,
@@ -21,24 +22,32 @@ import {
   Save,
   Settings,
   ShieldAlert,
-  SearchCheck,
   Trash2,
+  Truck,
+  Users,
+  Wrench,
   X
 } from "lucide-react";
 import "./styles.css";
 
 const api = window.amerp;
 GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
+const PDFJS_WASM_URL = new URL("./", window.location.href.split("#")[0]).href;
+const loadPdfDocument = (source) => getDocument(typeof source === "string"
+  ? { url: source, wasmUrl: PDFJS_WASM_URL }
+  : { ...(source || {}), wasmUrl: PDFJS_WASM_URL });
 
 const PRIMARY_MODULES = [
-  { id: "jobs", label: "Jobs", icon: Package },
-  { id: "timeclock", label: "Time Clock", icon: Clock },
-  { id: "timeclockAdmin", label: "Time Admin", icon: ClipboardList },
-  { id: "inspections", label: "Inspections", icon: SearchCheck },
-  { id: "nonconformance", label: "Nonconformance", icon: ShieldAlert },
-  { id: "kanban", label: "Kanban", icon: ClipboardList },
-  { id: "materials", label: "Materials", icon: Database },
-  { id: "metrology", label: "Gages", icon: Gauge }
+  { id: "jobs", label: "Jobs", icon: Package, description: "Job, part, operation, and traveler workflows." },
+  { id: "timeclock", label: "Time Clock", icon: Clock, description: "Employee clock-in and clock-out." },
+  { id: "processDocs", label: "Process Docs", icon: BookOpen, description: "Internal process documentation, QMS, and controlled procedures." },
+  { id: "customerManagement", label: "Customers", icon: Users, description: "Customer management workspace." },
+  { id: "vendorManagement", label: "Vendors", icon: Truck, description: "Vendor and supplier management workspace." },
+  { id: "maintenance", label: "Maintenance", icon: Wrench, description: "Equipment maintenance records, schedules, and service history." },
+  { id: "nonconformance", label: "Nonconformance", icon: ShieldAlert, description: "Part-linked NCR workflows." },
+  { id: "kanban", label: "Kanban", icon: ClipboardList, description: "Purchasing cards for replenishment and reorder points." },
+  { id: "materials", label: "Materials", icon: Database, description: "Traceable material records and certs." },
+  { id: "metrology", label: "Gages", icon: Gauge, description: "Gage records and calibration tracking." }
 ];
 const ISO9001_MODULE_IDS = new Set(["inspections", "nonconformance"]);
 const iso9001ComplianceEnabled = (preferences = {}) => preferences?.iso9001ComplianceEnabled !== false;
@@ -74,6 +83,32 @@ const defaultInspectionReportExportOptions = (value = {}) => Object.fromEntries(
   key,
   Object.prototype.hasOwnProperty.call(value || {}, key) ? Boolean(value[key]) : true
 ]));
+const DEFAULT_INSPECTION_AI_ASSUMED_GENERAL_TOLERANCE_RULES = [
+  { decimalPlaces: 0, tolerance: "0.030" },
+  { decimalPlaces: 1, tolerance: "0.010" },
+  { decimalPlaces: 2, tolerance: "0.005" },
+  { decimalPlaces: 3, tolerance: "0.001" },
+  { decimalPlaces: 4, tolerance: "0.0005" }
+];
+const normalizeInspectionAiAssumedGeneralTolerances = (value = {}) => {
+  const source = value && typeof value === "object" ? value : {};
+  const suppliedRules = Array.isArray(source.rules)
+    ? source.rules
+    : (Array.isArray(source) ? source : DEFAULT_INSPECTION_AI_ASSUMED_GENERAL_TOLERANCE_RULES);
+  const rulesByDecimals = new Map(DEFAULT_INSPECTION_AI_ASSUMED_GENERAL_TOLERANCE_RULES.map((rule) => [rule.decimalPlaces, { ...rule }]));
+  for (const rule of suppliedRules) {
+    const decimalPlaces = Math.max(0, Math.floor(Number(rule?.decimalPlaces)));
+    const tolerance = String(rule?.tolerance || "").trim();
+    if (!Number.isFinite(decimalPlaces) || !tolerance) {
+      continue;
+    }
+    rulesByDecimals.set(decimalPlaces, { decimalPlaces, tolerance });
+  }
+  return {
+    enabled: source.enabled === true,
+    rules: Array.from(rulesByDecimals.values()).sort((left, right) => left.decimalPlaces - right.decimalPlaces)
+  };
+};
 
 const nowIso = () => new Date().toISOString();
 const today = () => new Date().toISOString().slice(0, 10);
@@ -872,6 +907,7 @@ function buildSettingsPreferenceSnapshot(preferences = {}) {
       startingInspectionReportNumber: String(preferences?.startingInspectionReportNumber ?? 1)
     },
     inspectionReportExportSettings: defaultInspectionReportExportOptions(preferences?.inspectionReportExportOptions),
+    inspectionAiToleranceSettings: normalizeInspectionAiAssumedGeneralTolerances(preferences?.inspectionAiAssumedGeneralTolerances),
     nonconformanceNumberSettings: {
       nonconformancePrefix: preferences?.nonconformancePrefix || "NCR",
       startingNonconformanceNumber: String(preferences?.startingNonconformanceNumber ?? 1)
@@ -1023,6 +1059,115 @@ function snapshotValue(value) {
 
 function cloneSnapshot(value) {
   return value == null ? value : JSON.parse(JSON.stringify(value));
+}
+
+const PART_PHOTO_FILE_TYPES = new Set(["PNG", "JPG", "JPEG", "WEBP", "GIF", "BMP", "TIF", "TIFF", "HEIC", "HEIF"]);
+const PART_DRAWING_FILE_TYPES = new Set(["PDF", "DWG", "DXF", "STEP", "STP", "IGS", "IGES"]);
+
+function normalizedDocumentCategory(document) {
+  return String(document?.category || "").trim().toLowerCase();
+}
+
+function normalizedDocumentFileType(document) {
+  const explicit = String(document?.fileType || "").trim().toUpperCase();
+  if (explicit) {
+    return explicit;
+  }
+  const filename = String(document?.storedFilename || document?.originalFilename || "").trim();
+  const extension = filename.includes(".") ? filename.split(".").pop() : "";
+  return extension.toUpperCase();
+}
+
+function isPartPhotoDocument(document) {
+  const category = normalizedDocumentCategory(document);
+  if (category === "drawing") {
+    return false;
+  }
+  return category === "photo" || category === "photos" || PART_PHOTO_FILE_TYPES.has(normalizedDocumentFileType(document));
+}
+
+function isPartDrawingDocument(document) {
+  const category = normalizedDocumentCategory(document);
+  const description = String(document?.description || "").toLowerCase();
+  if (category === "drawing" || description.includes("drawing")) {
+    return true;
+  }
+  return category === "other" && PART_DRAWING_FILE_TYPES.has(normalizedDocumentFileType(document));
+}
+
+function partDocumentBuckets(documents = []) {
+  const drawings = [];
+  const photos = [];
+  const attachments = [];
+  for (const document of documents || []) {
+    if (isPartDrawingDocument(document)) {
+      drawings.push(document);
+    } else if (isPartPhotoDocument(document)) {
+      photos.push(document);
+    } else {
+      attachments.push(document);
+    }
+  }
+  return { drawings, photos, attachments };
+}
+
+function editorLockKey(kind, id) {
+  return `${kind || ""}:${id || ""}`;
+}
+
+function isExistingLockedRecord(record) {
+  return Boolean(record?._lockBaseRevision);
+}
+
+function lockOwnerLabel(owner) {
+  if (!owner) {
+    return "another AMERP session";
+  }
+  return [
+    owner.username || owner.user || "",
+    owner.hostname || owner.computer || ""
+  ].filter(Boolean).join(" on ") || "another AMERP session";
+}
+
+function lockStateMessage(lockState) {
+  if (!lockState || lockState.status === "unlocked") {
+    return "Unlocked";
+  }
+  if (lockState.status === "locked") {
+    return `May be in use by ${lockOwnerLabel(lockState.owner)}`;
+  }
+  if (lockState.status === "owned") {
+    return "Editing lock held";
+  }
+  if (lockState.status === "acquiring") {
+    return "Getting edit lock...";
+  }
+  if (lockState.status === "stale") {
+    return "Lock stale";
+  }
+  if (lockState.status === "conflict") {
+    return "Revision conflict";
+  }
+  if (lockState.status === "lost") {
+    return "Lock lost";
+  }
+  if (lockState.status === "blocked") {
+    return `Locked by ${lockOwnerLabel(lockState.owner)}`;
+  }
+  return "View only";
+}
+
+function lockWarningMessage(lockState) {
+  if (!lockState) {
+    return "";
+  }
+  if (lockState.status === "locked" || lockState.status === "blocked") {
+    return `This item may be in use by ${lockOwnerLabel(lockState.owner)}. Saves are not blocked, but coordinate before overwriting shared work.`;
+  }
+  if (lockState.status === "stale") {
+    return `This item has an old in-use marker from ${lockOwnerLabel(lockState.owner)}. Saves are not blocked.`;
+  }
+  return "";
 }
 
 function materialLabelPhotoSrc(material) {
@@ -1220,6 +1365,25 @@ function normalizeInspectionPayload(inspection) {
       notes: ""
     };
   };
+  const normalizeProposedBalloon = (item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      return null;
+    }
+    const pageNumber = Math.max(1, Number(item.pageNumber || 1) || 1);
+    const coordinate = (value) => {
+      const numeric = Number(value);
+      return Number.isFinite(numeric) ? Math.max(0, Math.min(1, numeric)) : 0.5;
+    };
+    return {
+      pageNumber,
+      x: coordinate(item.x),
+      y: coordinate(item.y),
+      sourceDrawingDocumentId: String(item.sourceDrawingDocumentId || "").trim(),
+      labelText: String(item.labelText || "").trim(),
+      confidence: String(item.confidence || "").trim(),
+      placementSource: String(item.placementSource || "ai").trim()
+    };
+  };
   const normalizeCharacteristic = (item, index) => ({
     ...blankInspectionCharacteristic(String(item?.number || index + 1)),
     ...item,
@@ -1237,7 +1401,8 @@ function normalizeInspectionPayload(inspection) {
     inspectionMethod: String(item?.inspectionMethod || "").trim(),
     calibrationDueDate: String(item?.calibrationDueDate || "").trim(),
     notes: String(item?.notes || "").trim(),
-    criticalCharacteristic: item?.criticalCharacteristic === true || String(item?.criticalCharacteristic || "").trim() === "Yes"
+    criticalCharacteristic: item?.criticalCharacteristic === true || String(item?.criticalCharacteristic || "").trim() === "Yes",
+    proposedBalloon: normalizeProposedBalloon(item?.proposedBalloon)
   });
   const normalizeInstance = (item, index) => ({
     ...blankInspectionInstance(index + 1, item?.inspector || ""),
@@ -1615,7 +1780,7 @@ async function buildTravelerDrawingPages(job) {
       };
       if (isPdfAttachment(document)) {
         try {
-          const pdf = await getDocument(fileUrl).promise;
+          const pdf = await loadPdfDocument(fileUrl).promise;
           for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
             drawingPages.push({
               ...basePage,
@@ -1648,6 +1813,76 @@ function chunkList(items = [], size = 10) {
     chunks.push(items.slice(index, index + size));
   }
   return chunks;
+}
+
+const INSPECTION_MEASURED_CHARACTERISTICS_PER_TABLE = 8;
+const INSPECTION_MEASURED_PRINT_CAPACITY_IN = 7.45;
+const INSPECTION_MEASURED_TABLE_GAP_IN = 0.08;
+
+function estimateInspectionMeasuredTableHeight(rowCount) {
+  return 0.36 + (Math.max(1, Number(rowCount || 0)) * 0.23);
+}
+
+function packInspectionMeasuredTableBlocks(blocks = []) {
+  const pages = [];
+  let currentPage = { blocks: [], usedHeight: 0 };
+  const pushCurrentPage = () => {
+    if (currentPage.blocks.length) {
+      pages.push(currentPage);
+    }
+    currentPage = { blocks: [], usedHeight: 0 };
+  };
+  for (const block of blocks) {
+    const height = estimateInspectionMeasuredTableHeight(block.pageInstances?.length || 0);
+    const nextHeight = currentPage.usedHeight + (currentPage.blocks.length ? INSPECTION_MEASURED_TABLE_GAP_IN : 0) + height;
+    if (currentPage.blocks.length && nextHeight > INSPECTION_MEASURED_PRINT_CAPACITY_IN) {
+      pushCurrentPage();
+    }
+    currentPage.blocks.push({ ...block, estimatedHeight: height });
+    currentPage.usedHeight += (currentPage.blocks.length > 1 ? INSPECTION_MEASURED_TABLE_GAP_IN : 0) + height;
+  }
+  pushCurrentPage();
+  return pages;
+}
+
+function buildInspectionMeasuredPrintPages(instances = [], characteristics = []) {
+  const safeInstances = Array.isArray(instances) ? instances : [];
+  const safeCharacteristics = Array.isArray(characteristics) ? characteristics : [];
+  if (!safeInstances.length || !safeCharacteristics.length) {
+    return [{ blocks: [], pageIndex: 0, pageCount: 1, hasInstances: Boolean(safeInstances.length), hasCharacteristics: Boolean(safeCharacteristics.length) }];
+  }
+  const characteristicGroups = chunkList(safeCharacteristics, INSPECTION_MEASURED_CHARACTERISTICS_PER_TABLE);
+  const maxRowsPerTable = Math.min(24, safeInstances.length);
+  const candidates = [];
+  for (let rowsPerTable = 1; rowsPerTable <= maxRowsPerTable; rowsPerTable += 1) {
+    const instanceGroups = chunkList(safeInstances, rowsPerTable);
+    const blocks = instanceGroups.flatMap((pageInstances, instanceGroupIndex) => characteristicGroups.map((pageCharacteristics, characteristicGroupIndex) => ({
+      pageInstances,
+      pageCharacteristics,
+      characteristicGroupIndex,
+      characteristicGroupCount: characteristicGroups.length,
+      instanceGroupIndex,
+      instanceGroupCount: instanceGroups.length
+    })));
+    candidates.push({
+      rowsPerTable,
+      blockCount: blocks.length,
+      pages: packInspectionMeasuredTableBlocks(blocks)
+    });
+  }
+  const best = candidates.sort((left, right) => (
+    left.pages.length - right.pages.length
+    || left.blockCount - right.blockCount
+    || right.rowsPerTable - left.rowsPerTable
+  ))[0];
+  return best.pages.map((page, pageIndex) => ({
+    ...page,
+    pageIndex,
+    pageCount: best.pages.length,
+    rowsPerTable: best.rowsPerTable,
+    hasInstances: true,
+    hasCharacteristics: true
+  }));
 }
 
 function buildInspectionReportDefaults(job, part, inspection, report = {}, nonconformances = [], linkedMaterials = []) {
@@ -1820,7 +2055,15 @@ function App() {
     const exportOptions = defaultInspectionReportExportOptions(Object.fromEntries(
       INSPECTION_REPORT_EXPORT_OPTION_DEFINITIONS.map(([key]) => [key, params.get(key) !== "0"])
     ));
-    return <PrintInspectionReport jobId={jobId} partId={partId} reportId={params.get("reportId") || ""} exportOptions={exportOptions} />;
+    return (
+      <PrintInspectionReport
+        jobId={jobId}
+        partId={partId}
+        reportId={params.get("reportId") || ""}
+        exportOptions={exportOptions}
+        deferMaterialPdfCerts={params.get("deferMaterialPdfCerts") === "1"}
+      />
+    );
   }
   if (route.startsWith("/print/nonconformance/")) {
     const ncrId = decodeURIComponent(route.replace("/print/nonconformance/", "").split("?")[0]);
@@ -1901,6 +2144,7 @@ function Workspace() {
   const materialRef = useRef(null);
   const instrumentRef = useRef(null);
   const pendingNavigationActionRef = useRef(null);
+  const currentMainEditorIsDirtyRef = useRef(() => false);
   const settingsDirtyRef = useRef(false);
   const settingsSaveActionRef = useRef(null);
   const settingsDiscardActionRef = useRef(null);
@@ -1938,6 +2182,8 @@ function Workspace() {
   const [inspectionExportDialogOpen, setInspectionExportDialogOpen] = useState(false);
   const [inspectionExportOptions, setInspectionExportOptions] = useState(defaultInspectionReportExportOptions());
   const [unsavedChangesDialog, setUnsavedChangesDialog] = useState(null);
+  const [editorLocks, setEditorLocks] = useState({});
+  const editorLocksRef = useRef({});
 
   const [selectedTemplateId, setSelectedTemplateId] = useState(null);
   const [lastIndexMaintenance, setLastIndexMaintenance] = useState(0);
@@ -1951,6 +2197,7 @@ function Workspace() {
   kanbanCardRef.current = kanbanCard;
   materialRef.current = material;
   instrumentRef.current = instrumentPayload;
+  editorLocksRef.current = editorLocks;
   const enabledModules = effectiveEnabledModules(workspace?.preferences?.enabledModules, workspace?.preferences);
   const moduleIsEnabled = (moduleId) => moduleId === "settings" || enabledModules[moduleId] !== false;
   const firstAvailableView = firstEnabledModuleId(enabledModules);
@@ -2006,6 +2253,101 @@ function Workspace() {
     }
     return false;
   };
+  currentMainEditorIsDirtyRef.current = currentMainEditorIsDirty;
+
+  const updateEditorLock = (kind, id, patch) => {
+    if (!kind || !id) {
+      return;
+    }
+    const key = editorLockKey(kind, id);
+    setEditorLocks((current) => ({
+      ...current,
+      [key]: {
+        ...(current[key] || { kind, id, status: "unlocked" }),
+        ...patch,
+        kind,
+        id
+      }
+    }));
+  };
+
+  const clearEditorLock = (kind, id) => {
+    if (!kind || !id) {
+      return;
+    }
+    const key = editorLockKey(kind, id);
+    setEditorLocks((current) => {
+      if (!current[key]) {
+        return current;
+      }
+      const next = { ...current };
+      delete next[key];
+      return next;
+    });
+  };
+
+  const currentEditorLockTarget = () => {
+    if (view === "jobs" && jobScreen !== "list" && jobScreen !== "nonconformance" && jobRef.current?.id) {
+      return { kind: "job", id: jobRef.current.id, record: jobRef.current };
+    }
+    if ((view === "nonconformance" && nonconformanceScreen === "detail") || (view === "jobs" && jobScreen === "nonconformance")) {
+      if (nonconformanceRef.current?.id) {
+        return { kind: "nonconformance", id: nonconformanceRef.current.id, record: nonconformanceRef.current };
+      }
+    }
+    if (view === "kanban" && kanbanScreen === "detail" && kanbanCardRef.current?.id) {
+      return { kind: "kanban", id: kanbanCardRef.current.id, record: kanbanCardRef.current };
+    }
+    if (view === "materials" && materialScreen === "detail" && materialRef.current?.id) {
+      return { kind: "material", id: materialRef.current.id, record: materialRef.current };
+    }
+    if (view === "metrology" && metrologyScreen === "detail" && instrumentRef.current?.instrument?.instrument_id) {
+      return { kind: "instrument", id: instrumentRef.current.instrument.instrument_id, record: instrumentRef.current };
+    }
+    if (view === "settings" && workspace?.preferences) {
+      return { kind: "preferences", id: "preferences", record: workspace.preferences };
+    }
+    return null;
+  };
+
+  const currentEditorLockState = () => {
+    const target = currentEditorLockTarget();
+    if (!target) {
+      return null;
+    }
+    return editorLocks[editorLockKey(target.kind, target.id)] || null;
+  };
+
+  const saveLockOptionsForRecord = async (kind, id, record) => {
+    return {};
+  };
+
+  const releaseEditorLock = async (kind, id) => {
+    if (!kind || !id) {
+      return;
+    }
+    clearEditorLock(kind, id);
+  };
+
+  const releaseAllSelectedEditorLocks = async () => {
+    const targets = [
+      selectedJobId ? { kind: "job", id: selectedJobId } : null,
+      selectedNonconformanceId ? { kind: "nonconformance", id: selectedNonconformanceId } : null,
+      selectedKanbanId ? { kind: "kanban", id: selectedKanbanId } : null,
+      selectedMaterialId ? { kind: "material", id: selectedMaterialId } : null,
+      selectedInstrumentId ? { kind: "instrument", id: selectedInstrumentId } : null,
+      view === "settings" ? { kind: "preferences", id: "preferences" } : null
+    ].filter(Boolean);
+    const seen = new Set();
+    await Promise.all(targets.map((target) => {
+      const key = editorLockKey(target.kind, target.id);
+      if (seen.has(key)) {
+        return Promise.resolve();
+      }
+      seen.add(key);
+      return releaseEditorLock(target.kind, target.id);
+    }));
+  };
 
   const persistCurrentKanbanCard = async () => {
     const current = kanbanCardRef.current;
@@ -2014,7 +2356,12 @@ function Workspace() {
     }
     setMainSaving();
     try {
-      const saved = await api.saveKanbanCard(current);
+      const lockOptions = await saveLockOptionsForRecord("kanban", current.id, current);
+      if (lockOptions === null) {
+        setMainSaveError();
+        return false;
+      }
+      const saved = await api.saveKanbanCard(current, lockOptions);
       if (kanbanCardIdRef.current === saved?.id) {
         await applySavedKanbanCard(saved);
       }
@@ -2034,7 +2381,12 @@ function Workspace() {
     }
     setMainSaving();
     try {
-      const saved = await api.saveJob(current);
+      const lockOptions = await saveLockOptionsForRecord("job", current.id, current);
+      if (lockOptions === null) {
+        setMainSaveError();
+        return false;
+      }
+      const saved = await api.saveJob(current, lockOptions);
       await applySavedJob(saved);
       clearMainSaveState();
       return true;
@@ -2052,7 +2404,12 @@ function Workspace() {
     }
     setMainSaving();
     try {
-      const saved = await api.saveNonconformance(current);
+      const lockOptions = await saveLockOptionsForRecord("nonconformance", current.id, current);
+      if (lockOptions === null) {
+        setMainSaveError();
+        return false;
+      }
+      const saved = await api.saveNonconformance(current, lockOptions);
       await applySavedNonconformance(saved);
       clearMainSaveState();
       return true;
@@ -2070,7 +2427,12 @@ function Workspace() {
     }
     setMainSaving();
     try {
-      const saved = await api.saveMaterial(current);
+      const lockOptions = await saveLockOptionsForRecord("material", current.id, current);
+      if (lockOptions === null) {
+        setMainSaveError();
+        return false;
+      }
+      const saved = await api.saveMaterial(current, lockOptions);
       await applySavedMaterial(saved);
       clearMainSaveState();
       return true;
@@ -2088,7 +2450,12 @@ function Workspace() {
     }
     setMainSaving();
     try {
-      const saved = await api.saveInstrument(current);
+      const lockOptions = await saveLockOptionsForRecord("instrument", current.instrument.instrument_id, current);
+      if (lockOptions === null) {
+        setMainSaveError();
+        return false;
+      }
+      const saved = await api.saveInstrument(current, lockOptions);
       await applySavedInstrument(saved);
       clearMainSaveState();
       return true;
@@ -2100,34 +2467,41 @@ function Workspace() {
   };
 
   const revertCurrentMainEditor = () => {
+    const target = currentEditorLockTarget();
     if (view === "jobs" && jobScreen !== "list" && jobScreen !== "nonconformance") {
       setJob(cloneSnapshot(JSON.parse(lastSavedJobRef.current)));
       clearMainSaveState();
+      if (target) releaseEditorLock(target.kind, target.id).catch(() => {});
       return;
     }
     if ((view === "nonconformance" && nonconformanceScreen === "detail") || (view === "jobs" && jobScreen === "nonconformance")) {
       setNonconformanceRecord(cloneSnapshot(JSON.parse(lastSavedNonconformanceRef.current)));
       clearMainSaveState();
+      if (target) releaseEditorLock(target.kind, target.id).catch(() => {});
       return;
     }
     if (view === "kanban" && kanbanScreen === "detail") {
       setKanbanCard(cloneSnapshot(JSON.parse(lastSavedKanbanRef.current)));
       clearMainSaveState();
+      if (target) releaseEditorLock(target.kind, target.id).catch(() => {});
       return;
     }
     if (view === "materials" && materialScreen === "detail") {
       setMaterial(cloneSnapshot(JSON.parse(lastSavedMaterialRef.current)));
       clearMainSaveState();
+      if (target) releaseEditorLock(target.kind, target.id).catch(() => {});
       return;
     }
     if (view === "metrology" && metrologyScreen === "detail") {
       setInstrumentPayload(cloneSnapshot(JSON.parse(lastSavedInstrumentRef.current)));
       clearMainSaveState();
+      if (target) releaseEditorLock(target.kind, target.id).catch(() => {});
       return;
     }
     if (view === "settings" && settingsDiscardActionRef.current) {
       settingsDiscardActionRef.current();
       clearMainSaveState();
+      if (target) releaseEditorLock(target.kind, target.id).catch(() => {});
     }
   };
 
@@ -2252,7 +2626,7 @@ function Workspace() {
       api.releaseAllLocks().catch(() => {});
     };
     const handleBeforeUnload = (event) => {
-      if (currentMainEditorIsDirty()) {
+      if (currentMainEditorIsDirtyRef.current?.()) {
         event.preventDefault();
         event.returnValue = "";
         return "";
@@ -2261,7 +2635,9 @@ function Workspace() {
       return undefined;
     };
     const handleFocus = () => {
-      refreshWorkspaceRef.current?.();
+      if (!currentMainEditorIsDirtyRef.current?.()) {
+        refreshWorkspaceRef.current?.();
+      }
     };
     window.addEventListener("beforeunload", handleBeforeUnload);
     window.addEventListener("focus", handleFocus);
@@ -2384,34 +2760,34 @@ useEffect(() => api.onDeepLink?.((payload) => {
   }, [view, jobScreen, nonconformanceScreen, kanbanScreen, materialScreen, metrologyScreen, saveCurrentMainEditor]);
 
   useEffect(() => {
-    const activeLocks = [];
-    if (selectedJobId && jobScreen !== "list") {
-      activeLocks.push({ kind: "job", id: selectedJobId });
+    const target = currentEditorLockTarget();
+    if (!target || !isExistingLockedRecord(target.record) || !api.getLockStatus) {
+      return;
     }
-    if (selectedNonconformanceId && ((view === "nonconformance" && nonconformanceScreen === "detail") || (view === "jobs" && jobScreen === "nonconformance"))) {
-      activeLocks.push({ kind: "nonconformance", id: selectedNonconformanceId });
-    }
-    if (selectedKanbanId && kanbanScreen === "detail") {
-      activeLocks.push({ kind: "kanban", id: selectedKanbanId });
-    }
-    if (selectedMaterialId && materialScreen === "detail") {
-      activeLocks.push({ kind: "material", id: selectedMaterialId });
-    }
-    if (selectedInstrumentId && metrologyScreen === "detail") {
-      activeLocks.push({ kind: "instrument", id: selectedInstrumentId });
-    }
-    if (!activeLocks.length) {
-      return undefined;
-    }
-    const renewLocks = () => {
-      activeLocks.forEach(({ kind, id }) => {
-        api.acquireLock(kind, id, "").catch(() => {});
-      });
+    let cancelled = false;
+    api.getLockStatus(target.kind, target.id)
+      .then((lock) => {
+        if (cancelled) {
+          return;
+        }
+        if (lock?.status === "locked" || lock?.status === "stale") {
+          updateEditorLock(target.kind, target.id, {
+            status: lock.status,
+            token: "",
+            owner: lock.owner || null,
+            expiresAt: lock.expiresAt || "",
+            canTakeOver: false,
+            error: ""
+          });
+          return;
+        }
+        clearEditorLock(target.kind, target.id);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
     };
-    renewLocks();
-    const timer = window.setInterval(renewLocks, 60 * 1000);
-    return () => window.clearInterval(timer);
-  }, [selectedJobId, jobScreen, selectedNonconformanceId, nonconformanceScreen, view, selectedKanbanId, kanbanScreen, selectedMaterialId, materialScreen, selectedInstrumentId, metrologyScreen]);
+  }, [view, jobScreen, nonconformanceScreen, kanbanScreen, materialScreen, metrologyScreen, selectedJobId, selectedNonconformanceId, selectedKanbanId, selectedMaterialId, selectedInstrumentId, workspace?.preferences?._lockBaseRevision]);
 
   const openJob = async (jobId) => {
     setBusy(true);
@@ -2419,9 +2795,9 @@ useEffect(() => api.onDeepLink?.((payload) => {
       const confirmed = await confirmLeaveIfDirty(async () => {});
       if (!confirmed) return;
       if (selectedJobId && selectedJobId !== jobId) {
-        await api.releaseLock("job", selectedJobId);
+        await releaseEditorLock("job", selectedJobId);
       }
-      const loaded = await api.loadJob(jobId, { acquireLock: true });
+      const loaded = await api.loadJob(jobId);
       setSelectedJobId(jobId);
       setJob(loaded);
       lastSavedJobRef.current = snapshotValue(loaded);
@@ -2443,9 +2819,9 @@ useEffect(() => api.onDeepLink?.((payload) => {
       const confirmed = await confirmLeaveIfDirty(async () => {});
       if (!confirmed) return;
       if (selectedKanbanId && selectedKanbanId !== cardId) {
-        await api.releaseLock("kanban", selectedKanbanId);
+        await releaseEditorLock("kanban", selectedKanbanId);
       }
-      const loaded = await api.loadKanbanCard(cardId, { acquireLock: true });
+      const loaded = await api.loadKanbanCard(cardId);
       setSelectedKanbanId(cardId);
       setKanbanCard(loaded);
       lastSavedKanbanRef.current = snapshotValue(loaded);
@@ -2467,9 +2843,9 @@ useEffect(() => api.onDeepLink?.((payload) => {
       const confirmed = await confirmLeaveIfDirty(async () => {});
       if (!confirmed) return;
       if (selectedNonconformanceId && selectedNonconformanceId !== ncrId) {
-        await api.releaseLock("nonconformance", selectedNonconformanceId);
+        await releaseEditorLock("nonconformance", selectedNonconformanceId);
       }
-      const loaded = await api.loadNonconformance(ncrId, { acquireLock: true });
+      const loaded = await api.loadNonconformance(ncrId);
       setSelectedNonconformanceId(ncrId);
       setNonconformanceRecord(loaded);
       lastSavedNonconformanceRef.current = snapshotValue(loaded);
@@ -2497,9 +2873,9 @@ useEffect(() => api.onDeepLink?.((payload) => {
       const confirmed = await confirmLeaveIfDirty(async () => {});
       if (!confirmed) return;
       if (selectedMaterialId && selectedMaterialId !== materialId) {
-        await api.releaseLock("material", selectedMaterialId);
+        await releaseEditorLock("material", selectedMaterialId);
       }
-      const loaded = await api.loadMaterial(materialId, { acquireLock: true });
+      const loaded = await api.loadMaterial(materialId);
       setSelectedMaterialId(materialId);
       const synced = syncMaterialClassification(loaded, workspace?.preferences);
       setMaterial(synced);
@@ -2521,9 +2897,9 @@ useEffect(() => api.onDeepLink?.((payload) => {
       const confirmed = await confirmLeaveIfDirty(async () => {});
       if (!confirmed) return;
       if (selectedInstrumentId && selectedInstrumentId !== instrumentId) {
-        await api.releaseLock("instrument", selectedInstrumentId);
+        await releaseEditorLock("instrument", selectedInstrumentId);
       }
-      const loaded = await api.loadInstrument(instrumentId, { acquireLock: true });
+      const loaded = await api.loadInstrument(instrumentId);
       setSelectedInstrumentId(instrumentId);
       setInstrumentPayload(loaded);
       lastSavedInstrumentRef.current = snapshotValue(loaded);
@@ -2540,8 +2916,8 @@ useEffect(() => api.onDeepLink?.((payload) => {
   const createNewJob = async () => {
     const confirmed = await confirmLeaveIfDirty(async () => {});
     if (!confirmed) return;
-    if (selectedNonconformanceId) api.releaseLock("nonconformance", selectedNonconformanceId).catch(() => {});
-    if (selectedJobId) api.releaseLock("job", selectedJobId).catch(() => {});
+    if (selectedNonconformanceId) releaseEditorLock("nonconformance", selectedNonconformanceId).catch(() => {});
+    if (selectedJobId) releaseEditorLock("job", selectedJobId).catch(() => {});
     setSelectedJobId(null);
     const draft = blankJob();
     setJob(draft);
@@ -2558,8 +2934,8 @@ useEffect(() => api.onDeepLink?.((payload) => {
   const createNewKanbanCard = async (draft = null) => {
     const confirmed = await confirmLeaveIfDirty(async () => {});
     if (!confirmed) return;
-    if (selectedNonconformanceId) api.releaseLock("nonconformance", selectedNonconformanceId).catch(() => {});
-    if (selectedKanbanId) api.releaseLock("kanban", selectedKanbanId).catch(() => {});
+    if (selectedNonconformanceId) releaseEditorLock("nonconformance", selectedNonconformanceId).catch(() => {});
+    if (selectedKanbanId) releaseEditorLock("kanban", selectedKanbanId).catch(() => {});
     setSelectedKanbanId(null);
     const nextDraft = draft || blankKanbanCard();
     setKanbanCard(nextDraft);
@@ -2583,7 +2959,7 @@ useEffect(() => api.onDeepLink?.((payload) => {
         linkedMaterialIds.map((materialId) => api.loadMaterial(materialId).catch(() => null))
       )).filter(Boolean);
       if (selectedNonconformanceId) {
-        await api.releaseLock("nonconformance", selectedNonconformanceId).catch(() => {});
+        await releaseEditorLock("nonconformance", selectedNonconformanceId).catch(() => {});
       }
       const inspection = renumberInspectionPayload(normalizeInspectionPayload(part.inspection));
       const seed = ncrSeedFromContext({
@@ -2620,12 +2996,7 @@ useEffect(() => api.onDeepLink?.((payload) => {
   const showJobList = async () => {
     const confirmed = await confirmLeaveIfDirty(async () => {});
     if (!confirmed) return;
-    if (selectedJobId) {
-      api.releaseLock("job", selectedJobId).catch(() => {});
-    }
-    if (selectedNonconformanceId) {
-      api.releaseLock("nonconformance", selectedNonconformanceId).catch(() => {});
-    }
+    await releaseAllSelectedEditorLocks();
     setSelectedJobId(null);
     setJob(null);
     setView("jobs");
@@ -2640,13 +3011,10 @@ useEffect(() => api.onDeepLink?.((payload) => {
   const showKanbanList = async () => {
     const confirmed = await confirmLeaveIfDirty(async () => {});
     if (!confirmed) return;
+    await releaseAllSelectedEditorLocks();
     if (selectedNonconformanceId) {
-      api.releaseLock("nonconformance", selectedNonconformanceId).catch(() => {});
       setSelectedNonconformanceId(null);
       setNonconformanceRecord(null);
-    }
-    if (selectedKanbanId) {
-      api.releaseLock("kanban", selectedKanbanId).catch(() => {});
     }
     setSelectedKanbanId(null);
     setKanbanCard(null);
@@ -2659,9 +3027,7 @@ useEffect(() => api.onDeepLink?.((payload) => {
   const showNonconformanceList = async () => {
     const confirmed = await confirmLeaveIfDirty(async () => {});
     if (!confirmed) return;
-    if (selectedNonconformanceId) {
-      api.releaseLock("nonconformance", selectedNonconformanceId).catch(() => {});
-    }
+    await releaseAllSelectedEditorLocks();
     setSelectedNonconformanceId(null);
     setNonconformanceRecord(null);
     setView("nonconformance");
@@ -2672,8 +3038,8 @@ useEffect(() => api.onDeepLink?.((payload) => {
   const showInspectionList = async () => {
     const confirmed = await confirmLeaveIfDirty(async () => {});
     if (!confirmed) return;
+    await releaseAllSelectedEditorLocks();
     if (selectedNonconformanceId) {
-      api.releaseLock("nonconformance", selectedNonconformanceId).catch(() => {});
       setSelectedNonconformanceId(null);
       setNonconformanceRecord(null);
     }
@@ -2684,8 +3050,8 @@ useEffect(() => api.onDeepLink?.((payload) => {
   const showTimeClock = async () => {
     const confirmed = await confirmLeaveIfDirty(async () => {});
     if (!confirmed) return;
+    await releaseAllSelectedEditorLocks();
     if (selectedNonconformanceId) {
-      api.releaseLock("nonconformance", selectedNonconformanceId).catch(() => {});
       setSelectedNonconformanceId(null);
       setNonconformanceRecord(null);
     }
@@ -2696,8 +3062,8 @@ useEffect(() => api.onDeepLink?.((payload) => {
   const showTimeClockAdmin = async () => {
     const confirmed = await confirmLeaveIfDirty(async () => {});
     if (!confirmed) return;
+    await releaseAllSelectedEditorLocks();
     if (selectedNonconformanceId) {
-      api.releaseLock("nonconformance", selectedNonconformanceId).catch(() => {});
       setSelectedNonconformanceId(null);
       setNonconformanceRecord(null);
     }
@@ -2705,9 +3071,22 @@ useEffect(() => api.onDeepLink?.((payload) => {
     setSaveState("saved");
   };
 
+  const showPlaceholderModule = async (nextView) => {
+    const confirmed = await confirmLeaveIfDirty(async () => {});
+    if (!confirmed) return;
+    await releaseAllSelectedEditorLocks();
+    if (selectedNonconformanceId) {
+      setSelectedNonconformanceId(null);
+      setNonconformanceRecord(null);
+    }
+    setView(nextView);
+    setSaveState("saved");
+  };
+
   const showSettingsView = async () => {
     const confirmed = await confirmLeaveIfDirty(async () => {});
     if (!confirmed) return;
+    await releaseAllSelectedEditorLocks();
     setView("settings");
     setSaveState("saved");
   };
@@ -2717,9 +3096,9 @@ useEffect(() => api.onDeepLink?.((payload) => {
     setBusy(true);
     try {
       if (selectedJobId && selectedJobId !== summary.jobId) {
-        await api.releaseLock("job", selectedJobId).catch(() => {});
+        await releaseEditorLock("job", selectedJobId).catch(() => {});
       }
-      const loaded = await api.loadJob(summary.jobId, { acquireLock: true });
+      const loaded = await api.loadJob(summary.jobId);
       const part = loaded.parts?.find((item) => item.id === summary.partId);
       const inspection = normalizeInspectionPayload(part?.inspection);
       const activeReportId = summary.id && !String(summary.id).includes(":draft") ? summary.id : inspection.activeReportId;
@@ -2781,7 +3160,7 @@ useEffect(() => api.onDeepLink?.((payload) => {
     const confirmed = await confirmLeaveIfDirty(async () => {});
     if (!confirmed) return;
     if (selectedNonconformanceId && jobScreen === "nonconformance") {
-      api.releaseLock("nonconformance", selectedNonconformanceId).catch(() => {});
+      releaseEditorLock("nonconformance", selectedNonconformanceId).catch(() => {});
       setSelectedNonconformanceId(null);
       setNonconformanceRecord(null);
     }
@@ -2795,7 +3174,7 @@ useEffect(() => api.onDeepLink?.((payload) => {
     const confirmed = await confirmLeaveIfDirty(async () => {});
     if (!confirmed) return;
     if (selectedNonconformanceId && jobScreen === "nonconformance") {
-      api.releaseLock("nonconformance", selectedNonconformanceId).catch(() => {});
+      releaseEditorLock("nonconformance", selectedNonconformanceId).catch(() => {});
       setSelectedNonconformanceId(null);
       setNonconformanceRecord(null);
     }
@@ -2831,7 +3210,11 @@ useEffect(() => api.onDeepLink?.((payload) => {
     if (!job) {
       return null;
     }
-    const saved = await api.saveJob(job);
+    const lockOptions = await saveLockOptionsForRecord("job", job.id, job);
+    if (lockOptions === null) {
+      return null;
+    }
+    const saved = await api.saveJob(job, lockOptions);
     await applySavedJob(saved);
     return saved;
   };
@@ -2840,18 +3223,56 @@ useEffect(() => api.onDeepLink?.((payload) => {
     if (!job?.id || !partId) return;
     setBusy(true);
     try {
-      const savedJob = await saveCurrentJobSnapshot();
-      if (!savedJob?.id) {
-        return;
-      }
-      const result = await api.extractPartInspectionFromDrawing(savedJob.id, partId, source);
+      const currentPart = job.parts.find((part) => part.id === partId);
+      const currentInspection = normalizeInspectionPayload(currentPart?.inspection);
+      const sourceDocument = source?.document
+        || (source?.documentId ? (currentPart?.documents || []).find((document) => document.id === source.documentId) : null);
+      const result = await api.extractPartInspectionFromDrawing(job.id, partId, {
+        ...(source || {}),
+        document: sourceDocument || undefined,
+        existingCharacteristicNumbers: currentInspection.characteristics.map((item) => item.number)
+      });
       if (!result) {
-        return;
+        return null;
       }
-      await applySavedJob(result.job);
-      showStatus(`Inspection extraction complete: ${result.accepted?.length || 0} added, ${result.queued?.length || 0} queued for review.`);
+      setJob((current) => {
+        if (!current) {
+          return current;
+        }
+        return {
+          ...current,
+          parts: current.parts.map((part) => {
+            if (part.id !== partId) {
+              return part;
+            }
+            const inspection = normalizeInspectionPayload(part.inspection);
+            const accepted = (result.accepted || []).filter((item) => !inspection.characteristics.some((existing) => existing.id === item.id));
+            const queued = (result.queued || []).filter((item) => !inspection.reviewQueue.some((existing) => existing.id === item.id));
+            const balloons = (result.balloons || []).filter((item) => !inspection.balloons.some((existing) => existing.id === item.id));
+            const extractionRuns = result.extractionRun ? [...(inspection.extractionRuns || []), result.extractionRun] : inspection.extractionRuns;
+            const documents = result.document && !(part.documents || []).some((document) => document.id === result.document.id)
+              ? [...(part.documents || []), result.document]
+              : (part.documents || []);
+            return {
+              ...part,
+              documents,
+              inspection: renumberInspectionPayload(normalizeInspectionPayload({
+                ...inspection,
+                characteristics: [...inspection.characteristics, ...accepted],
+                reviewQueue: [...inspection.reviewQueue, ...queued],
+                balloons: [...inspection.balloons, ...balloons],
+                extractionRuns
+              }))
+            };
+          })
+        };
+      });
+      const warningText = result.warnings?.length ? ` ${result.warnings.length} warning${result.warnings.length === 1 ? "" : "s"}.` : "";
+      showStatus(`Inspection extraction ready to review: ${result.accepted?.length || 0} added, ${result.queued?.length || 0} queued.${warningText} Save to keep these changes.`);
+      return result;
     } catch (error) {
       showStatus(error.message || String(error));
+      return null;
     } finally {
       setBusy(false);
     }
@@ -2914,8 +3335,10 @@ useEffect(() => api.onDeepLink?.((payload) => {
     }
     setBusy(true);
     try {
-      const savedJob = await api.saveJob(job);
-      await applySavedJob(savedJob);
+      const savedJob = await saveCurrentJobSnapshot();
+      if (!savedJob) {
+        return;
+      }
       const imported = await api.importXometryTravelers(savedJob.id);
       if (!imported) return;
       const importedParts = imported.parts || [];
@@ -3083,14 +3506,14 @@ useEffect(() => api.onDeepLink?.((payload) => {
     }
   };
 
-  const addPartDocuments = async (partId) => {
-    if (!job?.id) {
+  const addPartDocuments = async (partId, options = {}) => {
+    if (!job?.id || !partId) {
       showStatus("Save the job header before adding part documents.");
       return;
     }
     setBusy(true);
     try {
-      const documents = await api.choosePartDocuments(job.id, partId);
+      const documents = await api.choosePartDocuments(job.id, partId, options);
       if (!documents.length) {
         return;
       }
@@ -3100,7 +3523,12 @@ useEffect(() => api.onDeepLink?.((payload) => {
           ? { ...part, documents: [...(part.documents || []), ...documents] }
           : part)
       }));
-      showStatus(`Added ${documents.length} part attachment${documents.length === 1 ? "" : "s"}.`);
+      const label = options?.category === "Drawing"
+        ? "part drawing"
+        : options?.category === "Photo"
+          ? "part photo"
+          : "part attachment";
+      showStatus(`Added ${documents.length} ${label}${documents.length === 1 ? "" : "s"}.`);
     } catch (error) {
       showStatus(error.message || String(error));
     } finally {
@@ -3307,7 +3735,11 @@ useEffect(() => api.onDeepLink?.((payload) => {
     if (!nonconformanceRecord?.id) return;
     setBusy(true);
     try {
-      const saved = await api.saveNonconformance(nonconformanceRecord);
+      const lockOptions = await saveLockOptionsForRecord("nonconformance", nonconformanceRecord.id, nonconformanceRecord);
+      if (lockOptions === null) {
+        return;
+      }
+      const saved = await api.saveNonconformance(nonconformanceRecord, lockOptions);
       await applySavedNonconformance(saved);
       await api.exportNonconformancePdf(saved.id);
       showStatus("NCR PDF created.");
@@ -3338,13 +3770,18 @@ useEffect(() => api.onDeepLink?.((payload) => {
     }
     setBusy(true);
     try {
-      const saved = await api.saveNonconformance({
+      const draft = {
         ...nonconformanceRecord,
         status: "Open",
         reopenReason: reason,
         closureDate: "",
         closedBy: ""
-      });
+      };
+      const lockOptions = await saveLockOptionsForRecord("nonconformance", draft.id, draft);
+      if (lockOptions === null) {
+        return;
+      }
+      const saved = await api.saveNonconformance(draft, lockOptions);
       await applySavedNonconformance(saved);
       showStatus("NCR reopened.");
     } catch (error) {
@@ -3388,7 +3825,7 @@ useEffect(() => api.onDeepLink?.((payload) => {
     try {
       const deletedId = selectedNonconformanceId;
       await api.deleteNonconformance(deletedId);
-      await api.releaseLock("nonconformance", deletedId).catch(() => {});
+      await releaseEditorLock("nonconformance", deletedId);
       setSelectedNonconformanceId(null);
       setNonconformanceRecord(null);
       if (view === "nonconformance") {
@@ -3532,8 +3969,10 @@ useEffect(() => api.onDeepLink?.((payload) => {
     if (!job) return;
     setBusy(true);
     try {
-      const saved = await api.saveJob(job);
-      await applySavedJob(saved);
+      const saved = await saveCurrentJobSnapshot();
+      if (!saved) {
+        return;
+      }
       await api.exportJobPdf(saved.id);
       showStatus("Traveler PDF created.");
     } catch (error) {
@@ -3547,7 +3986,11 @@ useEffect(() => api.onDeepLink?.((payload) => {
     if (!kanbanCard) return;
     setBusy(true);
     try {
-      const saved = await api.saveKanbanCard(kanbanCard);
+      const lockOptions = await saveLockOptionsForRecord("kanban", kanbanCard.id, kanbanCard);
+      if (lockOptions === null) {
+        return;
+      }
+      const saved = await api.saveKanbanCard(kanbanCard, lockOptions);
       await applySavedKanbanCard(saved);
       await api.exportKanbanPdf(
         saved.id,
@@ -3571,7 +4014,11 @@ useEffect(() => api.onDeepLink?.((payload) => {
     if (!material) return;
     setBusy(true);
     try {
-      const saved = await api.saveMaterial(material);
+      const lockOptions = await saveLockOptionsForRecord("material", material.id, material);
+      if (lockOptions === null) {
+        return;
+      }
+      const saved = await api.saveMaterial(material, lockOptions);
       await applySavedMaterial(saved);
       await api.exportMaterialPdf(
         saved.id,
@@ -3655,10 +4102,14 @@ useEffect(() => api.onDeepLink?.((payload) => {
     setBusy(true);
     try {
       if (kanbanCard?.id === selectedKanbanId && kanbanCard.active === false) {
-        await api.saveKanbanCard(kanbanCard);
+        const lockOptions = await saveLockOptionsForRecord("kanban", kanbanCard.id, kanbanCard);
+        if (lockOptions === null) {
+          return;
+        }
+        await api.saveKanbanCard(kanbanCard, lockOptions);
       }
       await api.deleteKanbanCard(selectedKanbanId);
-      await api.releaseLock("kanban", selectedKanbanId).catch(() => {});
+      await releaseEditorLock("kanban", selectedKanbanId);
       setSelectedKanbanId(null);
       setKanbanCard(null);
       setKanbanScreen("list");
@@ -3700,7 +4151,7 @@ useEffect(() => api.onDeepLink?.((payload) => {
     setBusy(true);
     try {
       await api.deleteJob(selectedJobId);
-      await api.releaseLock("job", selectedJobId).catch(() => {});
+      await releaseEditorLock("job", selectedJobId);
       setSelectedJobId(null);
       setJob(null);
       setSelectedPartId(null);
@@ -3726,8 +4177,8 @@ useEffect(() => api.onDeepLink?.((payload) => {
   const createNewMaterial = async () => {
     const confirmed = await confirmLeaveIfDirty(async () => {});
     if (!confirmed) return;
-    if (selectedNonconformanceId) api.releaseLock("nonconformance", selectedNonconformanceId).catch(() => {});
-    if (selectedMaterialId) api.releaseLock("material", selectedMaterialId).catch(() => {});
+    if (selectedNonconformanceId) releaseEditorLock("nonconformance", selectedNonconformanceId).catch(() => {});
+    if (selectedMaterialId) releaseEditorLock("material", selectedMaterialId).catch(() => {});
     const serial = await api.generateMaterialSerial().catch(() => "");
     setSelectedMaterialId(null);
     const draft = syncMaterialClassification(
@@ -3861,8 +4312,8 @@ useEffect(() => api.onDeepLink?.((payload) => {
   const createNewInstrument = async () => {
     const confirmed = await confirmLeaveIfDirty(async () => {});
     if (!confirmed) return;
-    if (selectedNonconformanceId) api.releaseLock("nonconformance", selectedNonconformanceId).catch(() => {});
-    if (selectedInstrumentId) api.releaseLock("instrument", selectedInstrumentId).catch(() => {});
+    if (selectedNonconformanceId) releaseEditorLock("nonconformance", selectedNonconformanceId).catch(() => {});
+    if (selectedInstrumentId) releaseEditorLock("instrument", selectedInstrumentId).catch(() => {});
     setSelectedInstrumentId(null);
     const draft = blankInstrumentPayload();
     draft.instrument.tool_type = workspace?.preferences?.metrologyToolTypes?.[0] || "";
@@ -3921,7 +4372,11 @@ useEffect(() => api.onDeepLink?.((payload) => {
   };
 
   const createInlineMaterial = async (draft) => {
-    const saved = await api.saveMaterial(draft);
+    const lockOptions = await saveLockOptionsForRecord("material", draft.id, draft);
+    if (lockOptions === null) {
+      throw new Error("Material is locked by another AMERP session.");
+    }
+    const saved = await api.saveMaterial(draft, lockOptions);
     patchWorkspaceRecord("materials", syncMaterialClassification(saved, workspace?.preferences));
     return saved;
   };
@@ -3929,13 +4384,10 @@ useEffect(() => api.onDeepLink?.((payload) => {
   const showMaterialsList = async () => {
     const confirmed = await confirmLeaveIfDirty(async () => {});
     if (!confirmed) return;
+    await releaseAllSelectedEditorLocks();
     if (selectedNonconformanceId) {
-      api.releaseLock("nonconformance", selectedNonconformanceId).catch(() => {});
       setSelectedNonconformanceId(null);
       setNonconformanceRecord(null);
-    }
-    if (selectedMaterialId) {
-      api.releaseLock("material", selectedMaterialId).catch(() => {});
     }
     setSelectedMaterialId(null);
     setMaterial(null);
@@ -3947,13 +4399,10 @@ useEffect(() => api.onDeepLink?.((payload) => {
   const showMetrologyList = async () => {
     const confirmed = await confirmLeaveIfDirty(async () => {});
     if (!confirmed) return;
+    await releaseAllSelectedEditorLocks();
     if (selectedNonconformanceId) {
-      api.releaseLock("nonconformance", selectedNonconformanceId).catch(() => {});
       setSelectedNonconformanceId(null);
       setNonconformanceRecord(null);
-    }
-    if (selectedInstrumentId) {
-      api.releaseLock("instrument", selectedInstrumentId).catch(() => {});
     }
     setSelectedInstrumentId(null);
     setInstrumentPayload(null);
@@ -4010,7 +4459,7 @@ useEffect(() => api.onDeepLink?.((payload) => {
     try {
       const result = await api.undoKanbanImport(cardIds);
       if (selectedKanbanId && cardIds.includes(selectedKanbanId)) {
-        await api.releaseLock("kanban", selectedKanbanId).catch(() => {});
+        await releaseEditorLock("kanban", selectedKanbanId);
         setSelectedKanbanId(null);
         setKanbanCard(null);
         setKanbanScreen("list");
@@ -4216,16 +4665,28 @@ useEffect(() => api.onDeepLink?.((payload) => {
   };
 
   const saveCustomer = async (customer) => {
-    const saved = await api.saveCustomer(customer);
+    const lockOptions = await saveLockOptionsForRecord("customer", customer.id, customer);
+    if (lockOptions === null) {
+      throw new Error("Customer is locked by another AMERP session.");
+    }
+    const saved = await api.saveCustomer(customer, lockOptions);
     patchWorkspaceRecord("customers", saved);
+    await releaseEditorLock("customer", saved.id);
     return saved;
   };
 
   const savePreferences = async (preferences, { silent = false } = {}) => {
-    setBusy(true);
     try {
-      const saved = await api.savePreferences(preferences);
+      const currentPreferences = workspace?.preferences || {};
+      const lockOptions = await saveLockOptionsForRecord("preferences", "preferences", currentPreferences);
+      if (lockOptions === null) {
+        throw new Error("Settings are locked by another AMERP session.");
+      }
+      const saved = await api.savePreferences(preferences, lockOptions);
       setWorkspace((current) => current ? { ...current, preferences: saved } : current);
+      if (view !== "settings") {
+        await releaseEditorLock("preferences", "preferences");
+      }
       if (!silent) {
         showStatus("Settings saved.");
       }
@@ -4233,9 +4694,23 @@ useEffect(() => api.onDeepLink?.((payload) => {
     } catch (error) {
       showStatus(error.message || String(error));
       throw error;
-    } finally {
-      setBusy(false);
     }
+  };
+
+  const saveTemplate = async (template) => {
+    const lockOptions = await saveLockOptionsForRecord("template", template.id, template);
+    if (lockOptions === null) {
+      throw new Error("Template is locked by another AMERP session.");
+    }
+    return api.saveTemplate(template, lockOptions);
+  };
+
+  const saveLibrary = async (library) => {
+    const lockOptions = await saveLockOptionsForRecord("library", library.name, library);
+    if (lockOptions === null) {
+      throw new Error("Library is locked by another AMERP session.");
+    }
+    return api.saveLibrary(library, lockOptions);
   };
 
   const addMaterialFamilyOption = async (name) => {
@@ -4454,15 +4929,56 @@ useEffect(() => api.onDeepLink?.((payload) => {
         breadcrumbs: [{ label: "Time Clock", onClick: showTimeClock, active: true }],
         title: "Time Clock",
         subtitle: "Employee clock-in and clock-out.",
-        primaryActions: [],
+        primaryActions: [
+          <button key="time-admin" onClick={showTimeClockAdmin}><ClipboardList size={15} /> Time Admin</button>
+        ],
         dangerActions: []
       };
     }
     if (view === "timeclockAdmin") {
       return {
-        breadcrumbs: [{ label: "Time Admin", onClick: showTimeClockAdmin, active: true }],
+        breadcrumbs: [
+          { label: "Time Clock", onClick: showTimeClock, active: false },
+          { label: "Time Admin", onClick: null, active: true }
+        ],
         title: "Time Admin",
         subtitle: "Session review, paid marking, corrections, and employee management.",
+        primaryActions: [],
+        dangerActions: []
+      };
+    }
+    if (view === "processDocs") {
+      return {
+        breadcrumbs: [{ label: "Process Documentation", onClick: () => showPlaceholderModule("processDocs"), active: true }],
+        title: "Process Documentation",
+        subtitle: "Internal process documentation, QMS, controlled procedures, and shop standards.",
+        primaryActions: [],
+        dangerActions: []
+      };
+    }
+    if (view === "customerManagement") {
+      return {
+        breadcrumbs: [{ label: "Customer Management", onClick: () => showPlaceholderModule("customerManagement"), active: true }],
+        title: "Customer Management",
+        subtitle: "Customer records, contacts, requirements, and commercial context.",
+        primaryActions: [],
+        dangerActions: []
+      };
+    }
+    if (view === "vendorManagement") {
+      return {
+        breadcrumbs: [{ label: "Vendor Management", onClick: () => showPlaceholderModule("vendorManagement"), active: true }],
+        title: "Vendor Management",
+        subtitle: "Vendor and supplier records, contacts, capabilities, and purchasing context.",
+        primaryActions: [],
+        dangerActions: []
+      };
+    }
+    if (view === "maintenance") {
+      return {
+        breadcrumbs: [{ label: "Maintenance", onClick: () => showPlaceholderModule("maintenance"), active: true }],
+        title: "Maintenance",
+        subtitle: "Equipment maintenance records, schedules, and service history.",
         primaryActions: [],
         dangerActions: []
       };
@@ -4540,6 +5056,11 @@ useEffect(() => api.onDeepLink?.((payload) => {
       dangerActions: []
     };
   })();
+  const currentLockTargetForRender = currentEditorLockTarget();
+  const currentLockStateForRender = currentEditorLockState();
+  const currentLockWarningForRender = lockWarningMessage(currentLockStateForRender);
+  const currentEditorDirtyForRender = currentMainEditorIsDirty();
+  const currentEditorSaveDisabled = saveState === "saving" || !currentEditorDirtyForRender;
   const appTitle = workspace?.preferences?.appTitle || "AMERP";
   const appTagline = workspace?.preferences?.appTagline || "Operator ERP";
   const appIconPath = workspace?.preferences?.appIconPath || "";
@@ -4564,8 +5085,10 @@ useEffect(() => api.onDeepLink?.((payload) => {
             const handlers = {
               jobs: showJobList,
               timeclock: showTimeClock,
-              timeclockAdmin: showTimeClockAdmin,
-              inspections: showInspectionList,
+              processDocs: () => showPlaceholderModule("processDocs"),
+              customerManagement: () => showPlaceholderModule("customerManagement"),
+              vendorManagement: () => showPlaceholderModule("vendorManagement"),
+              maintenance: () => showPlaceholderModule("maintenance"),
               nonconformance: showNonconformanceList,
               kanban: showKanbanList,
               materials: showMaterialsList,
@@ -4602,13 +5125,16 @@ useEffect(() => api.onDeepLink?.((payload) => {
           </div>
           <div className="topbar-actions">
             <SaveStatePill state={saveState} />
+            {currentLockWarningForRender ? (
+              <LockStatePill state={currentLockStateForRender} />
+            ) : null}
             <div className="toolbar topbar-actions-main">
               {mainEditorHasExplicitSave() ? (
                 <>
-                  <button onClick={() => void saveCurrentMainEditor()} disabled={saveState === "saving" || !currentMainEditorIsDirty()}>
+                  <button onClick={() => void saveCurrentMainEditor()} disabled={currentEditorSaveDisabled}>
                     <Save size={15} /> Save
                   </button>
-                  <button className="subtle" onClick={revertCurrentMainEditor} disabled={!currentMainEditorIsDirty() || saveState === "saving"}>
+                  <button className="subtle" onClick={revertCurrentMainEditor} disabled={!currentEditorDirtyForRender || saveState === "saving"}>
                     <RotateCcw size={15} /> Discard
                   </button>
                 </>
@@ -4622,6 +5148,7 @@ useEffect(() => api.onDeepLink?.((payload) => {
         </header>
 
         {status && <div className="status-banner">{status}</div>}
+        {currentLockWarningForRender ? <div className="lock-warning-banner">{currentLockWarningForRender}</div> : null}
         {view === "jobs" && moduleIsEnabled("jobs") && (
           <JobsView
             busy={busy}
@@ -4729,6 +5256,34 @@ useEffect(() => api.onDeepLink?.((payload) => {
             onStatus={showStatus}
           />
         )}
+        {view === "processDocs" && moduleIsEnabled("processDocs") && (
+          <PlaceholderModuleView
+            title="Process Documentation"
+            kicker="Internal Documentation"
+            description="This section will hold QMS documentation, controlled procedures, work standards, and internal process references."
+          />
+        )}
+        {view === "customerManagement" && moduleIsEnabled("customerManagement") && (
+          <PlaceholderModuleView
+            title="Customer Management"
+            kicker="Customer Records"
+            description="This section will hold customer records, contacts, requirements, and account context."
+          />
+        )}
+        {view === "vendorManagement" && moduleIsEnabled("vendorManagement") && (
+          <PlaceholderModuleView
+            title="Vendor Management"
+            kicker="Vendor Records"
+            description="This section will hold vendor and supplier records, contacts, capabilities, and purchasing context."
+          />
+        )}
+        {view === "maintenance" && moduleIsEnabled("maintenance") && (
+          <PlaceholderModuleView
+            title="Maintenance"
+            kicker="Equipment Care"
+            description="This section will hold equipment maintenance records, scheduled service, repairs, and maintenance history."
+          />
+        )}
         {view === "kanban" && moduleIsEnabled("kanban") && (
           <KanbanView
             workspace={workspace}
@@ -4791,6 +5346,8 @@ useEffect(() => api.onDeepLink?.((payload) => {
           <SettingsView
             onChooseDataFolder={() => api.selectDataFolder().then(() => refreshWorkspace(false))}
             onSavePreferences={savePreferences}
+            onSaveTemplate={saveTemplate}
+            onSaveLibrary={saveLibrary}
             workspace={workspace}
             selectedTemplate={selectedTemplate}
             setSelectedTemplateId={setSelectedTemplateId}
@@ -4921,6 +5478,22 @@ function NavButton({ icon: Icon, active, label, onClick }) {
       <Icon size={16} />
       {label}
     </button>
+  );
+}
+
+function PlaceholderModuleView({ title, kicker, description }) {
+  return (
+    <div className="workflow-stack">
+      <section className="panel placeholder-module-panel">
+        <div className="placeholder-module-eyebrow">{kicker}</div>
+        <h2>{title}</h2>
+        <p>{description}</p>
+        <div className="placeholder-module-card">
+          <strong>Coming soon</strong>
+          <span>This workspace is reserved for a future AMERP module.</span>
+        </div>
+      </section>
+    </div>
   );
 }
 
@@ -5773,7 +6346,9 @@ function DocumentsPanel({
   onDeleteDocument,
   onReviseDocument,
   emptyText,
-  readOnly = false
+  readOnly = false,
+  addButtonLabel = "Add Attachment",
+  showImagePreview = false
 }) {
   const [showArchived, setShowArchived] = useState(false);
   const [expandedDocumentId, setExpandedDocumentId] = useState("");
@@ -5797,7 +6372,7 @@ function DocumentsPanel({
               {showArchived ? "Hide Archived" : `Show Archived (${archivedDocuments.length})`}
             </button>
           ) : null}
-          <button onClick={onAddDocuments} disabled={readOnly}><FolderOpen size={14} /> Add Attachment</button>
+          <button onClick={onAddDocuments} disabled={readOnly}><FolderOpen size={14} /> {addButtonLabel}</button>
         </div>
       </div>
       <div className="document-list">
@@ -5869,6 +6444,11 @@ function DocumentsPanel({
                   </div>
                 ) : null}
               </div>
+            ) : null}
+            {showImagePreview && document.storedPath && PART_PHOTO_FILE_TYPES.has(normalizedDocumentFileType(document)) ? (
+              <button className="document-photo-preview" onClick={() => onOpenDocument(document.id)}>
+                <img src={api.assetUrl(document.storedPath)} alt={document.originalFilename || "Part photo"} />
+              </button>
             ) : null}
           </div>
         );
@@ -6193,7 +6773,7 @@ function JobsView({
           removePart(selectedPart.id);
           onBackToJob();
         }}
-        onAddDocuments={() => onAddPartDocuments(selectedPart.id)}
+        onAddDocuments={(options) => onAddPartDocuments(selectedPart.id, options)}
         onOpenDocument={(documentId) => onOpenPartDocument(job.id, selectedPart.id, documentId)}
         onOpenRevision={(documentId, revisionIndex) => onOpenPartDocumentRevision(job.id, selectedPart.id, documentId, revisionIndex)}
         onArchiveDocument={(documentId, filename, archived) => {
@@ -6501,6 +7081,14 @@ function PartDetailScreen({
   const updateField = (patch) => onUpdate((current) => ({ ...current, ...patch }));
   const updateRevision = (patch) => onUpdate((current) => ({ ...current, revision: { ...current.revision, ...patch } }));
   const selectedMaterials = (materials || []).filter((item) => (part.requiredMaterialLots || []).includes(item.id));
+  const { drawings, photos, attachments } = partDocumentBuckets(part.documents || []);
+  const documentPanelActions = {
+    onOpenDocument,
+    onOpenRevision,
+    onArchiveDocument,
+    onDeleteDocument,
+    onReviseDocument
+  };
 
   return (
     <div className="workflow-stack">
@@ -6598,17 +7186,49 @@ function PartDetailScreen({
         </section>
       </div>
 
-      <DocumentsPanel
-        title="Part Attachments"
-        documents={part.documents || []}
-        onAddDocuments={onAddDocuments}
-        onOpenDocument={onOpenDocument}
-        onOpenRevision={onOpenRevision}
-        onArchiveDocument={onArchiveDocument}
-        onDeleteDocument={onDeleteDocument}
-        onReviseDocument={onReviseDocument}
-        emptyText="No part attachments attached yet."
-      />
+      <div className="part-file-grid">
+        <DocumentsPanel
+          title="Part Drawings"
+          documents={drawings}
+          onAddDocuments={() => onAddDocuments({
+            title: "Choose Part Drawings",
+            category: "Drawing",
+            description: "Part drawing",
+            filters: [
+              { name: "Drawing Files", extensions: ["pdf", "dwg", "dxf", "step", "stp", "igs", "iges", "png", "jpg", "jpeg", "tif", "tiff"] }
+            ]
+          })}
+          {...documentPanelActions}
+          addButtonLabel="Add Drawing"
+          emptyText="No part drawings attached yet."
+        />
+        <DocumentsPanel
+          title="Part Photos"
+          documents={photos}
+          onAddDocuments={() => onAddDocuments({
+            title: "Choose Part Photos",
+            category: "Photo",
+            description: "Part photo",
+            filters: [
+              { name: "Image Files", extensions: ["png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff", "heic", "heif"] }
+            ]
+          })}
+          {...documentPanelActions}
+          addButtonLabel="Add Photos"
+          showImagePreview
+          emptyText="No part photos attached yet."
+        />
+        <DocumentsPanel
+          title="Part Attachments"
+          documents={attachments}
+          onAddDocuments={() => onAddDocuments({
+            title: "Choose Part Attachments",
+            category: "Other"
+          })}
+          {...documentPanelActions}
+          emptyText="No other part attachments attached yet."
+        />
+      </div>
 
       <MaterialPickerDialog
         open={showMaterialPicker}
@@ -6654,7 +7274,7 @@ function PdfPagePreview({ fileUrl, pageNumber, zoom, balloons, selectedBalloonId
       }
       setRenderState((current) => ({ ...current, loading: true, error: "" }));
       try {
-        const loadingTask = getDocument(fileUrl);
+        const loadingTask = loadPdfDocument(fileUrl);
         const pdf = await loadingTask.promise;
         const safePageNumber = Math.max(1, Math.min(pdf.numPages, pageNumber || 1));
         const page = await pdf.getPage(safePageNumber);
@@ -6742,8 +7362,14 @@ function PdfPagePreview({ fileUrl, pageNumber, zoom, balloons, selectedBalloonId
               <button
                 key={balloon.id}
                 type="button"
-                className={`inspection-balloon ${balloon.characteristicId === selectedBalloonId ? "selected" : ""}`}
+                className={[
+                  "inspection-balloon",
+                  balloon.characteristicId === selectedBalloonId ? "selected" : "",
+                  balloon.placementSource === "ai" ? "ai" : "manual",
+                  balloon.confidence ? `confidence-${String(balloon.confidence).toLowerCase().replace(/[^a-z0-9-]/g, "")}` : ""
+                ].filter(Boolean).join(" ")}
                 style={{ left: `${balloon.x * 100}%`, top: `${balloon.y * 100}%` }}
+                title={`Balloon ${balloon.labelText || "?"} - page ${balloon.pageNumber || 1}${balloon.placementSource === "ai" ? " - AI placed" : ""}`}
                 onPointerDown={(event) => {
                   event.stopPropagation();
                   event.preventDefault();
@@ -6791,6 +7417,16 @@ function PartInspectionSetupScreen({ busy, job, part, instruments, onUpdate, onE
   const selectedDrawing = drawings.find((document) => document.id === selectedDrawingId) || drawings[0] || null;
   const selectedCharacteristic = inspection.characteristics.find((item) => item.id === selectedCharacteristicId) || inspection.characteristics[0] || null;
   const instrumentOptions = normalizeInstrumentOptions(instruments);
+  const drawingPageCount = Math.max(1, Number(pageCount || 1) || 1);
+  const balloonsForDrawing = inspection.balloons.filter((balloon) => balloon.sourceDrawingDocumentId === selectedDrawing?.id);
+  const balloonByCharacteristic = new Map(balloonsForDrawing.map((balloon) => [balloon.characteristicId, balloon]));
+  const pageBalloonCounts = balloonsForDrawing.reduce((counts, balloon) => {
+    const page = Math.max(1, Math.min(drawingPageCount, Number(balloon.pageNumber || 1) || 1));
+    counts.set(page, (counts.get(page) || 0) + 1);
+    return counts;
+  }, new Map());
+  const pageOptions = Array.from({ length: drawingPageCount }, (_item, index) => index + 1);
+  const selectedCharacteristicBalloon = selectedCharacteristic ? balloonByCharacteristic.get(selectedCharacteristic.id) : null;
   const currentSnapshot = JSON.stringify(inspection);
   if (lastSnapshotRef.current !== currentSnapshot) {
     lastSnapshotRef.current = currentSnapshot;
@@ -6833,6 +7469,10 @@ function PartInspectionSetupScreen({ busy, job, part, instruments, onUpdate, onE
     setPageCount(1);
     setZoom(null);
   }, [selectedDrawing?.id]);
+
+  useEffect(() => {
+    setCurrentPage((current) => Math.max(1, Math.min(drawingPageCount, current)));
+  }, [drawingPageCount]);
 
   useEffect(() => {
     const handleKeydown = (event) => {
@@ -6906,27 +7546,78 @@ function PartInspectionSetupScreen({ busy, job, part, instruments, onUpdate, onE
       balloons: inspection.balloons.map((item) => item.id === balloonId ? { ...item, ...position } : item)
     }, { recordHistory: false });
   };
+  const goToCharacteristicBalloon = (characteristicId) => {
+    setSelectedCharacteristicId(characteristicId);
+    const target = inspection.balloons.find((item) => item.characteristicId === characteristicId && item.sourceDrawingDocumentId === selectedDrawing?.id)
+      || inspection.balloons.find((item) => item.characteristicId === characteristicId);
+    if (!target) {
+      return;
+    }
+    if (target.sourceDrawingDocumentId) {
+      setSelectedDrawingId(target.sourceDrawingDocumentId);
+    }
+    setCurrentPage(Math.max(1, Number(target.pageNumber || 1) || 1));
+  };
+  const goToProposedBalloon = (item) => {
+    const proposal = item?.proposedBalloon;
+    if (!proposal) {
+      return;
+    }
+    if (proposal.sourceDrawingDocumentId) {
+      setSelectedDrawingId(proposal.sourceDrawingDocumentId);
+    }
+    setCurrentPage(Math.max(1, Number(proposal.pageNumber || 1) || 1));
+  };
   const acceptReviewItem = (itemId) => {
     const item = inspection.reviewQueue.find((candidate) => candidate.id === itemId);
     if (!item) return;
+    const proposal = item.proposedBalloon || null;
+    const acceptedItem = { ...item, proposedBalloon: null };
+    const nextBalloons = proposal?.sourceDrawingDocumentId ? [
+      ...inspection.balloons,
+      {
+        id: uid("balloon"),
+        characteristicId: acceptedItem.id,
+        sourceDrawingDocumentId: proposal.sourceDrawingDocumentId,
+        pageNumber: Math.max(1, Number(proposal.pageNumber || 1) || 1),
+        x: proposal.x ?? 0.5,
+        y: proposal.y ?? 0.5,
+        labelText: acceptedItem.number || "?",
+        confidence: acceptedItem.confidence || proposal.confidence || "",
+        placementSource: proposal.placementSource || "ai"
+      }
+    ] : inspection.balloons;
     applyInspection({
       ...inspection,
-      characteristics: [...inspection.characteristics, item],
+      characteristics: [...inspection.characteristics, acceptedItem],
+      balloons: nextBalloons,
       reviewQueue: inspection.reviewQueue.filter((candidate) => candidate.id !== itemId)
     });
-    setSelectedCharacteristicId(item.id);
+    setSelectedCharacteristicId(acceptedItem.id);
+    if (proposal?.sourceDrawingDocumentId) {
+      setSelectedDrawingId(proposal.sourceDrawingDocumentId);
+      setCurrentPage(Math.max(1, Number(proposal.pageNumber || 1) || 1));
+    }
   };
   const rejectReviewItem = (itemId) => applyInspection({
     ...inspection,
     reviewQueue: inspection.reviewQueue.filter((candidate) => candidate.id !== itemId)
   });
   const drawingUrl = selectedDrawing?.storedPath ? api.assetUrl(selectedDrawing.storedPath) : "";
-  const visibleBalloons = inspection.balloons.filter((balloon) => balloon.sourceDrawingDocumentId === selectedDrawing?.id && Number(balloon.pageNumber || 1) === currentPage);
+  const visibleBalloons = balloonsForDrawing.filter((balloon) => Number(balloon.pageNumber || 1) === currentPage);
   const isExtractingDrawing = Boolean(extractingDrawingId);
   const extractFromDrawing = async (source) => {
     setExtractingDrawingId(source?.documentId || selectedDrawing?.id || "upload");
     try {
-      await onExtract(source);
+      const result = await onExtract(source?.upload ? source : { ...source, document: selectedDrawing || null });
+      if (result?.document?.id) {
+        setSelectedDrawingId(result.document.id);
+      }
+      const firstBalloon = result?.balloons?.[0] || null;
+      if (firstBalloon?.characteristicId) {
+        setSelectedCharacteristicId(firstBalloon.characteristicId);
+        setCurrentPage(Math.max(1, Number(firstBalloon.pageNumber || 1) || 1));
+      }
     } finally {
       setExtractingDrawingId("");
     }
@@ -6942,7 +7633,7 @@ function PartInspectionSetupScreen({ busy, job, part, instruments, onUpdate, onE
           </div>
           <div className="toolbar">
             <button onClick={() => extractFromDrawing({ upload: true })} disabled={busy || isExtractingDrawing}>Upload + AI Extract</button>
-            <button onClick={() => selectedDrawing && extractFromDrawing({ documentId: selectedDrawing.id })} disabled={busy || isExtractingDrawing || !selectedDrawing}>AI Extract</button>
+            <button onClick={() => selectedDrawing && extractFromDrawing({ documentId: selectedDrawing.id })} disabled={busy || isExtractingDrawing || !selectedDrawing}>AI Extract + Place Balloons</button>
             <button onClick={() => selectedDrawing && onGenerateBalloonedPdf(selectedDrawing.id)} disabled={busy || !selectedDrawing}>Ballooned PDF</button>
           </div>
         </div>
@@ -6958,7 +7649,14 @@ function PartInspectionSetupScreen({ busy, job, part, instruments, onUpdate, onE
             <span>Selected Balloon</span>
             <select value={selectedCharacteristic?.id || ""} onChange={(event) => setSelectedCharacteristicId(event.target.value)}>
               {!inspection.characteristics.length && <option value="">No characteristics</option>}
-              {inspection.characteristics.map((characteristic) => <option key={characteristic.id} value={characteristic.id}>{characteristic.number || "?"} - {characteristic.type}</option>)}
+              {inspection.characteristics.map((characteristic) => {
+                const balloon = balloonByCharacteristic.get(characteristic.id);
+                return (
+                  <option key={characteristic.id} value={characteristic.id}>
+                    {characteristic.number || "?"} - {characteristic.type}{balloon ? ` (page ${balloon.pageNumber || 1})` : " (not placed)"}
+                  </option>
+                );
+              })}
             </select>
           </label>
           <label className="field">
@@ -6970,8 +7668,16 @@ function PartInspectionSetupScreen({ busy, job, part, instruments, onUpdate, onE
         </div>
         <div className="inspection-preview-toolbar">
           <button onClick={() => setCurrentPage((current) => Math.max(1, current - 1))} disabled={!selectedDrawing || currentPage <= 1}>Prev Page</button>
-          <span>Page {currentPage}</span>
-          <button onClick={() => setCurrentPage((current) => Math.min(pageCount, current + 1))} disabled={!selectedDrawing || currentPage >= pageCount}>Next Page</button>
+          <label className="inspection-page-jump">
+            <span>Page</span>
+            <select value={currentPage} onChange={(event) => setCurrentPage(Number(event.target.value) || 1)} disabled={!selectedDrawing}>
+              {pageOptions.map((page) => {
+                const count = pageBalloonCounts.get(page) || 0;
+                return <option key={page} value={page}>{page} of {drawingPageCount}{count ? ` - ${count} balloon${count === 1 ? "" : "s"}` : ""}</option>;
+              })}
+            </select>
+          </label>
+          <button onClick={() => setCurrentPage((current) => Math.min(drawingPageCount, current + 1))} disabled={!selectedDrawing || currentPage >= drawingPageCount}>Next Page</button>
           <button onClick={() => setZoom((current) => Math.max(0.05, Number((((current ?? activeScale) || 1) - 0.15).toFixed(2))))} disabled={!selectedDrawing}>-</button>
           <span>{Math.round(((zoom ?? activeScale) || 1) * 100)}%</span>
           <button onClick={() => setZoom((current) => Math.min(3, Number((((current ?? activeScale) || 1) + 0.15).toFixed(2))))} disabled={!selectedDrawing}>+</button>
@@ -6983,6 +7689,8 @@ function PartInspectionSetupScreen({ busy, job, part, instruments, onUpdate, onE
             <span>{selectedCharacteristic.type}</span>
             <span>Nominal: {[selectedCharacteristic.nominal, inspection.units].filter(Boolean).join(" ") || "-"}</span>
             <span>Tolerance: {characteristicToleranceSummary(selectedCharacteristic) || "-"}</span>
+            <span>Balloon: {selectedCharacteristicBalloon ? `Page ${selectedCharacteristicBalloon.pageNumber || 1} (${selectedCharacteristicBalloon.placementSource === "ai" ? "AI" : "Manual"})` : "Not placed"}</span>
+            {selectedCharacteristicBalloon ? <button className="subtle" onClick={() => goToCharacteristicBalloon(selectedCharacteristic.id)}>Go To Balloon</button> : null}
           </div>
         ) : null}
         <PdfPagePreview
@@ -7017,7 +7725,14 @@ function PartInspectionSetupScreen({ busy, job, part, instruments, onUpdate, onE
                 <div key={item.id} className="inline-card">
                   <strong>{item.number} - {item.type}</strong>
                   <span>{[item.nominal, inspection.units, item.gdTolerance || `${item.plusTolerance || ""}/${item.minusTolerance || ""}`].filter(Boolean).join(" ")}</span>
+                  {item.proposedBalloon ? (
+                    <span>
+                      Proposed balloon: page {item.proposedBalloon.pageNumber || 1}
+                      {item.proposedBalloon.confidence ? ` / ${item.proposedBalloon.confidence} confidence` : ""}
+                    </span>
+                  ) : null}
                   <div className="tiny-toolbar">
+                    {item.proposedBalloon ? <button onClick={() => goToProposedBalloon(item)}>Go To Page</button> : null}
                     <button onClick={() => acceptReviewItem(item.id)}>Accept</button>
                     <button className="danger subtle" onClick={() => rejectReviewItem(item.id)}>Reject</button>
                   </div>
@@ -7043,6 +7758,7 @@ function PartInspectionSetupScreen({ busy, job, part, instruments, onUpdate, onE
             <thead>
               <tr>
                 <th>#</th>
+                <th>Balloon</th>
                 <th>Type</th>
                 <th>Requirement</th>
                 <th>Nominal</th>
@@ -7060,6 +7776,16 @@ function PartInspectionSetupScreen({ busy, job, part, instruments, onUpdate, onE
               {inspection.characteristics.map((characteristic) => (
                 <tr key={characteristic.id} className={selectedCharacteristic?.id === characteristic.id ? "inspection-plan-row selected" : "inspection-plan-row"}>
                   <td onClick={() => setSelectedCharacteristicId(characteristic.id)}><strong>{characteristic.number || "-"}</strong></td>
+                  <td>
+                    {(() => {
+                      const balloon = balloonByCharacteristic.get(characteristic.id);
+                      return (
+                        <button className="subtle" onClick={() => goToCharacteristicBalloon(characteristic.id)}>
+                          {balloon ? `Page ${balloon.pageNumber || 1}` : "Place"}
+                        </button>
+                      );
+                    })()}
+                  </td>
                   <td>
                     <select value={characteristic.type || "Dimension"} onChange={(event) => updateCharacteristic(characteristic.id, { type: event.target.value })} onFocus={() => setSelectedCharacteristicId(characteristic.id)}>
                       {["Dimension", "GD&T", "Thread", "Surface Finish", "Note"].map((type) => <option key={type} value={type}>{type}</option>)}
@@ -9140,6 +9866,7 @@ function PrintPdfPage({ fileUrl, pageNumber = 1, bare = false }) {
   const canvasRef = useRef(null);
   const [error, setError] = useState("");
   const [rendered, setRendered] = useState(false);
+  const [renderedImage, setRenderedImage] = useState("");
 
   useEffect(() => {
     let cancelled = false;
@@ -9148,15 +9875,17 @@ function PrintPdfPage({ fileUrl, pageNumber = 1, bare = false }) {
         setRendered(true);
         return;
       }
+      let pdf = null;
       try {
         setError("");
         setRendered(false);
-        const loadingTask = getDocument(fileUrl);
-        const pdf = await loadingTask.promise;
+        setRenderedImage("");
+        const loadingTask = loadPdfDocument(fileUrl);
+        pdf = await loadingTask.promise;
         const safePageNumber = Math.max(1, Math.min(pdf.numPages, pageNumber || 1));
         const page = await pdf.getPage(safePageNumber);
         const baseViewport = page.getViewport({ scale: 1 });
-        const targetWidth = 930;
+        const targetWidth = bare ? 1500 : 1200;
         const viewport = page.getViewport({ scale: targetWidth / baseViewport.width });
         if (cancelled || !canvasRef.current) {
           return;
@@ -9169,12 +9898,19 @@ function PrintPdfPage({ fileUrl, pageNumber = 1, bare = false }) {
         canvas.style.height = "auto";
         await page.render({ canvasContext: context, viewport }).promise;
         if (!cancelled) {
+          setRenderedImage(canvas.toDataURL("image/png"));
           setRendered(true);
         }
       } catch (nextError) {
         if (!cancelled) {
           setError(nextError.message || String(nextError));
           setRendered(true);
+        }
+      } finally {
+        try {
+          await pdf?.destroy?.();
+        } catch (_error) {
+          // Best-effort cleanup only; export readiness is controlled by rendered state above.
         }
       }
     };
@@ -9192,9 +9928,56 @@ function PrintPdfPage({ fileUrl, pageNumber = 1, bare = false }) {
   }
   return (
     <div className={`${bare ? "inspection-print-drawing-frame inspection-print-drawing-frame-bare" : "inspection-print-drawing-frame"} ${rendered ? "print-render-ready" : "print-render-pending"}`}>
-      <canvas ref={canvasRef} className="inspection-print-drawing-canvas" />
+      {renderedImage ? <img className="inspection-print-drawing-image" src={renderedImage} alt="Rendered PDF page" /> : null}
+      <canvas ref={canvasRef} className="inspection-print-drawing-canvas" style={renderedImage ? { display: "none" } : undefined} />
     </div>
   );
+}
+
+function PrintPdfDocumentPages({ fileUrl, onPageCount, renderPage }) {
+  const [pageCount, setPageCount] = useState(fileUrl ? 0 : 1);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      if (!fileUrl) {
+        setPageCount(1);
+        onPageCount?.(1);
+        return;
+      }
+      try {
+        setError("");
+        setPageCount(0);
+        const loadingTask = loadPdfDocument(fileUrl);
+        const pdf = await loadingTask.promise;
+        const nextPageCount = Math.max(1, Number(pdf.numPages || 1) || 1);
+        await pdf.destroy?.();
+        if (!cancelled) {
+          setPageCount(nextPageCount);
+          onPageCount?.(nextPageCount);
+        }
+      } catch (nextError) {
+        if (!cancelled) {
+          setError(nextError.message || String(nextError));
+          setPageCount(1);
+          onPageCount?.(1);
+        }
+      }
+    };
+    void load();
+    return () => {
+      cancelled = true;
+    };
+  }, [fileUrl, onPageCount]);
+
+  if (error) {
+    return <div className="traveler-empty-state print-render-ready">{error}</div>;
+  }
+  if (!pageCount) {
+    return <div className="traveler-empty-state print-render-pending">Loading drawing pages...</div>;
+  }
+  return Array.from({ length: pageCount }, (_item, index) => renderPage(index + 1, pageCount));
 }
 
 function PrintImagePage({ fileUrl, alt = "", bare = false }) {
@@ -10986,7 +11769,8 @@ function TemplateSettingsSection({
   onStatus,
   onRefresh,
   onDirtyChange,
-  onRegisterActions
+  onRegisterActions,
+  onSaveTemplate
 }) {
   const [template, setTemplate] = useState(selectedTemplate || blankTemplate());
   const [pendingTemplateAction, setPendingTemplateAction] = useState(null);
@@ -11042,13 +11826,18 @@ function TemplateSettingsSection({
 
   const saveTemplateNow = async () => {
     try {
-      const saved = await api.saveTemplate(template);
+      const saved = await onSaveTemplate(template);
+      if (!saved) {
+        return false;
+      }
       setTemplate(saved);
       setSelectedTemplateId(saved.id);
       await onRefresh();
       onStatus("Template saved.");
+      return true;
     } catch (error) {
       onStatus(error.message || String(error));
+      return false;
     }
   };
 
@@ -11189,7 +11978,7 @@ function TemplateSettingsSection({
   );
 }
 
-function LibrarySettingsSection({ workspace, onStatus, onRefresh, onDirtyChange, onRegisterActions }) {
+function LibrarySettingsSection({ workspace, onStatus, onRefresh, onDirtyChange, onRegisterActions, onSaveLibrary }) {
   const [libraries, setLibraries] = useState(libraryList(workspace.libraries));
   const [selectedLibraryName, setSelectedLibraryName] = useState(libraryList(workspace.libraries)[0]?.name || null);
   const [deletingLibraryName, setDeletingLibraryName] = useState("");
@@ -11268,18 +12057,23 @@ function LibrarySettingsSection({ workspace, onStatus, onRefresh, onDirtyChange,
 
   const saveLibraryNow = async () => {
     if (!selectedLibrary) {
-      return;
+      return true;
     }
     try {
-      const saved = await api.saveLibrary(selectedLibrary);
+      const saved = await onSaveLibrary(selectedLibrary);
+      if (!saved) {
+        return false;
+      }
       setLibraries((current) => current.some((library) => library.name === saved.name)
         ? current.map((library) => library.name === saved.name ? saved : library)
         : [...current, saved]);
       setSelectedLibraryName(saved.name);
       await onRefresh();
       onStatus("Library saved.");
+      return true;
     } catch (error) {
       onStatus(error.message || String(error));
+      return false;
     }
   };
 
@@ -11400,6 +12194,8 @@ function LibrarySettingsSection({ workspace, onStatus, onRefresh, onDirtyChange,
 function SettingsView({
   onChooseDataFolder,
   onSavePreferences,
+  onSaveTemplate,
+  onSaveLibrary,
   workspace,
   selectedTemplate,
   setSelectedTemplateId,
@@ -11429,6 +12225,7 @@ function SettingsView({
   const [jobSettings, setJobSettings] = useState(initialSettingsSnapshot.jobSettings);
   const [inspectionReportNumberSettings, setInspectionReportNumberSettings] = useState(initialSettingsSnapshot.inspectionReportNumberSettings);
   const [inspectionReportExportSettings, setInspectionReportExportSettings] = useState(initialSettingsSnapshot.inspectionReportExportSettings);
+  const [inspectionAiToleranceSettings, setInspectionAiToleranceSettings] = useState(initialSettingsSnapshot.inspectionAiToleranceSettings);
   const [nonconformanceNumberSettings, setNonconformanceNumberSettings] = useState(initialSettingsSnapshot.nonconformanceNumberSettings);
   const [kanbanNumberSettings, setKanbanNumberSettings] = useState(initialSettingsSnapshot.kanbanNumberSettings);
   const [timeClockSettings, setTimeClockSettings] = useState(initialSettingsSnapshot.timeClockSettings);
@@ -11447,6 +12244,7 @@ function SettingsView({
   const sourceJobSettings = settingsBaseline.jobSettings;
   const sourceInspectionReportNumberSettings = settingsBaseline.inspectionReportNumberSettings;
   const sourceInspectionReportExportSettings = settingsBaseline.inspectionReportExportSettings;
+  const sourceInspectionAiToleranceSettings = settingsBaseline.inspectionAiToleranceSettings;
   const sourceNonconformanceNumberSettings = settingsBaseline.nonconformanceNumberSettings;
   const sourceKanbanNumberSettings = settingsBaseline.kanbanNumberSettings;
   const sourceTimeClockSettings = settingsBaseline.timeClockSettings;
@@ -11494,12 +12292,14 @@ function SettingsView({
   const normalizedInspectionPayload = {
     inspectionReportPrefix: String(inspectionReportNumberSettings.inspectionReportPrefix || "").trim(),
     startingInspectionReportNumber: Number(inspectionReportNumberSettings.startingInspectionReportNumber || 0) || 1,
-    inspectionReportExportOptions: defaultInspectionReportExportOptions(inspectionReportExportSettings)
+    inspectionReportExportOptions: defaultInspectionReportExportOptions(inspectionReportExportSettings),
+    inspectionAiAssumedGeneralTolerances: normalizeInspectionAiAssumedGeneralTolerances(inspectionAiToleranceSettings)
   };
   const sourceInspectionPayload = {
     inspectionReportPrefix: String(sourceInspectionReportNumberSettings.inspectionReportPrefix || "").trim(),
     startingInspectionReportNumber: Number(sourceInspectionReportNumberSettings.startingInspectionReportNumber || 0) || 1,
-    inspectionReportExportOptions: defaultInspectionReportExportOptions(sourceInspectionReportExportSettings)
+    inspectionReportExportOptions: defaultInspectionReportExportOptions(sourceInspectionReportExportSettings),
+    inspectionAiAssumedGeneralTolerances: normalizeInspectionAiAssumedGeneralTolerances(sourceInspectionAiToleranceSettings)
   };
   const normalizedNonconformancePayload = {
     nonconformancePrefix: String(nonconformanceNumberSettings.nonconformancePrefix || "").trim(),
@@ -11606,6 +12406,7 @@ function SettingsView({
     setJobSettings(snapshot.jobSettings);
     setInspectionReportNumberSettings(snapshot.inspectionReportNumberSettings);
     setInspectionReportExportSettings(snapshot.inspectionReportExportSettings);
+    setInspectionAiToleranceSettings(snapshot.inspectionAiToleranceSettings);
     setNonconformanceNumberSettings(snapshot.nonconformanceNumberSettings);
     setKanbanNumberSettings(snapshot.kanbanNumberSettings);
     setTimeClockSettings(snapshot.timeClockSettings);
@@ -11723,6 +12524,15 @@ function SettingsView({
       return {
         defaultKanbanPrintSizeId: current.defaultKanbanPrintSizeId === sizeId ? (next[0]?.id || "") : current.defaultKanbanPrintSizeId,
         kanbanPrintSizes: next
+      };
+    });
+  };
+  const updateInspectionAiToleranceRule = (decimalPlaces, tolerance) => {
+    setInspectionAiToleranceSettings((current) => {
+      const normalized = normalizeInspectionAiAssumedGeneralTolerances(current);
+      return {
+        ...normalized,
+        rules: normalized.rules.map((rule) => rule.decimalPlaces === decimalPlaces ? { ...rule, tolerance } : rule)
       };
     });
   };
@@ -11879,6 +12689,7 @@ function SettingsView({
     if (activeSettingsTab === "inspections") {
       setInspectionReportNumberSettings(sourceInspectionReportNumberSettings);
       setInspectionReportExportSettings(sourceInspectionReportExportSettings);
+      setInspectionAiToleranceSettings(sourceInspectionAiToleranceSettings);
       return;
     }
     if (activeSettingsTab === "nonconformance") {
@@ -12270,6 +13081,39 @@ function SettingsView({
           <div className={`subpanel ${activeSettingsTab === "inspections" ? "" : "settings-section-hidden"}`}>
             <div className="subpanel-header">
               <div>
+                <h4>AI Drawing General Tolerances</h4>
+                <span>When AI extraction finds a dimension with no tolerance, apply the matching plus/minus tolerance from the number of decimal places.</span>
+              </div>
+            </div>
+            <div className="module-toggle-list">
+              <label className="module-toggle-row">
+                <input
+                  type="checkbox"
+                  checked={inspectionAiToleranceSettings.enabled === true}
+                  onChange={(event) => setInspectionAiToleranceSettings((current) => ({ ...normalizeInspectionAiAssumedGeneralTolerances(current), enabled: event.target.checked }))}
+                />
+                <span>
+                  <strong>Apply assumed general tolerances during AI extraction</strong>
+                  <small>Only used when the drawing extraction returns a nominal dimension with no explicit tolerance, limits, or GD&amp;T tolerance.</small>
+                </span>
+              </label>
+            </div>
+            <div className="form-grid compact-2 top-gap">
+              {normalizeInspectionAiAssumedGeneralTolerances(inspectionAiToleranceSettings).rules.map((rule) => (
+                <TextField
+                  key={rule.decimalPlaces}
+                  label={`${rule.decimalPlaces} decimal place${rule.decimalPlaces === 1 ? "" : "s"}`}
+                  value={rule.tolerance}
+                  onChange={(value) => updateInspectionAiToleranceRule(rule.decimalPlaces, value)}
+                  placeholder="0.005"
+                />
+              ))}
+            </div>
+            <div className="empty-inline">Values are applied as +/- in the extracted dimension units. Example: 1.250 with the 3-place rule 0.001 becomes +0.001 / -0.001.</div>
+          </div>
+          <div className={`subpanel ${activeSettingsTab === "inspections" ? "" : "settings-section-hidden"}`}>
+            <div className="subpanel-header">
+              <div>
                 <h4>Inspection Report Export Defaults</h4>
                 <span>These are the default checked sections when exporting an inspection report.</span>
               </div>
@@ -12346,7 +13190,7 @@ function SettingsView({
                   />
                   <span>
                     <strong>{module.label}</strong>
-                    <small>{ISO9001_MODULE_IDS.has(module.id) && !complianceSettings.iso9001ComplianceEnabled ? "Hidden while ISO 9001 compliance features are off." : module.id === "metrology" ? "Gage records and calibration tracking." : `${module.label} workspace.`}</small>
+                    <small>{ISO9001_MODULE_IDS.has(module.id) && !complianceSettings.iso9001ComplianceEnabled ? "Hidden while ISO 9001 compliance features are off." : module.description || `${module.label} workspace.`}</small>
                   </span>
                 </label>
               ))}
@@ -12366,6 +13210,7 @@ function SettingsView({
           workspace={workspace}
           onStatus={onStatus}
           onRefresh={onRefresh}
+          onSaveLibrary={onSaveLibrary}
           onDirtyChange={setLibraryDirty}
           onRegisterActions={(actions) => {
             libraryActionsRef.current = actions || { save: async () => true, discard: () => {} };
@@ -12386,6 +13231,7 @@ function SettingsView({
           setSelectedTemplateId={setSelectedTemplateId}
           onStatus={onStatus}
           onRefresh={onRefresh}
+          onSaveTemplate={onSaveTemplate}
           onDirtyChange={setTemplateDirty}
           onRegisterActions={(actions) => {
             templateActionsRef.current = actions || { save: async () => true, discard: () => {} };
@@ -13677,10 +14523,12 @@ function PrintNonconformanceReport({ ncrId }) {
   );
 }
 
-function PrintInspectionReport({ jobId, partId, reportId = "", exportOptions = defaultInspectionReportExportOptions() }) {
+function PrintInspectionReport({ jobId, partId, reportId = "", exportOptions = defaultInspectionReportExportOptions(), deferMaterialPdfCerts = false }) {
   const [payload, setPayload] = useState(null);
   const [error, setError] = useState("");
+  const [balloonedDrawingPageCount, setBalloonedDrawingPageCount] = useState(0);
   useEffect(() => {
+    setBalloonedDrawingPageCount(0);
     Promise.all([api.loadJob(jobId), api.loadWorkspace()]).then(async ([job, workspace]) => {
       const part = job?.parts?.find((item) => item.id === partId);
       const linkedMaterials = (await Promise.all(
@@ -13688,6 +14536,7 @@ function PrintInspectionReport({ jobId, partId, reportId = "", exportOptions = d
       )).filter(Boolean);
       const materialCerts = materialCertRows(linkedMaterials);
       const materialAttachmentPages = [];
+      let deferredMaterialPdfPageCount = 0;
       if (defaultInspectionReportExportOptions(exportOptions).includeMaterialCerts) {
         for (const attachment of materialCerts) {
           const fileUrl = attachment.storedPath ? api.assetUrl(attachment.storedPath) : "";
@@ -13696,10 +14545,16 @@ function PrintInspectionReport({ jobId, partId, reportId = "", exportOptions = d
           }
           if (isPdfAttachment(attachment)) {
             try {
-              const pdf = await getDocument(fileUrl).promise;
-              for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
-                materialAttachmentPages.push({ ...attachment, fileUrl, renderType: "pdf", pageNumber, pageCount: pdf.numPages });
+              const pdf = await loadPdfDocument(fileUrl).promise;
+              const pageCount = Math.max(1, Number(pdf.numPages || 1) || 1);
+              if (deferMaterialPdfCerts) {
+                deferredMaterialPdfPageCount += pageCount;
+              } else {
+                for (let pageNumber = 1; pageNumber <= pageCount; pageNumber += 1) {
+                  materialAttachmentPages.push({ ...attachment, fileUrl, renderType: "pdf", pageNumber, pageCount });
+                }
               }
+              await pdf.destroy?.();
             } catch (_error) {
               // Non-PDF/non-image attachments remain listed in the material cert table.
             }
@@ -13729,13 +14584,14 @@ function PrintInspectionReport({ jobId, partId, reportId = "", exportOptions = d
         nonconformances: workspace?.nonconformances || [],
         linkedMaterials,
         materialCerts,
-        materialAttachmentPages
+        materialAttachmentPages,
+        deferredMaterialPdfPageCount
       });
     }).catch((err) => setError(err.message || String(err)));
-  }, [jobId, partId]);
+  }, [jobId, partId, deferMaterialPdfCerts]);
   if (error) return <Fatal title="Inspection Print Error" message={error} />;
   if (!payload) return <LoadingScreen message="Preparing inspection report..." />;
-  const { job, part, inspection, instrumentOptions, instrumentBundles = [], nonconformances = [], linkedMaterials = [], materialCerts: loadedMaterialCerts = [], materialAttachmentPages = [] } = payload;
+  const { job, part, inspection, instrumentOptions, instrumentBundles = [], nonconformances = [], linkedMaterials = [], materialCerts: loadedMaterialCerts = [], materialAttachmentPages = [], deferredMaterialPdfPageCount = 0 } = payload;
   const options = defaultInspectionReportExportOptions(exportOptions);
   const selectedReport = buildInspectionReportDefaults(job, part, inspection, (inspection.reports || []).find((item) => item.id === reportId) || activeInspectionReport(inspection) || blankInspectionReport(), nonconformances, linkedMaterials);
   const printRelatedNcrNumbers = autoRelatedNcrNumbers(part, nonconformances, selectedReport, job);
@@ -13752,15 +14608,28 @@ function PrintInspectionReport({ jobId, partId, reportId = "", exportOptions = d
       chartPages.push(chartCharacteristics.slice(index, index + 3));
     }
   }
-  const characteristicPages = options.includeCharacteristics ? chunkList(snapshot.characteristics, 12) : [];
-  const measuredInstancePages = options.includeMeasuredInstances ? chunkList(snapshot.instances, 10) : [];
+  const characteristicPages = options.includeCharacteristics ? chunkList(snapshot.characteristics, 18) : [];
+  const measuredInstancePages = options.includeMeasuredInstances ? buildInspectionMeasuredPrintPages(snapshot.instances, snapshot.characteristics) : [];
   const releasePageNeeded = options.includeReleaseSummary || options.includeToolCertificationHistory;
-  const reportPageCount = 1
-    + (options.includeCharacteristics ? Math.max(characteristicPages.length, 1) : 0)
-    + (options.includeMeasuredInstances ? Math.max(measuredInstancePages.length, 1) : 0)
-    + (releasePageNeeded ? 1 : 0);
-  const totalPages = (options.includeBalloonedDrawing ? 1 : 0) + reportPageCount + (options.includeXBarCharts ? Math.max(chartPages.length, 1) : 0) + (options.includeMaterialCerts ? materialAttachmentPages.length : 0);
-  let pageCounter = 0;
+  const balloonedReportPageCount = options.includeBalloonedDrawing ? (balloonedUrl ? Math.max(1, balloonedDrawingPageCount || 1) : 1) : 0;
+  const overviewPageCount = 1;
+  const characteristicPageCount = options.includeCharacteristics ? Math.max(characteristicPages.length, 1) : 0;
+  const measuredPageCount = options.includeMeasuredInstances ? Math.max(measuredInstancePages.length, 1) : 0;
+  const releasePageCount = releasePageNeeded ? 1 : 0;
+  const chartPageCount = options.includeXBarCharts ? Math.max(chartPages.length, 1) : 0;
+  const materialAttachmentPageCount = options.includeMaterialCerts ? materialAttachmentPages.length + deferredMaterialPdfPageCount : 0;
+  const overviewPageNumber = balloonedReportPageCount + 1;
+  const characteristicStartPage = overviewPageNumber + overviewPageCount;
+  const measuredStartPage = characteristicStartPage + characteristicPageCount;
+  const releasePageNumber = measuredStartPage + measuredPageCount;
+  const chartStartPage = releasePageNumber + releasePageCount;
+  const totalPages = balloonedReportPageCount
+    + overviewPageCount
+    + characteristicPageCount
+    + measuredPageCount
+    + releasePageCount
+    + chartPageCount
+    + materialAttachmentPageCount;
   const footer = (pageNumber) => (
     <div className="inspection-print-footer">
       <span>{selectedReport.reportId || "N/A"}</span>
@@ -13769,8 +14638,9 @@ function PrintInspectionReport({ jobId, partId, reportId = "", exportOptions = d
       <span>{selectedReport.status || "Draft"}</span>
     </div>
   );
-  const drawingOverviewItems = [
+  const drawingOverviewItems = (drawingPageNumber = 1, drawingPageCount = 1) => [
     ["Drawing File", balloonedDocument ? (balloonedDocument.originalFilename || balloonedDocument.storedFilename) : "No ballooned drawing generated"],
+    ["Drawing Page", `${drawingPageNumber} of ${drawingPageCount}`],
     ["Drawing Revision", selectedReport.traceability?.drawingRevision],
     ["Job / Work Order", job.jobNumber || job.id],
     ["Customer", job.customer || "No customer"]
@@ -13805,21 +14675,47 @@ function PrintInspectionReport({ jobId, partId, reportId = "", exportOptions = d
   ];
   return (
     <div className="print-shell inspection-print-shell inspection-print-ready">
-      {options.includeBalloonedDrawing ? <section className="print-page inspection-balloon-report-page">
-        <header className="inspection-report-header">
-          <div>
-            <span>Ballooned Drawing</span>
-            <h1>{part.partNumber || part.partName || "Part"}</h1>
-          </div>
-          <div className="inspection-report-job">
-            <strong>{selectedReport.reportId || "N/A"}</strong>
-            <span>{selectedReport.status || "Draft"}</span>
-          </div>
-        </header>
-        <PrintInfoPanel items={drawingOverviewItems} className="inspection-cover-meta" />
-        <PrintPdfPage fileUrl={balloonedUrl} pageNumber={1} />
-        {footer(++pageCounter)}
-      </section> : null}
+      {options.includeBalloonedDrawing ? (
+        balloonedUrl ? (
+          <PrintPdfDocumentPages
+            fileUrl={balloonedUrl}
+            onPageCount={setBalloonedDrawingPageCount}
+            renderPage={(drawingPageNumber, drawingPageCount) => (
+              <section key={`ballooned-drawing-page-${drawingPageNumber}`} className="print-page inspection-balloon-report-page">
+                <header className="inspection-report-header">
+                  <div>
+                    <span>Ballooned Drawing</span>
+                    <h1>{part.partNumber || part.partName || "Part"}</h1>
+                  </div>
+                  <div className="inspection-report-job">
+                    <strong>{selectedReport.reportId || "N/A"}</strong>
+                    <span>{selectedReport.status || "Draft"}</span>
+                  </div>
+                </header>
+                <PrintInfoPanel items={drawingOverviewItems(drawingPageNumber, drawingPageCount)} className="inspection-cover-meta" />
+                <PrintPdfPage fileUrl={balloonedUrl} pageNumber={drawingPageNumber} />
+                {footer(drawingPageNumber)}
+              </section>
+            )}
+          />
+        ) : (
+          <section className="print-page inspection-balloon-report-page">
+            <header className="inspection-report-header">
+              <div>
+                <span>Ballooned Drawing</span>
+                <h1>{part.partNumber || part.partName || "Part"}</h1>
+              </div>
+              <div className="inspection-report-job">
+                <strong>{selectedReport.reportId || "N/A"}</strong>
+                <span>{selectedReport.status || "Draft"}</span>
+              </div>
+            </header>
+            <PrintInfoPanel items={drawingOverviewItems(1, 1)} className="inspection-cover-meta" />
+            <PrintPdfPage fileUrl={balloonedUrl} pageNumber={1} />
+            {footer(1)}
+          </section>
+        )
+      ) : null}
       <section className="print-page inspection-report-page">
         <header className="inspection-report-header">
           <div>
@@ -13834,7 +14730,7 @@ function PrintInspectionReport({ jobId, partId, reportId = "", exportOptions = d
         </header>
         <PrintInfoPanel items={inspectionOverviewItems} className="inspection-overview-info" />
         {options.includeMaterialCerts ? <InspectionMaterialCerts linkedMaterials={linkedMaterials} materialCerts={materialCerts} /> : null}
-        {footer(++pageCounter)}
+        {footer(overviewPageNumber)}
       </section>
       {options.includeCharacteristics ? (characteristicPages.length ? characteristicPages : [[]]).map((pageCharacteristics, pageIndex) => (
         <section key={`inspection-characteristics-page-${pageIndex}`} className="print-page inspection-report-page inspection-detail-page">
@@ -13851,13 +14747,24 @@ function PrintInspectionReport({ jobId, partId, reportId = "", exportOptions = d
           </header>
           <section className="inspection-print-section">
             <h2>Characteristics{characteristicPages.length > 1 ? ` (${pageIndex + 1} of ${characteristicPages.length})` : ""}</h2>
-            <table className="print-table compact">
+            <table className="print-table compact inspection-characteristics-table">
+              <colgroup>
+                <col className="inspection-characteristic-number-col" />
+                <col className="inspection-characteristic-description-col" />
+                <col className="inspection-characteristic-value-col" />
+                <col className="inspection-characteristic-value-col" />
+                <col className="inspection-characteristic-value-col" />
+                <col className="inspection-characteristic-units-col" />
+                <col className="inspection-characteristic-tool-col" />
+                <col className="inspection-characteristic-critical-col" />
+              </colgroup>
               <thead>
                 <tr><th>#</th><th>Requirement / Description</th><th>Nominal</th><th>Lower</th><th>Upper</th><th>Units</th><th>Gage / Tool ID</th><th>Critical</th></tr>
               </thead>
               <tbody>
                 {pageCharacteristics.map((item) => {
                   const limits = characteristicLimitDisplay(item, "");
+                  const toolId = measurementToolIdLabel(item);
                   return (
                     <tr key={item.id}>
                       <td>{item.number}</td>
@@ -13866,7 +14773,7 @@ function PrintInspectionReport({ jobId, partId, reportId = "", exportOptions = d
                       <td>{limits.lower || "N/A"}</td>
                       <td>{limits.upper || "N/A"}</td>
                       <td>{item.units || snapshot.units || "N/A"}</td>
-                      <td>{measurementToolIdLabel(item)}</td>
+                      <td className="inspection-characteristic-tool-cell" title={toolId}>{toolId}</td>
                       <td>{item.criticalCharacteristic ? "Yes" : "No"}</td>
                     </tr>
                   );
@@ -13875,68 +14782,97 @@ function PrintInspectionReport({ jobId, partId, reportId = "", exportOptions = d
             </table>
             {!pageCharacteristics.length ? <div className="traveler-empty-state">No inspection characteristics defined.</div> : null}
           </section>
-          {footer(++pageCounter)}
+          {footer(characteristicStartPage + pageIndex)}
         </section>
       )) : null}
-      {options.includeMeasuredInstances ? (measuredInstancePages.length ? measuredInstancePages : [[]]).map((pageInstances, pageIndex) => (
-        <section key={`inspection-measured-page-${pageIndex}`} className="print-page inspection-report-page inspection-detail-page">
-          <header className="inspection-report-header">
-            <div>
-              <span>Measured Instances</span>
-              <h1>{part.partNumber || part.partName || "Part"}</h1>
-              <p>{selectedReport.reportId || "N/A"}</p>
-            </div>
-            <div className="inspection-report-job">
-              <strong>{job.jobNumber || job.id}</strong>
-              <span>{job.customer || "No customer"}</span>
-            </div>
-          </header>
-          <section className="inspection-print-section">
-            <div className="inspection-section-header-row">
-              <h2>Measured Instances{measuredInstancePages.length > 1 ? ` (${pageIndex + 1} of ${measuredInstancePages.length})` : ""}</h2>
-              <div className="inspection-color-key">
-                <span><i className="inspection-color-chip pass" /> In spec</span>
-                <span><i className="inspection-color-chip fail" /> Out of spec</span>
+      {options.includeMeasuredInstances ? measuredInstancePages.map((measuredPage, pageIndex) => {
+        return (
+          <section key={`inspection-measured-page-${pageIndex}`} className="print-page inspection-report-page inspection-detail-page">
+            <header className="inspection-report-header">
+              <div>
+                <span>Measured Instances</span>
+                <h1>{part.partNumber || part.partName || "Part"}</h1>
+                <p>{selectedReport.reportId || "N/A"}</p>
               </div>
-            </div>
-            <div className="inspection-selected-summary">
-              <span>Inspected: <strong>{summary.inspected}</strong></span>
-              <span>Accepted: <strong>{summary.accepted}</strong></span>
-              <span>Rejected: <strong>{summary.rejected}</strong></span>
-              <span>Failed Characteristics: <strong>{summary.failedCharacteristics.length ? summary.failedCharacteristics.join(", ") : "None"}</strong></span>
-            </div>
-            <table className="print-table compact">
-              <thead>
-                <tr>
-                  <th>Instance</th><th>Inspector</th><th>Date</th>
-                  {snapshot.characteristics.map((item) => <th key={item.id}>{item.number}</th>)}
-                </tr>
-              </thead>
-              <tbody>
-                {pageInstances.map((instance) => (
-                  <tr key={instance.id}>
-                    <td>{instance.label}</td>
-                    <td>{instance.inspector || "-"}</td>
-                    <td>{String(instance.inspectedAt || "").slice(0, 10)}</td>
-                    {snapshot.characteristics.map((characteristic) => {
-                      const result = instance.results?.[characteristic.id] || {};
-                      const value = inspectionMeasuredValue(result);
-                      const status = inspectionResultStatus(characteristicMap.get(characteristic.id), result);
-                      return (
-                        <td key={`${instance.id}-${characteristic.id}`} className={status ? `inspection-print-result-cell ${status.toLowerCase()}` : "inspection-print-result-cell"}>
-                          {value || "-"}{status === "Fail" ? " FAIL" : ""}
-                        </td>
-                      );
-                    })}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            {!pageInstances.length ? <div className="traveler-empty-state">No measured instances entered.</div> : null}
+              <div className="inspection-report-job">
+                <strong>{job.jobNumber || job.id}</strong>
+                <span>{job.customer || "No customer"}</span>
+              </div>
+            </header>
+            <section className="inspection-print-section">
+              <div className="inspection-section-header-row">
+                <h2>Measured Instances{measuredInstancePages.length > 1 ? ` (${pageIndex + 1} of ${measuredInstancePages.length})` : ""}</h2>
+                <div className="inspection-color-key">
+                  <span><i className="inspection-color-chip pass" /> In spec</span>
+                  <span><i className="inspection-color-chip fail" /> Out of spec</span>
+                </div>
+              </div>
+              <div className="inspection-selected-summary">
+                <span>Inspected: <strong>{summary.inspected}</strong></span>
+                <span>Accepted: <strong>{summary.accepted}</strong></span>
+                <span>Rejected: <strong>{summary.rejected}</strong></span>
+                <span>Failed Characteristics: <strong>{summary.failedCharacteristics.length ? summary.failedCharacteristics.join(", ") : "None"}</strong></span>
+              </div>
+              {measuredPage.blocks?.length ? (
+                <div className="inspection-measured-table-stack">
+                  {measuredPage.blocks.map((block, blockIndex) => {
+                    const pageCharacteristics = block.pageCharacteristics || [];
+                    const pageInstances = block.pageInstances || [];
+                    const firstCharacteristic = pageCharacteristics[0]?.number || "";
+                    const lastCharacteristic = pageCharacteristics[pageCharacteristics.length - 1]?.number || "";
+                    const firstInstance = pageInstances[0]?.label || "";
+                    const lastInstance = pageInstances[pageInstances.length - 1]?.label || "";
+                    return (
+                      <div key={`${block.instanceGroupIndex}-${block.characteristicGroupIndex}-${blockIndex}`} className="inspection-measured-table-block">
+                        <div className="inspection-measured-table-caption">
+                          <span>Dimensions {firstCharacteristic || "?"}{lastCharacteristic && lastCharacteristic !== firstCharacteristic ? `-${lastCharacteristic}` : ""}</span>
+                          <span>Samples {firstInstance || "?"}{lastInstance && lastInstance !== firstInstance ? `-${lastInstance}` : ""}</span>
+                        </div>
+                        <table className="print-table compact inspection-measured-table">
+                          <colgroup>
+                            <col className="inspection-measured-instance-col" />
+                            <col className="inspection-measured-inspector-col" />
+                            <col className="inspection-measured-date-col" />
+                            {pageCharacteristics.map((item) => <col key={item.id} className="inspection-measured-value-col" />)}
+                          </colgroup>
+                          <thead>
+                            <tr>
+                              <th>Instance</th><th>Inspector</th><th>Date</th>
+                              {pageCharacteristics.map((item) => <th key={item.id}>{item.number}</th>)}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {pageInstances.map((instance) => (
+                              <tr key={instance.id}>
+                                <td>{instance.label}</td>
+                                <td>{instance.inspector || "-"}</td>
+                                <td>{String(instance.inspectedAt || "").slice(0, 10)}</td>
+                                {pageCharacteristics.map((characteristic) => {
+                                  const result = instance.results?.[characteristic.id] || {};
+                                  const value = inspectionMeasuredValue(result);
+                                  const status = inspectionResultStatus(characteristicMap.get(characteristic.id), result);
+                                  return (
+                                    <td key={`${instance.id}-${characteristic.id}`} className={status ? `inspection-print-result-cell ${status.toLowerCase()}` : "inspection-print-result-cell"}>
+                                      {value || "-"}{status === "Fail" ? " FAIL" : ""}
+                                    </td>
+                                  );
+                                })}
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : null}
+              {!measuredPage.hasInstances ? <div className="traveler-empty-state">No measured instances entered.</div> : null}
+              {measuredPage.hasInstances && !measuredPage.hasCharacteristics ? <div className="traveler-empty-state">No inspection characteristics defined.</div> : null}
+            </section>
+            {footer(measuredStartPage + pageIndex)}
           </section>
-          {footer(++pageCounter)}
-        </section>
-      )) : null}
+        );
+      }) : null}
       {releasePageNeeded ? (
         <section className="print-page inspection-report-page inspection-detail-page">
           <header className="inspection-report-header">
@@ -13960,7 +14896,7 @@ function PrintInspectionReport({ jobId, partId, reportId = "", exportOptions = d
             </div>
           </section> : null}
           {options.includeToolCertificationHistory ? <InspectionToolCertificationHistory instrumentBundles={instrumentBundles} /> : null}
-          {footer(++pageCounter)}
+          {footer(releasePageNumber)}
         </section>
       ) : null}
       {options.includeXBarCharts && chartPages.length ? chartPages.map((pageCharts, pageIndex) => (
@@ -13990,7 +14926,7 @@ function PrintInspectionReport({ jobId, partId, reportId = "", exportOptions = d
               ))}
             </div>
           </section>
-          {footer(++pageCounter)}
+          {footer(chartStartPage + pageIndex)}
         </section>
       )) : options.includeXBarCharts ? (
         <section className="print-page inspection-report-page inspection-chart-page">
@@ -14008,7 +14944,7 @@ function PrintInspectionReport({ jobId, partId, reportId = "", exportOptions = d
           <section className="inspection-print-section">
             <div className="traveler-empty-state">No numeric inspection data available for X-bar charts yet.</div>
           </section>
-          {footer(++pageCounter)}
+          {footer(chartStartPage)}
         </section>
       ) : null}
       {options.includeMaterialCerts ? materialAttachmentPages.map((attachment) => (
@@ -14030,7 +14966,7 @@ function InspectionMaterialCerts({ linkedMaterials = [], materialCerts = [] }) {
   return (
     <section className="inspection-print-section">
       <h2>Material Certs</h2>
-      <table className="print-table compact">
+      <table className="print-table compact inspection-material-certs-table">
         <thead>
           <tr><th>Material</th><th>Supplier</th><th>Lot</th><th>Heat</th><th>Cert / Attachment</th><th>Type</th><th>Rev</th><th>Attached</th></tr>
         </thead>
@@ -14382,6 +15318,11 @@ function SaveStatePill({ state }) {
     error: "Save error"
   };
   return <div className={`save-state-pill ${state || "saved"}`}>{labels[state] || labels.saved}</div>;
+}
+
+function LockStatePill({ state }) {
+  const normalized = state?.status || "unlocked";
+  return <div className={`lock-state-pill ${normalized}`}>{lockStateMessage(state)}</div>;
 }
 
 function LoadingScreen({ message }) {

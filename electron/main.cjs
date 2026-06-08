@@ -250,7 +250,7 @@ function requireBoolean(value, label = "value") {
 }
 
 const IPC_ARG_RULES = {
-  "save-preferences": [requireRecord],
+  "save-preferences": [requireRecord, requireOptionalObject],
   "create-backup": [requireOptionalObject],
   "list-backups": [requireOptionalObject],
   "restore-backup": [requireOptionalPath],
@@ -269,7 +269,7 @@ const IPC_ARG_RULES = {
   "get-time-clock-dashboard": [requireOptionalObject],
   "list-nonconformances": [requireOptionalObject],
   "load-nonconformance": [requireId, requireOptionalObject],
-  "save-nonconformance": [requireRecord],
+  "save-nonconformance": [requireRecord, requireOptionalObject],
   "archive-nonconformance": [requireId],
   "unarchive-nonconformance": [requireId],
   "delete-nonconformance": [requireId],
@@ -283,7 +283,7 @@ const IPC_ARG_RULES = {
   "revise-nonconformance-attachment": [requireId, requireId],
   "delete-nonconformance-attachment": [requireId, requireId],
   "load-kanban-card": [requireId, requireOptionalObject],
-  "save-kanban-card": [requireRecord],
+  "save-kanban-card": [requireRecord, requireOptionalObject],
   "archive-kanban-card": [requireId],
   "unarchive-kanban-card": [requireId],
   "delete-kanban-card": [requireId],
@@ -298,9 +298,9 @@ const IPC_ARG_RULES = {
   "generate-kanban-image": [requireRecord],
   "export-kanban-pdf": [requireId, requireOptionalPath, (value) => (value == null || value === "" ? value : requireId(value, "size ID")), requireOptionalObject],
   "export-material-pdf": [requireId, requireOptionalPath, (value) => (value == null || value === "" ? value : requireId(value, "size ID")), requireOptionalObject],
-  "save-customer": [requireRecord],
+  "save-customer": [requireRecord, requireOptionalObject],
   "load-job": [requireId, requireOptionalObject],
-  "save-job": [requireRecord],
+  "save-job": [requireRecord, requireOptionalObject],
   "archive-job": [requireId],
   "unarchive-job": [requireId],
   "delete-job": [requireId],
@@ -308,7 +308,7 @@ const IPC_ARG_RULES = {
   "import-xometry-purchase-orders": [requireOptionalFilePathArray],
   "import-xometry-travelers": [requireId, requireOptionalFilePathArray],
   "choose-job-documents": [requireId],
-  "choose-part-documents": [requireId, requireId],
+  "choose-part-documents": [requireId, requireId, requireOptionalObject],
   "open-job-document": [requireId, requireId],
   "open-part-document": [requireId, requireId, requireId],
   "open-job-document-revision": [requireId, requireId, requireNonNegativeInteger],
@@ -323,12 +323,12 @@ const IPC_ARG_RULES = {
   "revise-part-document": [requireId, requireId, requireId],
   "choose-operation-images": [requireId, requireId, requireId],
   "export-job-pdf": [requireId, requireOptionalPath],
-  "save-part-inspection": [requireId, requireId, requireRecord],
+  "save-part-inspection": [requireId, requireId, requireRecord, requireOptionalObject],
   "extract-part-inspection-from-drawing": [requireId, requireId, requireOptionalObject],
   "generate-part-ballooned-drawing-pdf": [requireId, requireId, requireId],
   "export-part-inspection-pdf": [requireId, requireId, requireOptionalPath, (value) => (value == null || value === "" ? value : requireId(value, "report ID")), requireOptionalObject],
   "load-material": [requireId, requireOptionalObject],
-  "save-material": [requireRecord],
+  "save-material": [requireRecord, requireOptionalObject],
   "archive-material": [requireId],
   "choose-material-attachments": [requireId],
   "open-material-attachment": [requireId, requireId],
@@ -338,15 +338,18 @@ const IPC_ARG_RULES = {
   "revise-material-attachment": [requireId, requireId],
   "delete-material-attachment": [requireId, requireId],
   "load-instrument": [requireId, requireOptionalObject],
-  "save-instrument": [requireRecord],
+  "save-instrument": [requireRecord, requireOptionalObject],
   "archive-instrument": [requireId],
   "save-standard": [requireRecord],
-  "save-library": [requireRecord],
+  "save-library": [requireRecord, requireOptionalObject],
   "delete-library": [requireId],
-  "save-template": [requireRecord],
+  "save-template": [requireRecord, requireOptionalObject],
   "delete-template": [requireId],
-  "acquire-lock": [requireId, requireId, requireOptionalPath],
-  "release-lock": [requireId, requireId],
+  "get-lock-status": [requireId, requireId],
+  "acquire-lock": [requireId, requireId, requireOptionalObject],
+  "renew-lock": [requireId, requireId, requireId],
+  "release-lock": [requireId, requireId, (value) => (value == null || value === "" ? value : requireId(value, "lock token"))],
+  "take-over-lock": [requireId, requireId, (value) => (value == null || value === "" ? value : requireId(value, "previous lock token")), requireOptionalObject],
   "read-audit-log": [(value) => (value == null ? value : requireNonNegativeInteger(value, "audit log limit"))]
 };
 
@@ -721,8 +724,10 @@ app.whenReady().then(async () => {
   registerIpc("create-backup", (_event, options) => backend.createBackup(options || {}));
   registerIpc("restore-backup", (_event, backupPath) => backend.restoreBackup(backupPath));
   registerIpc("run-automatic-backup-if-due", (_event, options) => backend.runAutomaticBackupIfDue(options || {}));
-  registerIpc("save-preferences", async (_event, preferences) => {
-    const saved = await backend.savePreferences(preferences);
+  const saveOptions = (options) => ({ ...(options || {}), requireLock: false });
+
+  registerIpc("save-preferences", async (_event, preferences, options) => {
+    const saved = await backend.savePreferences(preferences, saveOptions(options));
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.setTitle(String(saved.windowTitle || saved.appTitle || "AMERP"));
       if (saved.appIconPath) {
@@ -752,7 +757,7 @@ app.whenReady().then(async () => {
   registerIpc("get-time-clock-dashboard", (_event, filters) => backend.getTimeClockDashboard(filters || {}));
   registerIpc("list-nonconformances", (_event, filters) => backend.listNonconformances(filters || {}));
   registerIpc("load-nonconformance", (_event, id, options) => backend.loadNonconformance(id, options || {}));
-  registerIpc("save-nonconformance", (_event, record) => backend.saveNonconformance(record));
+  registerIpc("save-nonconformance", (_event, record, options) => backend.saveNonconformance(record, saveOptions(options)));
   registerIpc("archive-nonconformance", (_event, id) => backend.archiveNonconformance(id));
   registerIpc("unarchive-nonconformance", (_event, id) => backend.unarchiveNonconformance(id));
   registerIpc("delete-nonconformance", (_event, id) => backend.deleteNonconformance(id));
@@ -768,7 +773,7 @@ app.whenReady().then(async () => {
   registerIpc("generate-next-nonconformance-number", () => backend.generateNextNonconformanceNumber());
   registerIpc("list-kanban-cards", () => backend.listKanbanCards());
   registerIpc("load-kanban-card", (_event, id, options) => backend.loadKanbanCard(id, options || {}));
-  registerIpc("save-kanban-card", (_event, card) => backend.saveKanbanCard(card));
+  registerIpc("save-kanban-card", (_event, card, options) => backend.saveKanbanCard(card, saveOptions(options)));
   registerIpc("archive-kanban-card", (_event, id) => backend.archiveKanbanCard(id));
   registerIpc("unarchive-kanban-card", (_event, id) => backend.unarchiveKanbanCard(id));
   registerIpc("delete-kanban-card", (_event, id) => backend.deleteKanbanCard(id));
@@ -786,9 +791,9 @@ app.whenReady().then(async () => {
   registerIpc("generate-next-job-number", () => backend.generateNextJobNumber());
   registerIpc("generate-next-kanban-inventory-number", () => backend.generateNextKanbanInventoryNumber());
   registerIpc("list-customers", () => backend.listCustomers());
-  registerIpc("save-customer", (_event, customer) => backend.saveCustomer(customer));
+  registerIpc("save-customer", (_event, customer, options) => backend.saveCustomer(customer, saveOptions(options)));
   registerIpc("load-job", (_event, id, options) => backend.loadJob(id, options || {}));
-  registerIpc("save-job", (_event, job) => backend.saveJob(job));
+  registerIpc("save-job", (_event, job, options) => backend.saveJob(job, saveOptions(options)));
   registerIpc("archive-job", (_event, id) => backend.archiveJob(id));
   registerIpc("unarchive-job", (_event, id) => backend.unarchiveJob(id));
   registerIpc("delete-job", (_event, id) => backend.deleteJob(id));
@@ -797,7 +802,7 @@ app.whenReady().then(async () => {
   registerIpc("import-xometry-purchase-orders", (_event, filePaths) => backend.importXometryPurchaseOrders(filePaths || null, mainWindow));
   registerIpc("import-xometry-travelers", (_event, jobId, filePaths) => backend.importXometryTravelers(jobId, filePaths || null, mainWindow));
 registerIpc("choose-job-documents", (_event, jobId) => backend.chooseJobDocuments(jobId, mainWindow));
-registerIpc("choose-part-documents", (_event, jobId, partId) => backend.choosePartDocuments(jobId, partId, mainWindow));
+registerIpc("choose-part-documents", (_event, jobId, partId, options) => backend.choosePartDocuments(jobId, partId, mainWindow, options || {}));
 registerIpc("open-job-document", (_event, jobId, documentId) => backend.openJobDocument(jobId, documentId));
 registerIpc("open-part-document", (_event, jobId, partId, documentId) => backend.openPartDocument(jobId, partId, documentId));
 registerIpc("open-job-document-revision", (_event, jobId, documentId, revisionIndex) => backend.openJobDocumentRevision(jobId, documentId, revisionIndex));
@@ -813,14 +818,14 @@ registerIpc("revise-part-document", (_event, jobId, partId, documentId) => backe
   registerIpc("choose-operation-images", (_event, jobId, partId, operationId) => backend.chooseOperationImages(jobId, partId, operationId, mainWindow));
   registerIpc("export-job-pdf", (_event, jobId, destinationPath) => backend.exportJobPdf(jobId, destinationPath));
   registerIpc("generate-next-inspection-report-number", () => backend.generateNextInspectionReportNumber());
-  registerIpc("save-part-inspection", (_event, jobId, partId, inspection) => backend.savePartInspection(jobId, partId, inspection));
+  registerIpc("save-part-inspection", (_event, jobId, partId, inspection, options) => backend.savePartInspection(jobId, partId, inspection, saveOptions(options)));
   registerIpc("extract-part-inspection-from-drawing", (_event, jobId, partId, source) => backend.extractPartInspectionFromDrawing(jobId, partId, source || {}, mainWindow));
   registerIpc("generate-part-ballooned-drawing-pdf", (_event, jobId, partId, drawingDocumentId) => backend.generatePartBalloonedDrawingPdf(jobId, partId, drawingDocumentId));
   registerIpc("export-part-inspection-pdf", (_event, jobId, partId, destinationPath, reportId, options) => backend.exportPartInspectionPdf(jobId, partId, destinationPath, reportId, options || {}));
 
   registerIpc("list-materials", () => backend.listMaterials());
   registerIpc("load-material", (_event, id, options) => backend.loadMaterial(id, options || {}));
-  registerIpc("save-material", (_event, material) => backend.saveMaterial(material));
+  registerIpc("save-material", (_event, material, options) => backend.saveMaterial(material, saveOptions(options)));
   registerIpc("archive-material", (_event, id) => backend.archiveMaterial(id));
   registerIpc("generate-material-serial", () => backend.generateMaterialSerial());
   registerIpc("choose-material-attachments", (_event, materialId) => backend.chooseMaterialAttachments(materialId, mainWindow));
@@ -833,24 +838,27 @@ registerIpc("revise-part-document", (_event, jobId, partId, documentId) => backe
 
   registerIpc("list-instruments", () => backend.listInstruments());
   registerIpc("load-instrument", (_event, id, options) => backend.loadInstrument(id, options || {}));
-  registerIpc("save-instrument", (_event, payload) => backend.saveInstrument(payload));
+  registerIpc("save-instrument", (_event, payload, options) => backend.saveInstrument(payload, saveOptions(options)));
   registerIpc("archive-instrument", (_event, id) => backend.archiveInstrument(id));
   registerIpc("list-standards", () => backend.listStandards());
   registerIpc("save-standard", (_event, standard) => backend.saveStandard(standard));
 
   registerIpc("load-libraries", () => backend.loadLibraries());
-  registerIpc("save-library", (_event, library) => backend.saveLibrary(library));
+  registerIpc("save-library", (_event, library, options) => backend.saveLibrary(library, saveOptions(options)));
   registerIpc("delete-library", (_event, name) => backend.deleteLibrary(name));
   registerIpc("load-templates", () => backend.loadTemplates());
-  registerIpc("save-template", (_event, template) => backend.saveTemplate(template));
+  registerIpc("save-template", (_event, template, options) => backend.saveTemplate(template, saveOptions(options)));
   registerIpc("delete-template", (_event, id) => backend.deleteTemplate(id));
 
   registerIpc("import-legacy-setup", () => backend.importLegacySetupSheetData(mainWindow));
   registerIpc("import-legacy-materials", () => backend.importLegacyMaterialsData(mainWindow));
   registerIpc("import-legacy-metrology", () => backend.importLegacyMetrologyData(mainWindow));
 
-  registerIpc("acquire-lock", (_event, kind, id, recordPath) => backend.acquireLock(kind, id, recordPath));
-  registerIpc("release-lock", (_event, kind, id) => backend.releaseLock(kind, id));
+  registerIpc("get-lock-status", (_event, kind, id) => backend.getLockStatus(kind, id));
+  registerIpc("acquire-lock", (_event, kind, id, options) => backend.acquireLock(kind, id, options || {}));
+  registerIpc("renew-lock", (_event, kind, id, token) => backend.renewLock(kind, id, token));
+  registerIpc("release-lock", (_event, kind, id, token) => backend.releaseLock(kind, id, token || ""));
+  registerIpc("take-over-lock", (_event, kind, id, previousToken, options) => backend.takeOverLock(kind, id, previousToken || "", options || {}));
   registerIpc("release-all-locks", () => backend.releaseAllLocksForCurrentOwner());
   registerIpc("rebuild-index", () => backend.rebuildIndex());
   registerIpc("read-audit-log", (_event, limit) => backend.readAuditLog(limit || 200));

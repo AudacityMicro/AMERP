@@ -50,7 +50,8 @@ const {
   generateKanbanReferenceImage
 } = require("./kanban-ai.cjs");
 const {
-  extractInspectionFromDrawing
+  extractInspectionFromDrawing,
+  normalizeAssumedGeneralToleranceSettings
 } = require("./inspection-ai.cjs");
 const {
   parseSubtractPurchaseOrders,
@@ -64,7 +65,8 @@ const BACKUP_FOLDER_NAME = "backups";
 const BACKUP_MANIFEST_FILE = "manifest.json";
 const BACKUP_DATA_FOLDER_NAME = "data";
 const BACKUP_EXCLUDED_ROOTS = new Set(["cache", "locks", BACKUP_FOLDER_NAME]);
-const LOCK_TTL_MS = 15 * 60 * 1000;
+const LOCK_TTL_MS = 2 * 60 * 1000;
+const LOCK_VERSION = 2;
 const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"]);
 const KANBAN_DEEP_LINK_PREFIX = "amerp://open/kanban/";
 const MATERIAL_DEEP_LINK_PREFIX = "amerp://open/material/";
@@ -93,6 +95,76 @@ const DEFAULT_KANBAN_PRINT_SIZES = [
   { id: "kanban-size-3x5", name: '3" x 5"', widthIn: 3, heightIn: 5 },
   { id: "kanban-size-4x6", name: '4" x 6"', widthIn: 4, heightIn: 6 }
 ];
+
+async function pdfPageCount(filePath) {
+  const bytes = await fs.readFile(filePath);
+  const pdfDoc = await PDFDocument.load(bytes);
+  return pdfDoc.getPageCount();
+}
+
+async function drawBalloonsOnPdf(sourceBytes, balloons = []) {
+  const pdfDoc = await PDFDocument.load(sourceBytes);
+  const font = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
+  const pages = pdfDoc.getPages();
+  for (const balloon of balloons || []) {
+    const pageIndex = Math.max(0, Math.min(pages.length - 1, Number(balloon.pageNumber || 1) - 1));
+    const page = pages[pageIndex];
+    const { width, height } = page.getSize();
+    const centerX = Number(balloon.x || 0.5) * width;
+    const centerY = (1 - Number(balloon.y || 0.5)) * height;
+    const label = String(balloon.labelText || "?").trim() || "?";
+    const radius = Math.max(14, Math.min(width, height) * 0.018);
+    const borderColor = balloon.placementSource === "manual" ? rgb(0.96, 0.62, 0.04) : rgb(0.15, 0.39, 0.92);
+    page.drawCircle({
+      x: centerX,
+      y: centerY,
+      size: radius,
+      borderColor,
+      borderWidth: 3,
+      color: rgb(1, 1, 1),
+      opacity: 1
+    });
+    const fontSize = Math.max(10, radius * 0.9);
+    const textWidth = font.widthOfTextAtSize(label, fontSize);
+    page.drawText(label, {
+      x: centerX - (textWidth / 2),
+      y: centerY - (fontSize * 0.33),
+      size: fontSize,
+      font,
+      color: rgb(0.07, 0.09, 0.13)
+    });
+  }
+  return {
+    pdfBytes: await pdfDoc.save(),
+    pageCount: pages.length
+  };
+}
+
+function stripRuntimeMetadata(value) {
+  if (Array.isArray(value)) {
+    return value.map(stripRuntimeMetadata);
+  }
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value)
+      .filter(([key]) => !String(key).startsWith("_lock"))
+      .sort(([left], [right]) => String(left).localeCompare(String(right)))
+      .map(([key, nested]) => [key, stripRuntimeMetadata(nested)]));
+  }
+  return value;
+}
+
+function recordRevision(value) {
+  return crypto.createHash("sha256").update(JSON.stringify(stripRuntimeMetadata(value || null))).digest("hex");
+}
+
+function lockExpired(lock) {
+  const expiresAt = Date.parse(lock?.expiresAt || "");
+  if (Number.isFinite(expiresAt)) {
+    return Date.now() > expiresAt;
+  }
+  const renewedAt = Date.parse(lock?.renewedAt || lock?.acquiredAt || "");
+  return !Number.isFinite(renewedAt) || Date.now() - renewedAt > LOCK_TTL_MS;
+}
 const KANBAN_STATUS_OPTIONS = ["Active", "Unprinted", "Needs Review", "Archived"];
 const NONCONFORMANCE_STATUS_OPTIONS = [
   "Open",
@@ -234,6 +306,7 @@ class ERPBackend {
     this.app = app;
     this.devServerUrl = devServerUrl || "";
     this.pythonPath = pythonPath || "python";
+    this.lockSessionId = randomId("lock-session");
     this.configPath = path.join(app.getPath("userData"), CONFIG_FILE);
     this.wordlistDir = path.join(__dirname, "..", "assets", "wordlists");
   }
@@ -536,6 +609,7 @@ class ERPBackend {
       inspectionReportPrefix: String(preferences?.inspectionReportPrefix || "IR").trim(),
       startingInspectionReportNumber: Number.isFinite(Number(preferences?.startingInspectionReportNumber)) ? Number(preferences.startingInspectionReportNumber) : 1,
       inspectionReportExportOptions,
+      inspectionAiAssumedGeneralTolerances: normalizeAssumedGeneralToleranceSettings(preferences?.inspectionAiAssumedGeneralTolerances),
       nonconformancePrefix: String(preferences?.nonconformancePrefix || "NCR").trim(),
       startingNonconformanceNumber: Number.isFinite(Number(preferences?.startingNonconformanceNumber)) ? Number(preferences.startingNonconformanceNumber) : 1,
       kanbanInventoryPrefix: String(preferences?.kanbanInventoryPrefix || "J03C").trim(),
@@ -566,7 +640,7 @@ class ERPBackend {
     const root = dataRoot || await this.requireDataFolder();
     const preferences = await readJson(this.getPreferencesPath(root), {});
     const aiSettings = await this.loadAiSettings(root);
-    return this.normalizePreferences({ ...preferences, openaiApiKey: aiSettings.openaiApiKey });
+    return this.attachLockRevision(this.normalizePreferences({ ...preferences, openaiApiKey: aiSettings.openaiApiKey }), "preferences", "preferences");
   }
 
   async loadAiSettings(dataRoot = null) {
@@ -585,9 +659,10 @@ class ERPBackend {
     return normalized;
   }
 
-  async savePreferences(preferences) {
+  async savePreferences(preferences, options = {}) {
     const dataRoot = await this.requireDataFolder();
     const current = await this.loadPreferences(dataRoot);
+    await this.assertSaveLock("preferences", "preferences", options, current);
     const hasOpenaiApiKey = Object.prototype.hasOwnProperty.call(preferences || {}, "openaiApiKey");
     const next = this.normalizePreferences({ ...current, ...(preferences || {}) });
     if (hasOpenaiApiKey) {
@@ -1228,34 +1303,160 @@ class ERPBackend {
     return path.join(dataRoot, "locks", `${safeFileName(kind)}-${safeFileName(id)}.json`);
   }
 
-  async acquireLock(kind, id, recordPath) {
-    const dataRoot = await this.requireDataFolder();
-    const lockPath = this.getLockPath(dataRoot, kind, id);
-    const owner = getLockOwner();
-    const existing = await readJson(lockPath, null);
-    if (existing) {
-      const sameOwner = existing.owner?.hostname === owner.hostname
-        && existing.owner?.username === owner.username;
-      const fresh = existing.acquiredAt && (Date.now() - new Date(existing.acquiredAt).getTime()) < LOCK_TTL_MS;
-      if (!sameOwner && fresh) {
-        throw new Error(`${kind} ${id} is currently locked by ${existing.owner?.username || "another user"} on ${existing.owner?.hostname || "another machine"}.`);
-      }
+  currentLockOwner() {
+    return {
+      ...getLockOwner(),
+      sessionId: this.lockSessionId,
+      appVersion: typeof this.app.getVersion === "function" ? this.app.getVersion() : ""
+    };
+  }
+
+  sameLockSession(lock) {
+    return Boolean(lock?.owner?.sessionId && lock.owner.sessionId === this.lockSessionId);
+  }
+
+  lockError(code, message, lock = null, extra = {}) {
+    const error = new Error(message);
+    error.code = code;
+    error.lock = lock ? this.lockStatusPayload(lock) : null;
+    Object.assign(error, extra);
+    return error;
+  }
+
+  lockStatusPayload(lock) {
+    if (!lock) {
+      return { status: "unlocked", canTakeOver: false };
     }
+    const expired = lockExpired(lock);
+    const owned = this.sameLockSession(lock);
+    return {
+      status: owned ? "owned" : (expired ? "stale" : "locked"),
+      kind: lock.kind || "",
+      id: lock.id || "",
+      token: owned ? lock.token || "" : "",
+      owner: lock.owner || {},
+      acquiredAt: lock.acquiredAt || "",
+      renewedAt: lock.renewedAt || lock.acquiredAt || "",
+      expiresAt: lock.expiresAt || "",
+      baseRevision: lock.baseRevision || "",
+      version: lock.version || 1,
+      canTakeOver: !owned && expired
+    };
+  }
+
+  async getLockStatus(kind, id) {
+    const dataRoot = await this.requireDataFolder();
+    const lock = await readJson(this.getLockPath(dataRoot, kind, id), null);
+    return this.lockStatusPayload(lock);
+  }
+
+  async writeLock(kind, id, recordPath = "", baseRevision = "") {
+    const dataRoot = await this.requireDataFolder();
+    const timestamp = nowIso();
     const payload = {
+      version: LOCK_VERSION,
       kind,
       id,
-      recordPath,
-      acquiredAt: nowIso(),
-      owner
+      recordPath: String(recordPath || "").trim(),
+      token: randomId("lock-token"),
+      owner: this.currentLockOwner(),
+      acquiredAt: timestamp,
+      renewedAt: timestamp,
+      expiresAt: new Date(Date.now() + LOCK_TTL_MS).toISOString(),
+      baseRevision: String(baseRevision || "").trim()
     };
-    await writeJson(lockPath, payload);
+    await writeJson(this.getLockPath(dataRoot, kind, id), payload);
     return payload;
   }
 
-  async releaseLock(kind, id) {
+  async acquireLock(kind, id, options = {}) {
     const dataRoot = await this.requireDataFolder();
     const lockPath = this.getLockPath(dataRoot, kind, id);
+    const existing = await readJson(lockPath, null);
+    if (existing) {
+      if (this.sameLockSession(existing)) {
+        return this.renewLock(kind, id, existing.token);
+      }
+      if (!lockExpired(existing)) {
+        await this.appendAudit("lock_acquire_denied", `${kind}:${id}`, `Denied edit lock for ${kind} ${id}; held by ${existing.owner?.username || "another user"} on ${existing.owner?.hostname || "another machine"}.`);
+        throw this.lockError(
+          "LOCK_HELD",
+          `${kind} ${id} is currently locked by ${existing.owner?.username || "another user"} on ${existing.owner?.hostname || "another machine"}.`,
+          existing,
+          { canTakeOver: false }
+        );
+      }
+      throw this.lockError(
+        "LOCK_STALE",
+        `${kind} ${id} has a stale lock from ${existing.owner?.username || "another user"} on ${existing.owner?.hostname || "another machine"}.`,
+        existing,
+        { canTakeOver: true }
+      );
+    }
+    const payload = await this.writeLock(kind, id, options?.recordPath || options || "", options?.baseRevision || "");
+    await this.appendAudit("lock_acquired", `${kind}:${id}`, `Acquired edit lock for ${kind} ${id}.`, { expiresAt: payload.expiresAt });
+    return payload;
+  }
+
+  async takeOverLock(kind, id, previousToken = "", options = {}) {
+    const dataRoot = await this.requireDataFolder();
+    const lockPath = this.getLockPath(dataRoot, kind, id);
+    const existing = await readJson(lockPath, null);
+    if (existing && !lockExpired(existing) && !this.sameLockSession(existing)) {
+      throw this.lockError("LOCK_HELD", `${kind} ${id} still has an active lock.`, existing, { canTakeOver: false });
+    }
+    if (previousToken && existing?.token && previousToken !== existing.token) {
+      throw this.lockError("LOCK_CHANGED", `${kind} ${id} lock changed before takeover.`, existing, { canTakeOver: lockExpired(existing) });
+    }
+    const payload = await this.writeLock(kind, id, options?.recordPath || "", options?.baseRevision || existing?.baseRevision || "");
+    await this.appendAudit("lock_taken_over", `${kind}:${id}`, `Took over stale edit lock for ${kind} ${id}.`, {
+      previousOwner: existing?.owner || null,
+      expiresAt: payload.expiresAt
+    });
+    return payload;
+  }
+
+  async renewLock(kind, id, token) {
+    const dataRoot = await this.requireDataFolder();
+    const lockPath = this.getLockPath(dataRoot, kind, id);
+    const existing = await readJson(lockPath, null);
+    if (!existing) {
+      throw this.lockError("LOCK_MISSING", `${kind} ${id} is no longer locked.`);
+    }
+    if (!this.sameLockSession(existing) || existing.token !== token) {
+      throw this.lockError("LOCK_LOST", `${kind} ${id} lock is owned by another session.`, existing, { canTakeOver: lockExpired(existing) });
+    }
+    if (lockExpired(existing)) {
+      throw this.lockError("LOCK_EXPIRED", `${kind} ${id} lock expired.`, existing, { canTakeOver: true });
+    }
+    const next = {
+      ...existing,
+      renewedAt: nowIso(),
+      expiresAt: new Date(Date.now() + LOCK_TTL_MS).toISOString()
+    };
+    await writeJson(lockPath, next);
+    return next;
+  }
+
+  async releaseLock(kind, id, token = "") {
+    const dataRoot = await this.requireDataFolder();
+    const lockPath = this.getLockPath(dataRoot, kind, id);
+    const existing = await readJson(lockPath, null);
+    if (!existing) {
+      return true;
+    }
+    const owner = getLockOwner();
+    const sameLegacyOwner = !existing.owner?.sessionId
+      && existing.owner?.hostname === owner.hostname
+      && existing.owner?.username === owner.username;
+    if (!this.sameLockSession(existing) && !sameLegacyOwner) {
+      return false;
+    }
+    if (token && existing.token !== token) {
+      return false;
+    }
     await fs.rm(lockPath, { force: true });
+    await this.appendAudit("lock_released", `${kind}:${id}`, `Released edit lock for ${kind} ${id}.`);
     return true;
   }
 
@@ -1272,12 +1473,56 @@ class ERPBackend {
       if (!lock) {
         continue;
       }
-      const sameOwner = lock.owner?.hostname === owner.hostname
-        && lock.owner?.username === owner.username;
+      const sameOwner = lock.owner?.sessionId
+        ? lock.owner.sessionId === this.lockSessionId
+        : (lock.owner?.hostname === owner.hostname && lock.owner?.username === owner.username);
       if (sameOwner) {
         await fs.rm(path.join(locksDir, entry.name), { force: true });
       }
     }
+  }
+
+  attachLockRevision(record, kind, id) {
+    if (!record) {
+      return record;
+    }
+    return {
+      ...record,
+      _lockKind: kind,
+      _lockId: id,
+      _lockBaseRevision: recordRevision(record)
+    };
+  }
+
+  async assertSaveLock(kind, id, options = {}, currentRecord = null) {
+    if (!options?.requireLock) {
+      return true;
+    }
+    const dataRoot = await this.requireDataFolder();
+    const lock = await readJson(this.getLockPath(dataRoot, kind, id), null);
+    if (!lock) {
+      await this.appendAudit("save_lock_advisory_missing", `${kind}:${id}`, `Saved ${kind} ${id} without an advisory in-use marker.`);
+      return true;
+    }
+    if (lockExpired(lock)) {
+      await this.appendAudit("save_lock_advisory_stale", `${kind}:${id}`, `Saved ${kind} ${id}; advisory in-use marker was stale.`);
+      return true;
+    }
+    if (!this.sameLockSession(lock) || lock.token !== options.lockToken) {
+      await this.appendAudit("save_lock_advisory_other_owner", `${kind}:${id}`, `Saved ${kind} ${id}; advisory in-use marker belonged to another session.`);
+      return true;
+    }
+    if (options.baseRevision && currentRecord) {
+      const currentRevision = recordRevision(currentRecord);
+      if (currentRevision !== options.baseRevision) {
+        await this.appendAudit("save_revision_advisory_conflict", `${kind}:${id}`, `Saved ${kind} ${id}; record changed after draft was loaded.`, {
+          currentRevision,
+          baseRevision: options.baseRevision
+        });
+        return true;
+      }
+    }
+    return true;
   }
 
   async loadLibraries() {
@@ -1300,16 +1545,21 @@ class ERPBackend {
     return Object.fromEntries(
       Object.values(libraries)
         .sort((a, b) => Number(a.order || 1000) - Number(b.order || 1000) || String(a.label).localeCompare(String(b.label)))
-        .map((library) => [library.name, library])
+        .map((library) => [library.name, this.attachLockRevision(library, "library", library.name)])
     );
   }
 
-  async saveLibrary(library) {
+  async saveLibrary(library, options = {}) {
     const dataRoot = await this.requireDataFolder();
     const normalized = this.normalizeLibrary(library);
-    await writeJson(path.join(dataRoot, "libraries", `${normalized.name}.json`), normalized);
+    const libraryPath = path.join(dataRoot, "libraries", `${normalized.name}.json`);
+    const existing = await readJson(libraryPath, null);
+    if (existing) {
+      await this.assertSaveLock("library", normalized.name, options, this.normalizeLibrary(existing));
+    }
+    await writeJson(libraryPath, normalized);
     await this.appendAudit("library_saved", normalized.name, `Saved library ${normalized.label}.`);
-    return normalized;
+    return this.attachLockRevision(normalized, "library", normalized.name);
   }
 
   async deleteLibrary(name) {
@@ -1336,10 +1586,12 @@ class ERPBackend {
         defaultSteps: Array.isArray(template.defaultSteps) ? template.defaultSteps : []
       });
     }
-    return templates.sort((a, b) => String(a.name).localeCompare(String(b.name)));
+    return templates
+      .map((template) => this.attachLockRevision(template, "template", template.id))
+      .sort((a, b) => String(a.name).localeCompare(String(b.name)));
   }
 
-  async saveTemplate(template) {
+  async saveTemplate(template, options = {}) {
     const dataRoot = await this.requireDataFolder();
     const normalized = {
       id: template?.id || randomId("template"),
@@ -1349,9 +1601,19 @@ class ERPBackend {
       defaultParameters: Array.isArray(template?.defaultParameters) ? template.defaultParameters : [],
       defaultSteps: Array.isArray(template?.defaultSteps) ? template.defaultSteps : []
     };
-    await writeJson(path.join(dataRoot, "templates", "operations", `${safeFileName(normalized.id)}.json`), normalized);
+    const templatePath = path.join(dataRoot, "templates", "operations", `${safeFileName(normalized.id)}.json`);
+    const existing = await readJson(templatePath, null);
+    if (existing) {
+      await this.assertSaveLock("template", normalized.id, options, {
+        ...existing,
+        libraryNames: this.normalizeTemplateLibraryNames(existing.libraryNames),
+        defaultParameters: Array.isArray(existing.defaultParameters) ? existing.defaultParameters : [],
+        defaultSteps: Array.isArray(existing.defaultSteps) ? existing.defaultSteps : []
+      });
+    }
+    await writeJson(templatePath, normalized);
     await this.appendAudit("template_saved", normalized.id, `Saved template ${normalized.name}.`);
-    return normalized;
+    return this.attachLockRevision(normalized, "template", normalized.id);
   }
 
   normalizeTemplateLibraryNames(libraryNames) {
@@ -1421,6 +1683,7 @@ class ERPBackend {
     }
 
     return customers
+      .map((customer) => this.attachLockRevision(customer, "customer", customer.id))
       .map((customer) => ({
         ...customer,
         jobRefs: (jobRefsByCustomerId.get(customer.id) || [])
@@ -1429,9 +1692,12 @@ class ERPBackend {
       .sort((a, b) => String(a.name).localeCompare(String(b.name)));
   }
 
-  async saveCustomer(customer) {
+  async saveCustomer(customer, options = {}) {
     const dataRoot = await this.requireDataFolder();
     const existing = customer?.id ? await readJson(this.getCustomerRoot(dataRoot, customer.id), null) : null;
+    if (existing) {
+      await this.assertSaveLock("customer", customer.id, options, this.normalizeCustomer(existing));
+    }
     const timestamp = nowIso();
     const normalized = this.normalizeCustomer({
       ...existing,
@@ -1445,7 +1711,7 @@ class ERPBackend {
     await writeJson(this.getCustomerRoot(dataRoot, normalized.id), normalized);
     await this.appendAudit("customer_saved", normalized.id, `Saved customer ${normalized.name}.`);
     const customers = await this.listCustomers();
-    return customers.find((item) => item.id === normalized.id) || { ...normalized, jobRefs: [] };
+    return customers.find((item) => item.id === normalized.id) || this.attachLockRevision({ ...normalized, jobRefs: [] }, "customer", normalized.id);
   }
 
   async upsertNamedCustomer(seed) {
@@ -1511,10 +1777,10 @@ class ERPBackend {
     if (options.acquireLock) {
       await this.acquireLock("kanban", cardId, path.join(root, "card.json"));
     }
-    return this.normalizeKanbanCard(card);
+    return this.attachLockRevision(this.normalizeKanbanCard(card), "kanban", cardId);
   }
 
-  async saveKanbanCard(card) {
+  async saveKanbanCard(card, options = {}) {
     const dataRoot = await this.requireDataFolder();
     const timestamp = nowIso();
     const normalized = this.normalizeKanbanCard({
@@ -1531,6 +1797,10 @@ class ERPBackend {
       }
     }
     const root = this.getKanbanRoot(dataRoot, normalized.id);
+    const existing = await readJson(path.join(root, "card.json"), null);
+    if (existing?.id) {
+      await this.assertSaveLock("kanban", normalized.id, options, this.normalizeKanbanCard(existing));
+    }
     await ensureDir(path.join(root, "assets"));
     await writeJson(path.join(root, "card.json"), normalized);
     await writeText(path.join(root, "history.md"), this.kanbanHistoryMarkdown(normalized));
@@ -3119,12 +3389,12 @@ class ERPBackend {
         }
       }
     }
-    return {
+    return this.attachLockRevision({
       ...header,
       documents: (Array.isArray(header.documents) ? header.documents : []).map((document) => this.normalizeDocument(document)),
       tools: undefined,
       parts
-    };
+    }, "job", jobId);
   }
 
   normalizeDocument(document, categoryFallback = "Other") {
@@ -3860,16 +4130,19 @@ class ERPBackend {
       await this.acquireLock("nonconformance", ncrId, path.join(root, "ncr.json"));
     }
     const normalized = this.normalizeNonconformance(record);
-    return {
+    return this.attachLockRevision({
       ...normalized,
       inspectionContext: await this.buildNonconformanceInspectionContext(normalized)
-    };
+    }, "nonconformance", ncrId);
   }
 
-  async saveNonconformance(record) {
+  async saveNonconformance(record, options = {}) {
     const dataRoot = await this.requireDataFolder();
     const timestamp = nowIso();
     const previousRecord = record?.id ? await this.loadNonconformance(record.id).catch(() => null) : null;
+    if (previousRecord) {
+      await this.assertSaveLock("nonconformance", record.id, options, previousRecord);
+    }
     const normalized = this.normalizeNonconformance({
       ...record,
       createdAt: record?.createdAt || previousRecord?.createdAt || timestamp,
@@ -4494,6 +4767,20 @@ class ERPBackend {
       const numeric = Number(value);
       return Number.isFinite(numeric) ? Math.max(0, Math.min(1, numeric)) : 0.5;
     };
+    const normalizeProposedBalloon = (item) => {
+      if (!item || typeof item !== "object" || Array.isArray(item)) {
+        return null;
+      }
+      return {
+        pageNumber: Number(item?.pageNumber || 1) || 1,
+        x: normalizedCoordinate(item?.x),
+        y: normalizedCoordinate(item?.y),
+        sourceDrawingDocumentId: String(item?.sourceDrawingDocumentId || "").trim(),
+        labelText: String(item?.labelText || "").trim(),
+        confidence: String(item?.confidence || "").trim(),
+        placementSource: String(item?.placementSource || "ai").trim()
+      };
+    };
     const normalizeCharacteristic = (item, index) => ({
       id: item?.id || randomId("characteristic"),
       number: String(item?.number || index + 1).trim(),
@@ -4516,6 +4803,7 @@ class ERPBackend {
       notes: String(item?.notes || "").trim(),
       sourceDrawingDocumentId: String(item?.sourceDrawingDocumentId || "").trim(),
       confidence: String(item?.confidence || "").trim(),
+      proposedBalloon: normalizeProposedBalloon(item?.proposedBalloon),
       active: item?.active !== false
     });
     const normalizeInstance = (item, index) => ({
@@ -4657,7 +4945,7 @@ class ERPBackend {
     return { partCount, operationCount, routeSummary };
   }
 
-  async saveJob(job) {
+  async saveJob(job, options = {}) {
     const dataRoot = await this.requireDataFolder();
     const timestamp = nowIso();
     const parts = (Array.isArray(job?.parts) ? job.parts : []).map((part) => this.normalizePart(part));
@@ -4682,6 +4970,10 @@ class ERPBackend {
       createdAt: job?.createdAt || timestamp,
       updatedAt: timestamp
     };
+    const existingRecord = normalized.id ? await this.loadJob(normalized.id).catch(() => null) : null;
+    if (existingRecord) {
+      await this.assertSaveLock("job", normalized.id, options, existingRecord);
+    }
     const summary = this.summarizeJob(normalized);
     const jobRoot = this.getJobRoot(dataRoot, normalized.id);
     await ensureDir(path.join(jobRoot, "parts"));
@@ -4838,17 +5130,31 @@ class ERPBackend {
     return copied;
   }
 
-  async choosePartDocuments(jobId, partId, mainWindow) {
+  async choosePartDocuments(jobId, partId, mainWindow, options = {}) {
+    const normalizedOptions = options && typeof options === "object" ? options : {};
+    const category = String(normalizedOptions.category || "Other").trim() || "Other";
+    const description = String(normalizedOptions.description || "").trim();
+    const filters = Array.isArray(normalizedOptions.filters)
+      ? normalizedOptions.filters
+        .map((filter) => ({
+          name: String(filter?.name || "Files").trim() || "Files",
+          extensions: Array.isArray(filter?.extensions)
+            ? filter.extensions.map((extension) => String(extension || "").replace(/^\./, "").trim().toLowerCase()).filter(Boolean)
+            : []
+        }))
+        .filter((filter) => filter.extensions.length)
+      : [];
     const result = await dialog.showOpenDialog(mainWindow || null, {
-      title: "Choose Part Documents",
-      properties: ["openFile", "multiSelections"]
+      title: String(normalizedOptions.title || "Choose Part Documents").trim() || "Choose Part Documents",
+      properties: ["openFile", "multiSelections"],
+      ...(filters.length ? { filters } : {})
     });
     if (result.canceled) {
       return [];
     }
     const copied = [];
     for (const sourcePath of result.filePaths) {
-      copied.push(await this.copyPartDocument(jobId, partId, sourcePath));
+      copied.push(await this.copyPartDocument(jobId, partId, sourcePath, category, description));
     }
     return copied;
   }
@@ -5203,12 +5509,13 @@ class ERPBackend {
     return saved;
   }
 
-  async savePartInspection(jobId, partId, inspection) {
+  async savePartInspection(jobId, partId, inspection, options = {}) {
     const job = await this.loadJob(jobId);
     const part = job?.parts?.find((item) => item.id === partId);
     if (!part) {
       throw new Error("Part not found.");
     }
+    await this.assertSaveLock("job", jobId, options, job);
     part.inspection = this.normalizeInspection(inspection);
     const saved = await this.saveJob(job);
     await this.appendAudit("part_inspection_saved", partId, `Saved inspection data for ${part.partNumber || part.partName || partId}.`);
@@ -5229,9 +5536,11 @@ class ERPBackend {
       if (!document) {
         return null;
       }
-      part.documents = [...(part.documents || []), document];
     } else {
       document = (part.documents || []).find((item) => item.id === source?.documentId);
+      if (!document && source?.document?.id === source?.documentId) {
+        document = this.normalizeDocument(source.document);
+      }
     }
     if (!document) {
       throw new Error("Choose a PDF drawing before extracting inspection dimensions.");
@@ -5243,61 +5552,84 @@ class ERPBackend {
     if (!drawingPath || !(await pathExists(drawingPath))) {
       throw new Error("Drawing PDF file could not be found.");
     }
+    const pageCount = await pdfPageCount(drawingPath);
     const extraction = await extractInspectionFromDrawing({
       apiKey: preferences.openaiApiKey,
       filePath: drawingPath,
-      filename: document.originalFilename || document.storedFilename
+      filename: document.originalFilename || document.storedFilename,
+      pageCount,
+      assumedGeneralTolerances: preferences.inspectionAiAssumedGeneralTolerances
     });
-    const inspection = this.normalizeInspection(part.inspection);
-    const existingNumbers = new Set(inspection.characteristics.map((item) => String(item.number || "").toLowerCase()));
+    const existingNumbers = new Set(
+      (Array.isArray(source?.existingCharacteristicNumbers)
+        ? source.existingCharacteristicNumbers
+        : this.normalizeInspection(part.inspection).characteristics.map((item) => item.number)
+      ).map((value) => String(value || "").trim().toLowerCase()).filter(Boolean)
+    );
     const accepted = [];
     const queued = [];
     const balloons = [];
     for (const extracted of extraction.characteristics || []) {
-      const characteristic = this.normalizeInspection({ characteristics: [{ ...extracted, sourceDrawingDocumentId: document.id }] }).characteristics[0];
+      const proposedBalloon = {
+        sourceDrawingDocumentId: document.id,
+        pageNumber: Math.max(1, Math.min(pageCount || 1, Number(extracted.balloon?.pageNumber || 1) || 1)),
+        x: extracted.balloon?.x ?? 0.5,
+        y: extracted.balloon?.y ?? 0.5,
+        labelText: String(extracted.number || "").trim(),
+        confidence: String(extracted.confidence || "").trim(),
+        placementSource: "ai"
+      };
+      const characteristic = this.normalizeInspection({
+        characteristics: [{
+          ...extracted,
+          sourceDrawingDocumentId: document.id,
+          proposedBalloon
+        }]
+      }).characteristics[0];
       const highConfidence = characteristic.confidence === "high"
         && characteristic.nominal
         && characteristic.units
         && (characteristic.gdTolerance || characteristic.plusTolerance || characteristic.minusTolerance || characteristic.lowerLimit || characteristic.upperLimit);
       if (highConfidence && !existingNumbers.has(String(characteristic.number || "").toLowerCase())) {
-        accepted.push(characteristic);
+        const acceptedCharacteristic = { ...characteristic, proposedBalloon: null };
+        accepted.push(acceptedCharacteristic);
         existingNumbers.add(String(characteristic.number || "").toLowerCase());
         balloons.push({
           id: randomId("balloon"),
-          characteristicId: characteristic.id,
+          characteristicId: acceptedCharacteristic.id,
           sourceDrawingDocumentId: document.id,
-          pageNumber: extracted.balloon?.pageNumber || 1,
-          x: extracted.balloon?.x ?? 0.5,
-          y: extracted.balloon?.y ?? 0.5,
-          labelText: characteristic.number,
-          confidence: characteristic.confidence,
+          pageNumber: proposedBalloon.pageNumber,
+          x: proposedBalloon.x,
+          y: proposedBalloon.y,
+          labelText: acceptedCharacteristic.number,
+          confidence: acceptedCharacteristic.confidence,
           placementSource: "ai"
         });
       } else {
         queued.push(characteristic);
       }
     }
-    inspection.characteristics = [...inspection.characteristics, ...accepted];
-    inspection.reviewQueue = [...(inspection.reviewQueue || []), ...queued];
-    inspection.balloons = [...inspection.balloons, ...this.normalizeInspection({ balloons }).balloons];
-    inspection.extractionRuns = [
-      ...(inspection.extractionRuns || []),
-      {
-        id: randomId("inspection-extraction"),
-        sourceDrawingDocumentId: document.id,
-        sourceFilename: document.originalFilename || document.storedFilename,
-        extractedAt: nowIso(),
-        acceptedCount: accepted.length,
-        queuedCount: queued.length,
-        rejectedCount: 0,
-        balloonedCount: balloons.length,
-        warnings: extraction.warnings || [],
-        errors: []
-      }
-    ];
-    part.inspection = this.normalizeInspection(inspection);
-    const saved = await this.saveJob(job);
-    return { job: saved, accepted, queued, warnings: extraction.warnings || [], document };
+    const normalizedBalloons = this.normalizeInspection({ balloons }).balloons;
+    const extractionRun = {
+      id: randomId("inspection-extraction"),
+      sourceDrawingDocumentId: document.id,
+      sourceFilename: document.originalFilename || document.storedFilename,
+      extractedAt: nowIso(),
+      acceptedCount: accepted.length,
+      queuedCount: queued.length,
+      rejectedCount: 0,
+      balloonedCount: normalizedBalloons.length,
+      warnings: extraction.warnings || [],
+      errors: []
+    };
+    return {
+      document,
+      accepted,
+      queued,
+      balloons: normalizedBalloons,
+      extractionRun,
+      warnings: extraction.warnings || []
+    };
   }
 
   async deleteDocumentFiles(dataRoot, document) {
@@ -5424,7 +5756,7 @@ class ERPBackend {
     if (options.acquireLock) {
       await this.acquireLock("material", materialId, path.join(root, "material.json"));
     }
-    return this.normalizeMaterial(material);
+    return this.attachLockRevision(this.normalizeMaterial(material), "material", materialId);
   }
 
   async readSerialWordList(filename) {
@@ -5498,7 +5830,7 @@ class ERPBackend {
     };
   }
 
-  async saveMaterial(material) {
+  async saveMaterial(material, options = {}) {
     const dataRoot = await this.requireDataFolder();
     const normalized = this.normalizeMaterial(material);
     if (!normalized.serialCode) {
@@ -5509,6 +5841,9 @@ class ERPBackend {
     }
     const timestamp = nowIso();
     const existing = await this.loadMaterial(normalized.id);
+    if (existing) {
+      await this.assertSaveLock("material", normalized.id, options, existing);
+    }
     normalized.createdAt = existing?.createdAt || timestamp;
     normalized.updatedAt = timestamp;
     if (!existing) {
@@ -5884,7 +6219,7 @@ class ERPBackend {
       const dataRoot = await this.requireDataFolder();
       await this.acquireLock("instrument", instrumentId, path.join(this.getInstrumentRoot(dataRoot, instrumentId), "instrument.json"));
     }
-    return bundle;
+    return this.attachLockRevision(bundle, "instrument", instrumentId);
   }
 
   normalizeCalibration(calibration) {
@@ -5910,7 +6245,7 @@ class ERPBackend {
     };
   }
 
-  async saveInstrument(payload) {
+  async saveInstrument(payload, options = {}) {
     const dataRoot = await this.requireDataFolder();
     const timestamp = nowIso();
     const instrument = {
@@ -5936,6 +6271,10 @@ class ERPBackend {
     };
     if (!instrument.tool_name) {
       throw new Error("Instrument tool name is required.");
+    }
+    const existing = await this.loadInstrument(instrument.instrument_id).catch(() => null);
+    if (existing) {
+      await this.assertSaveLock("instrument", instrument.instrument_id, options, existing);
     }
     const root = this.getInstrumentRoot(dataRoot, instrument.instrument_id);
     await ensureDir(path.join(root, "calibrations"));
@@ -7300,6 +7639,12 @@ class ERPBackend {
     if (reportId) {
       params.set("reportId", reportId);
     }
+    const includeMaterialCerts = Object.prototype.hasOwnProperty.call(options || {}, "includeMaterialCerts")
+      ? Boolean(options.includeMaterialCerts)
+      : DEFAULT_INSPECTION_REPORT_EXPORT_OPTIONS.includeMaterialCerts;
+    if (includeMaterialCerts) {
+      params.set("deferMaterialPdfCerts", "1");
+    }
     for (const [key, fallback] of Object.entries(DEFAULT_INSPECTION_REPORT_EXPORT_OPTIONS)) {
       const enabled = Object.prototype.hasOwnProperty.call(options || {}, key) ? Boolean(options[key]) : fallback;
       if (!enabled) {
@@ -7316,12 +7661,52 @@ class ERPBackend {
       });
     }
     await this.waitForPrintSelector(printWindow, ".inspection-print-ready");
+    await this.waitForPrintRenderSettled(printWindow);
     const pdf = await printWindow.webContents.printToPDF({
       pageSize: "Letter",
       printBackground: true,
-      margins: { marginType: "default" }
+      margins: {
+        marginType: "custom",
+        top: 0,
+        bottom: 0,
+        left: 0,
+        right: 0
+      }
     });
-    await fs.writeFile(outputPath, pdf);
+    let finalPdf = pdf;
+    if (includeMaterialCerts) {
+      const materialPdfPaths = [];
+      const seenPaths = new Set();
+      for (const materialId of Array.from(new Set(part.requiredMaterialLots || []))) {
+        const material = await this.loadMaterial(materialId);
+        for (const attachment of material?.attachments || []) {
+          const filename = String(attachment.originalFilename || attachment.storedFilename || "").toLowerCase();
+          const isPdf = String(attachment.fileType || "").toUpperCase() === "PDF" || filename.endsWith(".pdf");
+          const sourcePath = this.getStoredDocumentPath(dataRoot, attachment);
+          if (attachment.active === false || !isPdf || !sourcePath || seenPaths.has(sourcePath) || !(await pathExists(sourcePath))) {
+            continue;
+          }
+          seenPaths.add(sourcePath);
+          materialPdfPaths.push(sourcePath);
+        }
+      }
+      if (materialPdfPaths.length) {
+        const mergedPdf = await PDFDocument.load(pdf);
+        for (const materialPdfPath of materialPdfPaths) {
+          try {
+            const sourcePdf = await PDFDocument.load(await fs.readFile(materialPdfPath));
+            const copiedPages = await mergedPdf.copyPages(sourcePdf, sourcePdf.getPageIndices());
+            for (const copiedPage of copiedPages) {
+              mergedPdf.addPage(copiedPage);
+            }
+          } catch (error) {
+            console.warn(`Unable to append material PDF ${materialPdfPath}: ${error.message || error}`);
+          }
+        }
+        finalPdf = await mergedPdf.save();
+      }
+    }
+    await fs.writeFile(outputPath, finalPdf);
     printWindow.close();
     const openError = await shell.openPath(outputPath);
     if (openError) {
@@ -7394,40 +7779,9 @@ class ERPBackend {
     const outputFilename = `${safeFileName(part.partNumber || part.partName || part.id)}-ballooned-${safeFileName(document.originalFilename || document.storedFilename || "drawing.pdf").replace(/\.pdf$/i, "")}-${pdfTimestamp()}.pdf`;
     const outputPath = path.join(this.getPartDocumentsRoot(dataRoot, jobId, partId), outputFilename);
     const sourceBytes = await fs.readFile(sourcePath);
-    const pdfDoc = await PDFDocument.load(sourceBytes);
-    const font = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
     const inspection = this.normalizeInspection(part.inspection);
     const balloons = inspection.balloons.filter((item) => item.sourceDrawingDocumentId === drawingDocumentId);
-    const pages = pdfDoc.getPages();
-    for (const balloon of balloons) {
-      const pageIndex = Math.max(0, Math.min(pages.length - 1, Number(balloon.pageNumber || 1) - 1));
-      const page = pages[pageIndex];
-      const { width, height } = page.getSize();
-      const centerX = Number(balloon.x || 0.5) * width;
-      const centerY = (1 - Number(balloon.y || 0.5)) * height;
-      const label = String(balloon.labelText || "?").trim() || "?";
-      const radius = Math.max(14, Math.min(width, height) * 0.018);
-      const borderColor = balloon.placementSource === "manual" ? rgb(0.96, 0.62, 0.04) : rgb(0.15, 0.39, 0.92);
-      page.drawCircle({
-        x: centerX,
-        y: centerY,
-        size: radius,
-        borderColor,
-        borderWidth: 3,
-        color: rgb(1, 1, 1),
-        opacity: 1
-      });
-      const fontSize = Math.max(10, radius * 0.9);
-      const textWidth = font.widthOfTextAtSize(label, fontSize);
-      page.drawText(label, {
-        x: centerX - (textWidth / 2),
-        y: centerY - (fontSize * 0.33),
-        size: fontSize,
-        font,
-        color: rgb(0.07, 0.09, 0.13)
-      });
-    }
-    const pdfBytes = await pdfDoc.save();
+    const { pdfBytes } = await drawBalloonsOnPdf(sourceBytes, balloons);
     await fs.writeFile(outputPath, pdfBytes);
     const attachment = this.normalizeDocument({
       originalFilename: outputFilename,
@@ -7919,5 +8273,8 @@ function materialDimensionsSummary(form, shapeDimensions, fallback = "") {
 }
 
 module.exports = {
-  ERPBackend
+  ERPBackend,
+  _internals: {
+    drawBalloonsOnPdf
+  }
 };

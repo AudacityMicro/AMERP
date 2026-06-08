@@ -121,6 +121,7 @@ const MATERIAL_CONSTANTS = {
 const DOCUMENT_CATEGORIES = [
   "Model",
   "Drawing",
+  "Photo",
   "Traveler",
   "PO / Customer",
   "Inspection",
